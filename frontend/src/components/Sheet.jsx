@@ -59,6 +59,23 @@ export default function Sheet() {
     const [visibleRowsCount, setVisibleRowsCount] = useState(15);
     const [colStart, setColStart] = useState(1);
     const [visibleColsCount, setVisibleColsCount] = useState(7);
+    const DEFAULT_COL_WIDTH = 112; // px (Tailwind w-28)
+    const DEFAULT_ROW_HEIGHT = 40; // px (Tailwind h-10)
+    const DEFAULT_ROW_LABEL_WIDTH = 40; // px (Tailwind w-10)
+    const DEFAULT_COL_HEADER_HEIGHT = 32; // px
+    const [colWidths, setColWidths] = useState(() => {
+        const map = {};
+        COL_HEADERS.forEach(h => { map[h] = DEFAULT_COL_WIDTH; });
+        return map;
+    });
+    const [rowHeights, setRowHeights] = useState(() => {
+        const map = {};
+        ROW_HEADERS.forEach(r => { map[r] = DEFAULT_ROW_HEIGHT; });
+        return map;
+    });
+    const [rowLabelWidth, setRowLabelWidth] = useState(DEFAULT_ROW_LABEL_WIDTH);
+    const [colHeaderHeight, setColHeaderHeight] = useState(DEFAULT_COL_HEADER_HEIGHT);
+    const dragRef = useRef({ type: null, label: null, startPos: 0, startSize: 0 });
 
     const rowEnd = Math.min(rowStart + visibleRowsCount - 1, ROWS);
     const colEnd = Math.min(colStart + visibleColsCount - 1, COLS);
@@ -169,6 +186,73 @@ export default function Sheet() {
             ws.current.send(JSON.stringify(msg));
         }
     };
+
+    const onGlobalMouseMove = (e) => {
+        const { type, label, startPos, startSize } = dragRef.current || {};
+        if (!type) return;
+        if (type === 'col') {
+            const delta = e.clientX - startPos;
+            const newSize = Math.max(40, startSize + delta);
+            setColWidths(prev => ({ ...prev, [label]: newSize }));
+        } else if (type === 'row') {
+            const delta = e.clientY - startPos;
+            const newSize = Math.max(24, startSize + delta);
+            setRowHeights(prev => ({ ...prev, [label]: newSize }));
+        } else if (type === 'rowLabelWidth') {
+            const delta = e.clientX - startPos;
+            const newSize = Math.max(30, startSize + delta);
+            setRowLabelWidth(newSize);
+        } else if (type === 'headerHeight') {
+            const delta = e.clientY - startPos;
+            const newSize = Math.max(24, startSize + delta);
+            setColHeaderHeight(newSize);
+        }
+    };
+
+    const onGlobalMouseUp = () => {
+        dragRef.current = { type: null, label: null, startPos: 0, startSize: 0 };
+        window.removeEventListener('mousemove', onGlobalMouseMove);
+        window.removeEventListener('mouseup', onGlobalMouseUp);
+    };
+
+    const onColResizeMouseDown = (label, e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dragRef.current = { type: 'col', label, startPos: e.clientX, startSize: colWidths[label] || DEFAULT_COL_WIDTH };
+        window.addEventListener('mousemove', onGlobalMouseMove);
+        window.addEventListener('mouseup', onGlobalMouseUp);
+    };
+
+    const onRowResizeMouseDown = (label, e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dragRef.current = { type: 'row', label, startPos: e.clientY, startSize: rowHeights[label] || DEFAULT_ROW_HEIGHT };
+        window.addEventListener('mousemove', onGlobalMouseMove);
+        window.addEventListener('mouseup', onGlobalMouseUp);
+    };
+
+    const onRowLabelWidthMouseDown = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dragRef.current = { type: 'rowLabelWidth', label: 'rowLabel', startPos: e.clientX, startSize: rowLabelWidth };
+        window.addEventListener('mousemove', onGlobalMouseMove);
+        window.addEventListener('mouseup', onGlobalMouseUp);
+    };
+
+    const onHeaderHeightMouseDown = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dragRef.current = { type: 'headerHeight', label: 'header', startPos: e.clientY, startSize: colHeaderHeight };
+        window.addEventListener('mousemove', onGlobalMouseMove);
+        window.addEventListener('mouseup', onGlobalMouseUp);
+    };
+
+    useEffect(() => {
+        return () => {
+            window.removeEventListener('mousemove', onGlobalMouseMove);
+            window.removeEventListener('mouseup', onGlobalMouseUp);
+        };
+    }, []);
 
     // Update filteredRowHeaders when filters change
     useEffect(() => {
@@ -397,21 +481,58 @@ export default function Sheet() {
                         {/* Grid content */}
                         <div style={{ gridColumn: '2 / 3', gridRow: '2 / 3', overflow: 'hidden' }}>
                             <div className="inline-block bg-blue-500 rounded-lg shadow-lg border border-gray-200 overflow-hidden">
-                        <table className="border-collapse">
+                        <table className="border-collapse" >
                             <thead>
                                 <tr>
-                                    <th className="w-10 bg-gray-50 border-b border-r border-gray-200 p-2"></th>
+                                    <th
+                                        className="bg-gray-50 border-b border-r border-gray-200 p-2 relative select-none"
+                                        style={{ width: `${rowLabelWidth}px`, height: `${colHeaderHeight}px` }}
+                                    >
+                                        
+                                    </th>
                                     {displayedColHeaders.map(h => (
-                                        <th key={h} className="w-28 bg-gray-50 border-b border-r border-gray-200 p-2 text-xs font-semibold text-gray-500 uppercase tracking-wider text-center select-none">
-                                            {h}
+                                        <th
+                                            key={h}
+                                            className="bg-gray-50 border-b border-r border-gray-200 p-2 text-xs font-semibold text-gray-500 uppercase tracking-wider text-center select-none relative"
+                                            style={{ width: `${colWidths[h] || DEFAULT_COL_WIDTH}px`, height: `${colHeaderHeight}px` }}
+                                        >
+                                            {h}  
+                                            <span
+                                                onMouseDown={(e) => onColResizeMouseDown(h, e)}
+                                                title="Drag to resize column"
+                                                role="separator"
+                                                aria-orientation="vertical"
+                                                style={{
+                                                    position: 'relative',
+                                                    top: 0,
+                                                    right: 0,
+                                                    width: '8px',
+                                                    height: '100%',
+                                                    cursor: 'col-resize',
+                                                    userSelect: 'none',
+                                                    background: 'rgba(99,102,241,0.15)', // indigo-500 tint
+                                                    borderRight: '1px solid #6366f1',
+                                                    zIndex: 20,
+                                                    touchAction: 'none'
+                                                }}
+                                            ></span>
                                         </th>
                                     ))}
                                 </tr>
                                 {showFilters && (
                                     <tr>
-                                        <th className="w-10 bg-gray-50 border-b border-r border-gray-200 p-1 text-xs text-gray-500 text-center select-none">#</th>
+                                        <th
+                                            className="bg-gray-50 border-b border-r border-gray-200 p-1 text-xs text-gray-500 text-center select-none"
+                                            style={{ width: `${rowLabelWidth}px` }}
+                                        >
+                                            #
+                                        </th>
                                         {displayedColHeaders.map((h) => (
-                                            <th key={`filter-${h}`} className="w-28 bg-gray-50 border-b border-r border-gray-200 p-1">
+                                            <th
+                                                key={`filter-${h}`}
+                                                className="bg-gray-50 border-b border-r border-gray-200 p-1"
+                                                style={{ width: `${colWidths[h] || DEFAULT_COL_WIDTH}px` }}
+                                            >
                                                 <input
                                                     type="text"
                                                     className="w-full px-2 py-1 text-xs border border-gray-300 rounded focus:outline-none focus:border-indigo-500"
@@ -427,17 +548,44 @@ export default function Sheet() {
                             <tbody>
                                 {displayedRowHeaders.map((rowLabel) => (
                                     <tr key={rowLabel}>
-                                        <td className="bg-gray-50 border-b border-r border-gray-200 p-2 text-center text-xs font-semibold text-gray-500 select-none">
+                                        <td
+                                            className="bg-gray-50 border-b border-r border-gray-200 p-2 text-center text-xs font-semibold text-gray-500 select-none relative"
+                                            style={{ height: `${rowHeights[rowLabel] || DEFAULT_ROW_HEIGHT}px`, width: `${rowLabelWidth}px` }}
+                                        >
                                             {rowLabel}
+                                             <div
+                                                onMouseDown={(e) => onRowResizeMouseDown(rowLabel, e)}
+                                                title="Drag to resize row"
+                                                role="separator"
+                                                aria-orientation="horizontal"
+                                                style={{
+                                                    position: 'relative',
+                                                    left: 0,
+                                                    bottom: 0,
+                                                    width: '100%',
+                                                    height: '8px',
+                                                    cursor: 'row-resize',
+                                                    userSelect: 'none',
+                                                    background: 'rgba(99,102,241,0.15)',
+                                                    borderTop: '1px solid #6366f1',
+                                                    zIndex: 20,
+                                                    touchAction: 'none'
+                                                }}
+                                            ></div>
                                         </td>
                                         {displayedColHeaders.map((colLabel) => {
                                             const key = `${rowLabel}-${colLabel}`;
                                             const cell = data[key] || { value: '' };
                                             return (
-                                                <td key={key} className="border-b border-r border-gray-200 p-0 relative min-w-[7rem] h-10 group bg-white hover:bg-indigo-50/20 transition-colors">
+                                                <td
+                                                    key={key}
+                                                    className="border-b border-r border-gray-200 p-0 relative min-w-[7rem] group bg-white hover:bg-indigo-50/20 transition-colors"
+                                                    style={{ width: `${colWidths[colLabel] || DEFAULT_COL_WIDTH}px`, height: `${rowHeights[rowLabel] || DEFAULT_ROW_HEIGHT}px` }}
+                                                >
                                                     <input
                                                         className="w-full h-full px-3 py-1 text-sm outline-none border-2 border-transparent focus:border-indigo-500 focus:ring-0 z-10 relative bg-transparent text-gray-800"
                                                         type="text"
+                                                        style={{ width: '100%', height: '100%', boxSizing: 'border-box', display: 'block' }}
                                                         value={cell.value}
                                                         data-row={rowLabel}
                                                         data-col={colLabel}
