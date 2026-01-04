@@ -50,6 +50,7 @@ export default function Sheet() {
     const [filters, setFilters] = useState({});
     const [showFilters, setShowFilters] = useState(false);
     const [focusedCell, setFocusedCell] = useState({ row: 1, col: COL_HEADERS[0] });
+    const [isEditing, setIsEditing] = useState(false);
 
     const ws = useRef(null);
 
@@ -259,20 +260,37 @@ export default function Sheet() {
                             <Filter size={16} />
                             {showFilters ? 'Hide Filters' : 'Show Filters'}
                         </button>
+                        
+                            <span className="text-sm text-gray-600">Rows visible</span>
+                            <input
+                                type="number"
+                                className="w-16 border rounded px-2 py-1 text-sm"
+                                min={1}
+                                max={ROWS}
+                                value={visibleRowsCount}
+                                onChange={(e) => {
+                                    const val = Math.max(1, Math.min(ROWS, parseInt(e.target.value, 10) || 1));
+                                    setVisibleRowsCount(val);
+                                    setRowStart((prev) => Math.min(prev, Math.max(2, ROWS - val + 1)));
+                                }}
+                                title="Visible rows"
+                            />
+                            <span className="text-sm text-gray-600 ml-2">Cols visible</span>
+                            <input
+                                type="number"
+                                className="w-16 border rounded px-2 py-1 text-sm"
+                                min={1}
+                                max={COLS}
+                                value={visibleColsCount}
+                                onChange={(e) => {
+                                    const val = Math.max(1, Math.min(COLS, parseInt(e.target.value, 10) || 1));
+                                    setVisibleColsCount(val);
+                                    setColStart((prev) => Math.min(prev, Math.max(1, COLS - val + 1)));
+                                }}
+                                title="Visible columns"
+                            />
+                        
                     </div>
-                </div>
-                {/* Secondary Toolbar (Formatting) - Visual Only for now */}
-                <div className="flex items-center gap-1 px-4 py-2 border-t border-gray-100 bg-gray-50/50 text-gray-600 overflow-x-auto">
-                    
-                    <div className="w-px h-4 bg-gray-300 mx-2"></div>
-                    <select className="bg-transparent text-sm border-none focus:ring-0 p-1 hover:bg-gray-200 rounded cursor-pointer">
-                        <option>Arial</option>
-                        <option>Inter</option>
-                    </select>
-                    <div className="w-px h-4 bg-gray-300 mx-2"></div>
-                    <button className="p-1.5 hover:bg-gray-200 rounded font-bold">B</button>
-                    <button className="p-1.5 hover:bg-gray-200 rounded italic">I</button>
-                    <button className="p-1.5 hover:bg-gray-200 rounded underline">U</button>
                 </div>
             </header>
 
@@ -335,58 +353,50 @@ export default function Sheet() {
                 )}
                 {/* Grid Area */}
                 <div className="flex-1 overflow-hidden p-6 bg-gray-100/50" >
-                    {/* Viewport Controls */}
-                    <div className="flex items-center gap-4 mb-3">
-                        <div className="flex items-center gap-2">
-                            <span className="text-sm text-gray-600">Rows</span>
-                            <input
-                                type="range"
-                                min={1}
-                                max={Math.max(1, ROWS - visibleRowsCount + 1)}
-                                value={rowStart}
-                                onChange={(e) => setRowStart(Math.max(1, Math.min(ROWS - visibleRowsCount + 1, parseInt(e.target.value, 10) || 1)))}
-                            />
-                            <span className="text-xs text-gray-600">{rowStart}–{rowEnd}</span>
-                            <input
-                                type="number"
-                                className="w-16 border rounded px-2 py-1 text-sm"
-                                min={1}
-                                max={ROWS}
-                                value={visibleRowsCount}
-                                onChange={(e) => {
-                                    const val = Math.max(1, Math.min(ROWS, parseInt(e.target.value, 10) || 1));
-                                    setVisibleRowsCount(val);
-                                    setRowStart((prev) => Math.min(prev, Math.max(2, ROWS - val + 1)));
-                                }}
-                                title="Visible rows"
-                            />
-                        </div>
-                        <div className="flex items-center gap-2">
-                            <span className="text-sm text-gray-600">Cols</span>
+                    {/* Scrollbars + Grid layout */}
+                    <div className="h-full w-full" style={{ display: 'grid', gridTemplateColumns: '24px auto', gridTemplateRows: '24px auto' }}>
+                        {/* Top horizontal column scrollbar */}
+                        <div style={{ gridColumn: '2 / 3', gridRow: '1 / 2' }}
+                             onWheel={(e) => {
+                                 e.preventDefault();
+                                 const step = e.deltaY > 0 ? 1 : -1;
+                                 const maxStart = Math.max(1, COLS - visibleColsCount + 1);
+                                 setColStart(prev => Math.max(1, Math.min(maxStart, prev + step)));
+                             }}>
                             <input
                                 type="range"
                                 min={1}
                                 max={Math.max(1, COLS - visibleColsCount + 1)}
                                 value={colStart}
                                 onChange={(e) => setColStart(Math.max(1, Math.min(COLS - visibleColsCount + 1, parseInt(e.target.value, 10) || 1)))}
-                            />
-                            <span className="text-xs text-gray-600">{toExcelCol(colStart)}–{toExcelCol(colEnd)}</span>
-                            <input
-                                type="number"
-                                className="w-16 border rounded px-2 py-1 text-sm"
-                                min={1}
-                                max={COLS}
-                                value={visibleColsCount}
-                                onChange={(e) => {
-                                    const val = Math.max(1, Math.min(COLS, parseInt(e.target.value, 10) || 1));
-                                    setVisibleColsCount(val);
-                                    setColStart((prev) => Math.min(prev, Math.max(1, COLS - val + 1)));
-                                }}
-                                title="Visible columns"
+                                style={{ width: '100%' }}
+                                aria-label="Columns scrollbar"
                             />
                         </div>
-                    </div>
-                    <div className="inline-block bg-blue-500 rounded-lg shadow-lg border border-gray-200 overflow-hidden">
+
+                        {/* Left vertical row scrollbar */}
+                        <div style={{ gridColumn: '1 / 2', gridRow: '2 / 3' }}
+                             onWheel={(e) => {
+                                 e.preventDefault();
+                                 const step = e.deltaY > 0 ? 1 : -1;
+                                 const maxStart = Math.max(1, ROWS - visibleRowsCount + 1);
+                                 setRowStart(prev => Math.max(1, Math.min(maxStart, prev + step)));
+                             }}
+                             className="flex items-stretch">
+                            <input
+                                type="range"
+                                min={1}
+                                max={Math.max(1, ROWS - visibleRowsCount + 1)}
+                                value={rowStart}
+                                onChange={(e) => setRowStart(Math.max(1, Math.min(ROWS - visibleRowsCount + 1, parseInt(e.target.value, 10) || 1)))}
+                                style={{ writingMode: 'vertical-rl', height: '100%', width: '100%' }}
+                                aria-label="Rows scrollbar"
+                            />
+                        </div>
+
+                        {/* Grid content */}
+                        <div style={{ gridColumn: '2 / 3', gridRow: '2 / 3', overflow: 'hidden' }}>
+                            <div className="inline-block bg-blue-500 rounded-lg shadow-lg border border-gray-200 overflow-hidden">
                         <table className="border-collapse">
                             <thead>
                                 <tr>
@@ -431,10 +441,15 @@ export default function Sheet() {
                                                         value={cell.value}
                                                         data-row={rowLabel}
                                                         data-col={colLabel}
-                                                        onFocus={() => setFocusedCell({ row: rowLabel, col: colLabel })}
+                                                        onFocus={() => { setFocusedCell({ row: rowLabel, col: colLabel }); setIsEditing(false); }}
+                                                        onDoubleClick={(e) => { setIsEditing(true); if (typeof e.target.select === 'function') e.target.select(); }}
+                                                        onBlur={() => setIsEditing(false)}
                                                         onKeyDown={(e) => {
                                                             const keys = ['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'];
-                                                            if (!keys.includes(e.key)) return;
+                                                            // Enter edit mode when typing any non-arrow key
+                                                            if (!keys.includes(e.key)) { setIsEditing(true); return; }
+                                                            // In edit mode, allow default left/right behavior and disable navigation
+                                                            if (isEditing && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) { return; }
                                                             e.preventDefault();
                                                             let nextRow = rowLabel;
                                                             let nextCol = colLabel;
@@ -443,11 +458,8 @@ export default function Sheet() {
                                                             if (e.key === 'ArrowDown') {
                                                                 if (rowIdx !== -1 && rowIdx + 1 < filteredRowHeaders.length) {
                                                                     nextRow = filteredRowHeaders[rowIdx + 1];
-                                                                    console.log("nextRow", nextRow);
-                                                                    console.log("nextRow--", filterstartIndexNew + visibleRowsCount);
-                                                                    console.log("nextRow--", filteredRowHeaders.length);
                                                                     const currentRowEnd = Math.min(filterstartIndexNew + visibleRowsCount , filteredRowHeaders.length );
-                                                                    console.log("currentRowEnd", currentRowEnd);
+                                                                    //console.log("currentRowEnd", currentRowEnd);
                                                                     if (nextRow > filteredRowHeaders[currentRowEnd - 1]) {
         
                                                                         setRowStart(prev => Math.min(ROWS - visibleRowsCount + 1, filteredRowHeaders[filterstartIndexNew ]));
@@ -502,6 +514,8 @@ export default function Sheet() {
                                 ))}
                             </tbody>
                         </table>
+                            </div>
+                        </div>
                     </div>
                 </div>
 
