@@ -54,12 +54,15 @@ export default function Sheet() {
 
     // Viewport state for virtualized grid
     const [rowStart, setRowStart] = useState(1);
-    const [visibleRowsCount, setVisibleRowsCount] = useState(30);
+    const [visibleRowsCount, setVisibleRowsCount] = useState(15);
     const [colStart, setColStart] = useState(1);
-    const [visibleColsCount, setVisibleColsCount] = useState(12);
+    const [visibleColsCount, setVisibleColsCount] = useState(7);
 
     const rowEnd = Math.min(rowStart + visibleRowsCount - 1, ROWS);
     const colEnd = Math.min(colStart + visibleColsCount - 1, COLS);
+
+    // Filtered rows state
+    const [filteredRowHeaders, setFilteredRowHeaders] = useState(ROW_HEADERS);
 
     useEffect(() => {
         // Check session validity
@@ -165,25 +168,49 @@ export default function Sheet() {
         }
     };
 
-    // Compute visible rows based on active filters
-    const activeFilters = Object.entries(filters).filter(([col, val]) => val && val.trim() !== '');
-    const filteredRowHeaders = activeFilters.length === 0
-        ? ROW_HEADERS
-        : [
-            1,
-            ...ROW_HEADERS.filter((rowLabel) => {
-                if (rowLabel === 1) return false; // avoid duplicate, we add 1 explicitly
-                return activeFilters.every(([colLabel, filterVal]) => {
-                    const key = `${rowLabel}-${colLabel}`;
-                    const cell = data[key] || { value: '' };
-                    return String(cell.value).toLowerCase().includes(String(filterVal).toLowerCase());
-                });
-            })
-        ];
+    // Update filteredRowHeaders when filters change
+    useEffect(() => {
+        const activeFilters = Object.entries(filters).filter(([col, val]) => val && val.trim() !== '');
+        const newFilteredRowHeaders = activeFilters.length === 0
+            ? ROW_HEADERS
+            : [
+                1,
+                ...ROW_HEADERS.filter((rowLabel) => {
+                    if (rowLabel === 1) return false; // avoid duplicate, we add 1 explicitly
+                    return activeFilters.every(([colLabel, filterVal]) => {
+                        const key = `${rowLabel}-${colLabel}`;
+                        const cell = data[key] || { value: '' };
+                        return String(cell.value).toLowerCase().includes(String(filterVal).toLowerCase());
+                    });
+                })
+            ];
+        setFilteredRowHeaders(newFilteredRowHeaders);
+    }, [filters]);
+    // Determine RowStartfromFilter based on filteredRowHeaders
+    console.log(filteredRowHeaders)
+    const RowStartfromFilter = filteredRowHeaders.includes(rowStart +1 )
+        ? rowStart +1
+        : filteredRowHeaders.find((row) => row > rowStart+1) || rowStart+1; ;
+    console.log("::RowStartfromFilter", RowStartfromFilter);
+    const filterstartIndex = filteredRowHeaders.indexOf(RowStartfromFilter);
+    const filterstartIndexNew = filterstartIndex + visibleRowsCount  > filteredRowHeaders.length ? filteredRowHeaders.length-visibleRowsCount:filterstartIndex ; 
+    console.log("filterstartIndexNew", filteredRowHeaders[filterstartIndexNew]);
+    const displayedRowHeaders = [
+        1,
+        ...filteredRowHeaders.slice(
+            filteredRowHeaders.length > visibleRowsCount?  filterstartIndexNew:1,
+            Math.min(filterstartIndexNew + visibleRowsCount , filteredRowHeaders.length )
+        )
+    ];
 
-    // Apply viewport windowing (row n..m and col c..d)
-    const displayedRowHeaders = filteredRowHeaders.filter((r) => r >= rowStart && r <= rowEnd);
-    const displayedColHeaders = COL_HEADERS.slice(colStart - 1, colEnd);
+    const displayedColHeaders = [COL_HEADERS[0], ...COL_HEADERS.slice(colStart , colEnd)];
+
+    // Clear filter values when showFilters is set to false
+    useEffect(() => {
+        if (!showFilters) {
+            setFilters({});
+        }
+    }, [showFilters]);
 
     return (
         <div className="flex h-screen flex-col bg-gray-50 overflow-hidden font-sans text-gray-900">
@@ -328,7 +355,7 @@ export default function Sheet() {
                                 onChange={(e) => {
                                     const val = Math.max(1, Math.min(ROWS, parseInt(e.target.value, 10) || 1));
                                     setVisibleRowsCount(val);
-                                    setRowStart((prev) => Math.min(prev, Math.max(1, ROWS - val + 1)));
+                                    setRowStart((prev) => Math.min(prev, Math.max(2, ROWS - val + 1)));
                                 }}
                                 title="Visible rows"
                             />
