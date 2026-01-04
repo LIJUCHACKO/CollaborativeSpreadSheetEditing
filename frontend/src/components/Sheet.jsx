@@ -190,7 +190,7 @@ export default function Sheet() {
     console.log(filteredRowHeaders)
     const RowStartfromFilter = filteredRowHeaders.includes(rowStart +1 )
         ? rowStart +1
-        : filteredRowHeaders.find((row) => row > rowStart+1) || rowStart+1; ;
+        : filteredRowHeaders.find((row) => row > rowStart+1) || filteredRowHeaders[filteredRowHeaders.length -1];
     console.log("::RowStartfromFilter", RowStartfromFilter);
     const filterstartIndex = filteredRowHeaders.indexOf(RowStartfromFilter);
     const filterstartIndexNew = filterstartIndex + visibleRowsCount  > filteredRowHeaders.length ? filteredRowHeaders.length-visibleRowsCount:filterstartIndex ; 
