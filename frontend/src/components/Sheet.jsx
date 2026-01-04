@@ -49,6 +49,7 @@ export default function Sheet() {
     // Column filters state
     const [filters, setFilters] = useState({});
     const [showFilters, setShowFilters] = useState(false);
+    const [focusedCell, setFocusedCell] = useState({ row: 1, col: COL_HEADERS[0] });
 
     const ws = useRef(null);
 
@@ -187,14 +188,14 @@ export default function Sheet() {
         setFilteredRowHeaders(newFilteredRowHeaders);
     }, [filters]);
     // Determine RowStartfromFilter based on filteredRowHeaders
-    console.log(filteredRowHeaders)
+    //console.log(filteredRowHeaders)
     const RowStartfromFilter = filteredRowHeaders.includes(rowStart +1 )
         ? rowStart +1
         : filteredRowHeaders.find((row) => row > rowStart+1) || filteredRowHeaders[filteredRowHeaders.length -1];
-    console.log("::RowStartfromFilter", RowStartfromFilter);
+    //console.log("::RowStartfromFilter", RowStartfromFilter);
     const filterstartIndex = filteredRowHeaders.indexOf(RowStartfromFilter);
     const filterstartIndexNew = filterstartIndex + visibleRowsCount  > filteredRowHeaders.length ? filteredRowHeaders.length-visibleRowsCount:filterstartIndex ; 
-    console.log("filterstartIndexNew", filteredRowHeaders[filterstartIndexNew]);
+    //console.log("filterstartIndexNew", filteredRowHeaders[filterstartIndexNew]);
     const displayedRowHeaders = [
         1,
         ...filteredRowHeaders.slice(
@@ -428,6 +429,67 @@ export default function Sheet() {
                                                         className="w-full h-full px-3 py-1 text-sm outline-none border-2 border-transparent focus:border-indigo-500 focus:ring-0 z-10 relative bg-transparent text-gray-800"
                                                         type="text"
                                                         value={cell.value}
+                                                        data-row={rowLabel}
+                                                        data-col={colLabel}
+                                                        onFocus={() => setFocusedCell({ row: rowLabel, col: colLabel })}
+                                                        onKeyDown={(e) => {
+                                                            const keys = ['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'];
+                                                            if (!keys.includes(e.key)) return;
+                                                            e.preventDefault();
+                                                            let nextRow = rowLabel;
+                                                            let nextCol = colLabel;
+                                                            const rowIdx = filteredRowHeaders.indexOf(rowLabel);
+                                                            const colIdx = COL_HEADERS.indexOf(colLabel);
+                                                            if (e.key === 'ArrowDown') {
+                                                                if (rowIdx !== -1 && rowIdx + 1 < filteredRowHeaders.length) {
+                                                                    nextRow = filteredRowHeaders[rowIdx + 1];
+                                                                    console.log("nextRow", nextRow);
+                                                                    console.log("nextRow--", filterstartIndexNew + visibleRowsCount);
+                                                                    console.log("nextRow--", filteredRowHeaders.length);
+                                                                    const currentRowEnd = Math.min(filterstartIndexNew + visibleRowsCount , filteredRowHeaders.length );
+                                                                    console.log("currentRowEnd", currentRowEnd);
+                                                                    if (nextRow > filteredRowHeaders[currentRowEnd - 1]) {
+        
+                                                                        setRowStart(prev => Math.min(ROWS - visibleRowsCount + 1, filteredRowHeaders[filterstartIndexNew ]));
+                                                                    }
+                                                                }
+                                                            } else if (e.key === 'ArrowUp') {
+                                                                if (rowIdx > 0) {
+                                                                    nextRow = filteredRowHeaders[rowIdx - 1];
+                                                                    if (nextRow < rowStart + 1 && nextRow > 1) {
+                                                                        setRowStart(prev => Math.max(1, filteredRowHeaders[rowIdx - 2]));
+                                                                    }
+                                                                }
+                                                            } else if (e.key === 'ArrowRight') {
+                                                                if (colIdx !== -1 && colIdx + 1 < COL_HEADERS.length) {
+                                                                    nextCol = COL_HEADERS[colIdx + 1];
+                                                                    const nextColNum = colIdx + 2;
+                                                                    if (nextColNum > colEnd) {
+                                                                        setColStart(prev => Math.min(COLS - visibleColsCount + 1, prev + 1));
+                                                                    }
+                                                                }
+                                                            } else if (e.key === 'ArrowLeft') {
+                                                                //console.log("colIdx", colIdx);
+                                                                if (colIdx > 0) {
+                                                                    nextCol = COL_HEADERS[colIdx - 1];
+                                                                    const nextColNum = colIdx;
+                                                                    if (nextColNum <= colStart) {
+                                                                        setColStart(prev => Math.max(1, prev - 1));
+                                                                    }
+                                                                    //console.log("nextCol", nextCol);
+                                                                    //console.log("colStart", colStart);
+                                                                    
+                                                                }
+                                                            }
+                                                            setFocusedCell({ row: nextRow, col: nextCol });
+                                                            setTimeout(() => {
+                                                                const el = document.querySelector(`input[data-row="${nextRow}"][data-col="${nextCol}"]`);
+                                                                if (el) {
+                                                                    el.focus();
+                                                                    if (typeof el.select === 'function') el.select();
+                                                                }
+                                                            }, 0);
+                                                            }}
                                                         onChange={(e) => handleCellChange(rowLabel, colLabel, e.target.value)}
                                                     />
                                                     {cell.user && cell.user !== username && (
