@@ -52,6 +52,15 @@ export default function Sheet() {
 
     const ws = useRef(null);
 
+    // Viewport state for virtualized grid
+    const [rowStart, setRowStart] = useState(1);
+    const [visibleRowsCount, setVisibleRowsCount] = useState(30);
+    const [colStart, setColStart] = useState(1);
+    const [visibleColsCount, setVisibleColsCount] = useState(12);
+
+    const rowEnd = Math.min(rowStart + visibleRowsCount - 1, ROWS);
+    const colEnd = Math.min(colStart + visibleColsCount - 1, COLS);
+
     useEffect(() => {
         // Check session validity
         if (!username || !isSessionValid()) {
@@ -158,15 +167,23 @@ export default function Sheet() {
 
     // Compute visible rows based on active filters
     const activeFilters = Object.entries(filters).filter(([col, val]) => val && val.trim() !== '');
-    const visibleRowHeaders = activeFilters.length === 0
+    const filteredRowHeaders = activeFilters.length === 0
         ? ROW_HEADERS
-        : ROW_HEADERS.filter((rowLabel) => {
-            return activeFilters.every(([colLabel, filterVal]) => {
-                const key = `${rowLabel}-${colLabel}`;
-                const cell = data[key] || { value: '' };
-                return String(cell.value).toLowerCase().includes(String(filterVal).toLowerCase());
-            });
-        });
+        : [
+            1,
+            ...ROW_HEADERS.filter((rowLabel) => {
+                if (rowLabel === 1) return false; // avoid duplicate, we add 1 explicitly
+                return activeFilters.every(([colLabel, filterVal]) => {
+                    const key = `${rowLabel}-${colLabel}`;
+                    const cell = data[key] || { value: '' };
+                    return String(cell.value).toLowerCase().includes(String(filterVal).toLowerCase());
+                });
+            })
+        ];
+
+    // Apply viewport windowing (row n..m and col c..d)
+    const displayedRowHeaders = filteredRowHeaders.filter((r) => r >= rowStart && r <= rowEnd);
+    const displayedColHeaders = COL_HEADERS.slice(colStart - 1, colEnd);
 
     return (
         <div className="flex h-screen flex-col bg-gray-50 overflow-hidden font-sans text-gray-900">
@@ -236,7 +253,7 @@ export default function Sheet() {
                 {isSidebarOpen && (
                     <div
                         className="position-absolute top-0 end-0 bg-white border-start shadow-lg"
-                        style={{ width: '320px',  zIndex: 1050, height: '100%' }}
+                        style={{ width: '500px',  zIndex: 1050, height: '100%' }}
                     >
                         <div className="d-flex justify-content-between align-items-center p-3 border-bottom bg-light">
                             <h5 className="mb-0 d-flex align-items-center">
@@ -289,13 +306,64 @@ export default function Sheet() {
                     </div>
                 )}
                 {/* Grid Area */}
-                <div className="flex-1 overflow-auto p-6 bg-gray-100/50">
+                <div className="flex-1 overflow-hidden p-6 bg-gray-100/50" >
+                    {/* Viewport Controls */}
+                    <div className="flex items-center gap-4 mb-3">
+                        <div className="flex items-center gap-2">
+                            <span className="text-sm text-gray-600">Rows</span>
+                            <input
+                                type="range"
+                                min={1}
+                                max={Math.max(1, ROWS - visibleRowsCount + 1)}
+                                value={rowStart}
+                                onChange={(e) => setRowStart(Math.max(1, Math.min(ROWS - visibleRowsCount + 1, parseInt(e.target.value, 10) || 1)))}
+                            />
+                            <span className="text-xs text-gray-600">{rowStart}–{rowEnd}</span>
+                            <input
+                                type="number"
+                                className="w-16 border rounded px-2 py-1 text-sm"
+                                min={1}
+                                max={ROWS}
+                                value={visibleRowsCount}
+                                onChange={(e) => {
+                                    const val = Math.max(1, Math.min(ROWS, parseInt(e.target.value, 10) || 1));
+                                    setVisibleRowsCount(val);
+                                    setRowStart((prev) => Math.min(prev, Math.max(1, ROWS - val + 1)));
+                                }}
+                                title="Visible rows"
+                            />
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <span className="text-sm text-gray-600">Cols</span>
+                            <input
+                                type="range"
+                                min={1}
+                                max={Math.max(1, COLS - visibleColsCount + 1)}
+                                value={colStart}
+                                onChange={(e) => setColStart(Math.max(1, Math.min(COLS - visibleColsCount + 1, parseInt(e.target.value, 10) || 1)))}
+                            />
+                            <span className="text-xs text-gray-600">{toExcelCol(colStart)}–{toExcelCol(colEnd)}</span>
+                            <input
+                                type="number"
+                                className="w-16 border rounded px-2 py-1 text-sm"
+                                min={1}
+                                max={COLS}
+                                value={visibleColsCount}
+                                onChange={(e) => {
+                                    const val = Math.max(1, Math.min(COLS, parseInt(e.target.value, 10) || 1));
+                                    setVisibleColsCount(val);
+                                    setColStart((prev) => Math.min(prev, Math.max(1, COLS - val + 1)));
+                                }}
+                                title="Visible columns"
+                            />
+                        </div>
+                    </div>
                     <div className="inline-block bg-blue-500 rounded-lg shadow-lg border border-gray-200 overflow-hidden">
                         <table className="border-collapse">
                             <thead>
                                 <tr>
                                     <th className="w-10 bg-gray-50 border-b border-r border-gray-200 p-2"></th>
-                                    {COL_HEADERS.map(h => (
+                                    {displayedColHeaders.map(h => (
                                         <th key={h} className="w-28 bg-gray-50 border-b border-r border-gray-200 p-2 text-xs font-semibold text-gray-500 uppercase tracking-wider text-center select-none">
                                             {h}
                                         </th>
@@ -304,7 +372,7 @@ export default function Sheet() {
                                 {showFilters && (
                                     <tr>
                                         <th className="w-10 bg-gray-50 border-b border-r border-gray-200 p-1 text-xs text-gray-500 text-center select-none">#</th>
-                                        {COL_HEADERS.map((h) => (
+                                        {displayedColHeaders.map((h) => (
                                             <th key={`filter-${h}`} className="w-28 bg-gray-50 border-b border-r border-gray-200 p-1">
                                                 <input
                                                     type="text"
@@ -319,12 +387,12 @@ export default function Sheet() {
                                 )}
                             </thead>
                             <tbody>
-                                {visibleRowHeaders.map((rowLabel, rIndex) => (
+                                {displayedRowHeaders.map((rowLabel) => (
                                     <tr key={rowLabel}>
                                         <td className="bg-gray-50 border-b border-r border-gray-200 p-2 text-center text-xs font-semibold text-gray-500 select-none">
                                             {rowLabel}
                                         </td>
-                                        {COL_HEADERS.map((colLabel, cIndex) => {
+                                        {displayedColHeaders.map((colLabel) => {
                                             const key = `${rowLabel}-${colLabel}`;
                                             const cell = data[key] || { value: '' };
                                             return (
