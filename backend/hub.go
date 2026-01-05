@@ -98,6 +98,34 @@ func (h *Hub) run() {
 				} else {
 					log.Printf("Error unmarshalling update payload: %v", err)
 				}
+			} else if message.Type == "RESIZE_COL" {
+				var update struct {
+					Col   string `json:"col"`
+					Width int    `json:"width"`
+					User  string `json:"user"`
+				}
+				if err := json.Unmarshal(message.Payload, &update); err == nil {
+					sheet := globalSheetManager.GetSheet(message.SheetID)
+					if sheet != nil {
+						sheet.SetColWidth(update.Col, update.Width, message.User)
+					}
+				} else {
+					log.Printf("Error unmarshalling resize col payload: %v", err)
+				}
+			} else if message.Type == "RESIZE_ROW" {
+				var update struct {
+					Row    string `json:"row"`
+					Height int    `json:"height"`
+					User   string `json:"user"`
+				}
+				if err := json.Unmarshal(message.Payload, &update); err == nil {
+					sheet := globalSheetManager.GetSheet(message.SheetID)
+					if sheet != nil {
+						sheet.SetRowHeight(update.Row, update.Height, message.User)
+					}
+				} else {
+					log.Printf("Error unmarshalling resize row payload: %v", err)
+				}
 			}
 
 			if clients, ok := h.rooms[message.SheetID]; ok {

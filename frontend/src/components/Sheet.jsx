@@ -120,6 +120,16 @@ export default function Sheet() {
                 } else if (msg.type === 'UPDATE_CELL') {
                     const { row, col, value, user } = msg.payload;
                     updateCellState(row, col, value, user);
+                } else if (msg.type === 'RESIZE_COL') {
+                    const { col, width } = msg.payload || {};
+                    if (col && typeof width === 'number') {
+                        setColWidths(prev => ({ ...prev, [col]: width }));
+                    }
+                } else if (msg.type === 'RESIZE_ROW') {
+                    const { row, height } = msg.payload || {};
+                    if (row && typeof height === 'number') {
+                        setRowHeights(prev => ({ ...prev, [row]: height }));
+                    }
                 }
             } catch (e) {
                 console.error("WS Parse error", e);
@@ -155,6 +165,13 @@ export default function Sheet() {
             setSheetName(sheet.name);
         } else {
             setSheetName(id);
+        }
+        // Apply persisted column widths / row heights if present
+        if (sheet.col_widths) {
+            setColWidths(prev => ({ ...prev, ...sheet.col_widths }));
+        }
+        if (sheet.row_heights) {
+            setRowHeights(prev => ({ ...prev, ...sheet.row_heights }));
         }
     };
 
@@ -194,10 +211,12 @@ export default function Sheet() {
             const delta = e.clientX - startPos;
             const newSize = Math.max(40, startSize + delta);
             setColWidths(prev => ({ ...prev, [label]: newSize }));
+            dragRef.current.lastSize = newSize;
         } else if (type === 'row') {
             const delta = e.clientY - startPos;
             const newSize = Math.max(24, startSize + delta);
             setRowHeights(prev => ({ ...prev, [label]: newSize }));
+            dragRef.current.lastSize = newSize;
         } else if (type === 'rowLabelWidth') {
             const delta = e.clientX - startPos;
             const newSize = Math.max(30, startSize + delta);
@@ -210,6 +229,17 @@ export default function Sheet() {
     };
 
     const onGlobalMouseUp = () => {
+        const { type, label, lastSize } = dragRef.current || {};
+        // Send resize update to server on mouse up
+        if ((type === 'col' || type === 'row') && ws.current && ws.current.readyState === WebSocket.OPEN && label && typeof lastSize === 'number') {
+            if (type === 'col') {
+                const payload = { col: label, width: lastSize, user: username };
+                ws.current.send(JSON.stringify({ type: 'RESIZE_COL', sheet_id: id, payload }));
+            } else if (type === 'row') {
+                const payload = { row: String(label), height: lastSize, user: username };
+                ws.current.send(JSON.stringify({ type: 'RESIZE_ROW', sheet_id: id, payload }));
+            }
+        }
         dragRef.current = { type: null, label: null, startPos: 0, startSize: 0 };
         window.removeEventListener('mousemove', onGlobalMouseMove);
         window.removeEventListener('mouseup', onGlobalMouseUp);
@@ -440,7 +470,7 @@ export default function Sheet() {
                     {/* Scrollbars + Grid layout */}
                     <div className="h-full w-full" style={{ display: 'grid', gridTemplateColumns: '24px auto', gridTemplateRows: '24px auto' }}>
                         {/* Top horizontal column scrollbar */}
-                        <div style={{ gridColumn: '2 / 3', gridRow: '1 / 2' }}
+                        <div style={{ gridColumn: '2 / span 1', gridRow: '1 / span 1' }}
                              onWheel={(e) => {
                                  e.preventDefault();
                                  const step = e.deltaY > 0 ? 1 : -1;
@@ -459,7 +489,7 @@ export default function Sheet() {
                         </div>
 
                         {/* Left vertical row scrollbar */}
-                        <div style={{ gridColumn: '1 / 2', gridRow: '2 / 3' }}
+                        <div style={{ gridColumn: '1 / span 1', gridRow: '2 / span 1' }}
                              onWheel={(e) => {
                                  e.preventDefault();
                                  const step = e.deltaY > 0 ? 1 : -1;
@@ -479,7 +509,7 @@ export default function Sheet() {
                         </div>
 
                         {/* Grid content */}
-                        <div style={{ gridColumn: '2 / 3', gridRow: '2 / 3', overflow: 'hidden' }}>
+                        <div style={{ gridColumn: '2 / span 1', gridRow: '2 / span 1', overflow: 'auto' }}>
                             <div className="inline-block bg-blue-500 rounded-lg shadow-lg border border-gray-200 overflow-hidden">
                         <table className="border-collapse" >
                             <thead>
@@ -582,10 +612,10 @@ export default function Sheet() {
                                                     className="border-b border-r border-gray-200 p-0 relative min-w-[7rem] group bg-white hover:bg-indigo-50/20 transition-colors"
                                                     style={{ width: `${colWidths[colLabel] || DEFAULT_COL_WIDTH}px`, height: `${rowHeights[rowLabel] || DEFAULT_ROW_HEIGHT}px` }}
                                                 >
-                                                    <input
-                                                        className="w-full h-full px-3 py-1 text-sm outline-none border-2 border-transparent focus:border-indigo-500 focus:ring-0 z-10 relative bg-transparent text-gray-800"
-                                                        type="text"
-                                                        style={{ width: '100%', height: '100%', boxSizing: 'border-box', display: 'block' }}
+                                                    <textarea
+                                                        className="w-full h-full px-3 py-1 text-sm outline-none border-2 border-transparent focus:border-indigo-500 focus:ring-0 z-10 relative bg-transparent text-gray-800 resize-none"
+                                                        rows={1}
+                                                        style={{ width: '100%', height: '100%', boxSizing: 'border-box', display: 'block', overflow: 'auto', resize: 'none', whiteSpace: 'pre-wrap' }}
                                                         value={cell.value}
                                                         data-row={rowLabel}
                                                         data-col={colLabel}
@@ -594,10 +624,10 @@ export default function Sheet() {
                                                         onBlur={() => setIsEditing(false)}
                                                         onKeyDown={(e) => {
                                                             const keys = ['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'];
-                                                            // Enter edit mode when typing any non-arrow key
+                                                            // Enter edit mode when typing any non-arrow key (including Enter)
                                                             if (!keys.includes(e.key)) { setIsEditing(true); return; }
-                                                            // In edit mode, allow default left/right behavior and disable navigation
-                                                            if (isEditing && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) { return; }
+                                                            // In edit mode, allow default arrow behavior inside textarea and disable cell navigation
+                                                            if (isEditing && keys.includes(e.key)) { return; }
                                                             e.preventDefault();
                                                             let nextRow = rowLabel;
                                                             let nextCol = colLabel;
@@ -607,9 +637,7 @@ export default function Sheet() {
                                                                 if (rowIdx !== -1 && rowIdx + 1 < filteredRowHeaders.length) {
                                                                     nextRow = filteredRowHeaders[rowIdx + 1];
                                                                     const currentRowEnd = Math.min(filterstartIndexNew + visibleRowsCount , filteredRowHeaders.length );
-                                                                    //console.log("currentRowEnd", currentRowEnd);
                                                                     if (nextRow > filteredRowHeaders[currentRowEnd - 1]) {
-        
                                                                         setRowStart(prev => Math.min(ROWS - visibleRowsCount + 1, filteredRowHeaders[filterstartIndexNew ]));
                                                                     }
                                                                 }
@@ -629,21 +657,17 @@ export default function Sheet() {
                                                                     }
                                                                 }
                                                             } else if (e.key === 'ArrowLeft') {
-                                                                //console.log("colIdx", colIdx);
                                                                 if (colIdx > 0) {
                                                                     nextCol = COL_HEADERS[colIdx - 1];
                                                                     const nextColNum = colIdx;
                                                                     if (nextColNum <= colStart) {
                                                                         setColStart(prev => Math.max(1, prev - 1));
                                                                     }
-                                                                    //console.log("nextCol", nextCol);
-                                                                    //console.log("colStart", colStart);
-                                                                    
                                                                 }
                                                             }
                                                             setFocusedCell({ row: nextRow, col: nextCol });
                                                             setTimeout(() => {
-                                                                const el = document.querySelector(`input[data-row="${nextRow}"][data-col="${nextCol}"]`);
+                                                                const el = document.querySelector(`textarea[data-row="${nextRow}"][data-col="${nextCol}"]`);
                                                                 if (el) {
                                                                     el.focus();
                                                                     if (typeof el.select === 'function') el.select();

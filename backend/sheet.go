@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -45,6 +46,8 @@ type Sheet struct {
 	Data        map[string]map[string]Cell `json:"data"` // Row -> Col -> Cell
 	AuditLog    []AuditEntry               `json:"audit_log"`
 	Permissions Permissions                `json:"permissions"`
+	ColWidths   map[string]int             `json:"col_widths,omitempty"`
+	RowHeights  map[string]int             `json:"row_heights,omitempty"`
 	mu          sync.RWMutex
 }
 
@@ -98,10 +101,12 @@ func (sm *SheetManager) CreateSheet(name, owner string) *Sheet {
 
 	id := generateID() // Need to implement this or use a simple counter
 	sheet := &Sheet{
-		ID:    id,
-		Name:  name,
-		Owner: owner,
-		Data:  make(map[string]map[string]Cell),
+		ID:         id,
+		Name:       name,
+		Owner:      owner,
+		Data:       make(map[string]map[string]Cell),
+		ColWidths:  make(map[string]int),
+		RowHeights: make(map[string]int),
 		Permissions: Permissions{
 			Editors: []string{owner},
 		},
@@ -153,6 +158,47 @@ func (s *Sheet) SetCell(row, col, value, user string) {
 	// Persist changes
 	// Optimally we shouldn't save on every cell edit for performance, but for this task it ensures safety.
 	globalSheetManager.SaveSheet(s)
+}
+
+func (s *Sheet) SetColWidth(col string, width int, user string) {
+	s.mu.Lock()
+	// ensure map
+	if s.ColWidths == nil {
+		s.ColWidths = make(map[string]int)
+	}
+	s.ColWidths[col] = width
+
+	s.AuditLog = append(s.AuditLog, AuditEntry{
+		Timestamp: time.Now(),
+		User:      user,
+		Action:    "RESIZE_COL",
+		Details:   "Set width of column " + col + " to " + itoa(width),
+	})
+	s.mu.Unlock()
+
+	globalSheetManager.SaveSheet(s)
+}
+
+func (s *Sheet) SetRowHeight(row string, height int, user string) {
+	s.mu.Lock()
+	if s.RowHeights == nil {
+		s.RowHeights = make(map[string]int)
+	}
+	s.RowHeights[row] = height
+
+	s.AuditLog = append(s.AuditLog, AuditEntry{
+		Timestamp: time.Now(),
+		User:      user,
+		Action:    "RESIZE_ROW",
+		Details:   "Set height of row " + row + " to " + itoa(height),
+	})
+	s.mu.Unlock()
+
+	globalSheetManager.SaveSheet(s)
+}
+
+func itoa(i int) string {
+	return fmt.Sprintf("%d", i)
 }
 
 func (sm *SheetManager) ListSheets() []*Sheet {
