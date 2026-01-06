@@ -3,6 +3,8 @@ import { useParams, useNavigate } from 'react-router-dom';
 import {
     FileSpreadsheet,
     ArrowLeft,
+    ArrowUp,
+    ArrowDown,
     Save,
     Share2,
     Users,
@@ -51,6 +53,8 @@ export default function Sheet() {
     const [showFilters, setShowFilters] = useState(false);
     const [focusedCell, setFocusedCell] = useState({ row: 1, col: COL_HEADERS[0] });
     const [isEditing, setIsEditing] = useState(false);
+    // Sort configuration: { col: 'A'|'B'|..., direction: 'asc'|'desc' }
+    const [sortConfig, setSortConfig] = useState({ col: null, direction: null });
 
     const ws = useRef(null);
 
@@ -284,10 +288,10 @@ export default function Sheet() {
         };
     }, []);
 
-    // Update filteredRowHeaders when filters change
+    // Update filteredRowHeaders when filters or sort change
     useEffect(() => {
         const activeFilters = Object.entries(filters).filter(([col, val]) => val && val.trim() !== '');
-        const newFilteredRowHeaders = activeFilters.length === 0
+        let newFilteredRowHeaders = activeFilters.length === 0
             ? ROW_HEADERS
             : [
                 1,
@@ -300,22 +304,53 @@ export default function Sheet() {
                     });
                 })
             ];
+
+        // Apply sorting if configured
+        if (sortConfig && sortConfig.col && sortConfig.direction) {
+            const startIdx = newFilteredRowHeaders[0] === 1 ? 1 : 0;
+            const rowsToSort = newFilteredRowHeaders.slice(startIdx);
+
+            const parseValue = (row) => {
+                const raw = (data[`${row}-${sortConfig.col}`]?.value ?? '').toString().trim();
+                const num = parseFloat(raw);
+                const isNumeric = raw !== '' && !Number.isNaN(num) && /^-?\d+(?:\.\d+)?$/.test(raw);
+                return { raw: raw.toLowerCase(), num, isNumeric };
+            };
+
+            rowsToSort.sort((a, b) => {
+                const va = parseValue(a);
+                const vb = parseValue(b);
+                let cmp = 0;
+                if (va.isNumeric && vb.isNumeric) {
+                    cmp = va.num === vb.num ? 0 : (va.num < vb.num ? -1 : 1);
+                } else {
+                    cmp = va.raw.localeCompare(vb.raw);
+                }
+                //if a is empty and b is not, a comes after b
+                if (va.raw === '' && vb.raw !== '') {
+                    cmp = 1;
+                    return cmp;
+                } else if (va.raw !== '' && vb.raw === '') {
+                    cmp = -1;
+                    return cmp;
+                }
+                
+
+                return sortConfig.direction === 'asc' ? cmp : -cmp;
+            });
+
+            newFilteredRowHeaders = startIdx === 1 ? [1, ...rowsToSort] : rowsToSort;
+            //console.log("sorted::", newFilteredRowHeaders);
+        }
+
         setFilteredRowHeaders(newFilteredRowHeaders);
-    }, [filters]);
-    // Determine RowStartfromFilter based on filteredRowHeaders
-    //console.log(filteredRowHeaders)
-    const RowStartfromFilter = filteredRowHeaders.includes(rowStart +1 )
-        ? rowStart +1
-        : filteredRowHeaders.find((row) => row > rowStart+1) || filteredRowHeaders[filteredRowHeaders.length -1];
-    //console.log("::RowStartfromFilter", RowStartfromFilter);
-    const filterstartIndex = filteredRowHeaders.indexOf(RowStartfromFilter);
-    const filterstartIndexNew = filterstartIndex + visibleRowsCount  > filteredRowHeaders.length ? filteredRowHeaders.length-visibleRowsCount:filterstartIndex ; 
-    //console.log("filterstartIndexNew", filteredRowHeaders[filterstartIndexNew]);
+    }, [filters, sortConfig, data]);
+
     const displayedRowHeaders = [
         1,
         ...filteredRowHeaders.slice(
-            filteredRowHeaders.length > visibleRowsCount?  filterstartIndexNew:1,
-            Math.min(filterstartIndexNew + visibleRowsCount , filteredRowHeaders.length )
+            filteredRowHeaders.length > visibleRowsCount?  rowStart:1,
+            Math.min(rowStart + visibleRowsCount , filteredRowHeaders.length )
         )
     ];
 
@@ -325,6 +360,9 @@ export default function Sheet() {
     useEffect(() => {
         if (!showFilters) {
             setFilters({});
+            sortConfig.direction = null;
+            sortConfig.col = null;
+            setSortConfig({ ...sortConfig });// to trigger re-render
         }
     }, [showFilters]);
 
@@ -533,7 +571,10 @@ export default function Sheet() {
                                             className="bg-gray-50 border-b border-r border-gray-200 p-2 text-xs font-semibold text-gray-500 uppercase tracking-wider text-center select-none relative"
                                             style={{position: 'relative', width: `${colWidths[h] || DEFAULT_COL_WIDTH}px`, height: `${colHeaderHeight}px` }}
                                         >
-                                            {h}  
+                                            <div className="flex items-center justify-center gap-1">
+                                                <span>{h}</span>
+                                                
+                                            </div>
                                             <span
                                                 onMouseDown={(e) => onColResizeMouseDown(h, e)}
                                                 title="Drag to resize column"
@@ -567,8 +608,8 @@ export default function Sheet() {
                                         {displayedColHeaders.map((h) => (
                                             <th
                                                 key={`filter-${h}`}
-                                                className="bg-gray-50 border-b border-r border-gray-200 p-1"
-                                                style={{ width: `${colWidths[h] || DEFAULT_COL_WIDTH}px` }}
+                                                className="bg-gray-50 border-b border-r border-gray-200 p-1 inline-flex items-center gap-1"
+                                                style={{ width: `${colWidths[h] || DEFAULT_COL_WIDTH}px` , position: 'relative'}}
                                             >
                                                 <input
                                                     type="text"
@@ -577,6 +618,43 @@ export default function Sheet() {
                                                     value={filters[h] || ''}
                                                     onChange={(e) => setFilters(prev => ({ ...prev, [h]: e.target.value }))}
                                                 />
+                                                <span
+                                                    style={{
+                                                    position: 'absolute',
+                                                    top: 0,
+                                                    right: 0
+                                                    }}
+                                                
+                                                >
+                                                    <button
+                                                        type="button"
+                                                        className={`p-0.5 rounded ${sortConfig.col === h && sortConfig.direction === 'asc' ? 'bg-indigo-100 text-indigo-600' : 'text-gray-500 hover:text-indigo-600'}`}
+                                                        title="Sort ascending"
+                                                        onClick={() => {
+                                                            if (sortConfig.col === h && sortConfig.direction === 'asc') {
+                                                                setSortConfig({ col: null, direction: null });
+                                                            } else {
+                                                                setSortConfig({ col: h, direction: 'asc' });
+                                                            }
+                                                        }}
+                                                    >
+                                                        <ArrowUp size={12} />
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        className={`p-0.5 rounded ${sortConfig.col === h && sortConfig.direction === 'desc' ? 'bg-indigo-100 text-indigo-600' : 'text-gray-500 hover:text-indigo-600'}`}
+                                                        title="Sort descending"
+                                                        onClick={() => {
+                                                            if (sortConfig.col === h && sortConfig.direction === 'desc') {
+                                                                setSortConfig({ col: null, direction: null });
+                                                            } else {
+                                                                setSortConfig({ col: h, direction: 'desc' });
+                                                            }
+                                                        }}
+                                                    >
+                                                        <ArrowDown size={12} />
+                                                    </button>
+                                                </span>
                                             </th>
                                         ))}
                                     </tr>
@@ -640,21 +718,23 @@ export default function Sheet() {
                                                             let nextCol = colLabel;
                                                             const rowIdx = filteredRowHeaders.indexOf(rowLabel);
                                                             const colIdx = COL_HEADERS.indexOf(colLabel);
+                                                            
                                                             if (e.key === 'ArrowDown') {
                                                                 if (rowIdx !== -1 && rowIdx + 1 < filteredRowHeaders.length) {
                                                                     nextRow = filteredRowHeaders[rowIdx + 1];
-                                                                    const currentRowEnd = Math.min(filterstartIndexNew + visibleRowsCount , filteredRowHeaders.length );
-                                                                    if (nextRow > filteredRowHeaders[currentRowEnd - 1]) {
-                                                                        setRowStart(prev => Math.min(ROWS - visibleRowsCount + 1, filteredRowHeaders[filterstartIndexNew ]));
+                                                                    const currentRowEnd = Math.min(rowStart + visibleRowsCount , filteredRowHeaders.length );
+                                                                    if (rowIdx + 1 > currentRowEnd - 1) {
+                                                                        setRowStart(prev => Math.min(filteredRowHeaders.length - visibleRowsCount + 1 > 1 ?  filteredRowHeaders.length - visibleRowsCount + 1 : 1, rowStart+1));
                                                                     }
                                                                 }
                                                             } else if (e.key === 'ArrowUp') {
                                                                 if (rowIdx > 0) {
                                                                     nextRow = filteredRowHeaders[rowIdx - 1];
-                                                                    if (nextRow < rowStart + 1 && nextRow > 1) {
-                                                                        setRowStart(prev => Math.max(1, filteredRowHeaders[rowIdx - 2]));
+                                                                    if (rowIdx - 1 < rowStart + 1 && rowIdx > 0) {
+                                                                        setRowStart(prev => Math.max(1, rowIdx - 2));
                                                                     }
                                                                 }
+                                        
                                                             } else if (e.key === 'ArrowRight') {
                                                                 if (colIdx !== -1 && colIdx + 1 < COL_HEADERS.length) {
                                                                     nextCol = COL_HEADERS[colIdx + 1];
