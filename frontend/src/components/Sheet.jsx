@@ -609,14 +609,15 @@ export default function Sheet() {
                                             <th
                                                 key={`filter-${h}`}
                                                 className="bg-gray-50 border-b border-r border-gray-200 p-1 inline-flex items-center gap-1"
-                                                style={{ width: `${colWidths[h] || DEFAULT_COL_WIDTH}px` , position: 'relative'}}
+                                                style={{ width: `${colWidths[h] || DEFAULT_COL_WIDTH}px` , position: 'relative', padding: '0' }}
                                             >
                                                 <input
                                                     type="text"
-                                                    className="w-full px-2 py-1 text-xs border border-gray-300 rounded focus:outline-none focus:border-indigo-500"
+                                                    className="px-2 py-1 text-xs border border-gray-300 rounded focus:outline-none focus:border-indigo-500"
                                                     placeholder="Filter"
                                                     value={filters[h] || ''}
                                                     onChange={(e) => setFilters(prev => ({ ...prev, [h]: e.target.value }))}
+                                                    style={{ width: `${colWidths[h] || DEFAULT_COL_WIDTH}px`, padding: '0' }}
                                                 />
                                                 <span
                                                     style={{
