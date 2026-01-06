@@ -730,8 +730,8 @@ export default function Sheet() {
                                                             } else if (e.key === 'ArrowUp') {
                                                                 if (rowIdx > 0) {
                                                                     nextRow = filteredRowHeaders[rowIdx - 1];
-                                                                    if (rowIdx - 1 < rowStart + 1 && rowIdx > 0) {
-                                                                        setRowStart(prev => Math.max(1, rowIdx - 2));
+                                                                    if (rowIdx -1  < rowStart + 1 && rowIdx > 0) {
+                                                                        setRowStart(prev => Math.max(1, rowIdx - 1));
                                                                     }
                                                                 }
                                         
