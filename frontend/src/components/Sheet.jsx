@@ -17,8 +17,8 @@ import {
 import { isSessionValid, clearAuth, getUsername } from '../utils/auth';
 import './bootstrap/dist/css/bootstrap.min.css';
 
-const ROWS = 500;
-const COLS = 50;
+const ROWS = 600;
+const COLS = 100;
 function toExcelCol(n) {
     let label = '';
     let num = n;
@@ -509,7 +509,14 @@ export default function Sheet() {
                         </div>
 
                         {/* Grid content */}
-                        <div style={{ gridColumn: '2 / span 1', gridRow: '2 / span 1', overflow: 'auto' }}>
+                        <div style={{ gridColumn: '2 / span 1', gridRow: '2 / span 1', overflow: 'auto' }}
+                        onWheel={(e) => {
+                                 e.preventDefault();
+                                 const step = e.deltaY > 0 ? 1 : -1;
+                                 const maxStart = Math.max(1, ROWS - visibleRowsCount + 1);
+                                 setRowStart(prev => Math.max(1, Math.min(maxStart, prev + step)));
+                             }}
+                        >
                             <div className="inline-block bg-blue-500 rounded-lg shadow-lg border border-gray-200 overflow-hidden">
                         <table className="border-collapse" >
                             <thead>
@@ -524,7 +531,7 @@ export default function Sheet() {
                                         <th
                                             key={h}
                                             className="bg-gray-50 border-b border-r border-gray-200 p-2 text-xs font-semibold text-gray-500 uppercase tracking-wider text-center select-none relative"
-                                            style={{ width: `${colWidths[h] || DEFAULT_COL_WIDTH}px`, height: `${colHeaderHeight}px` }}
+                                            style={{position: 'relative', width: `${colWidths[h] || DEFAULT_COL_WIDTH}px`, height: `${colHeaderHeight}px` }}
                                         >
                                             {h}  
                                             <span
@@ -533,7 +540,7 @@ export default function Sheet() {
                                                 role="separator"
                                                 aria-orientation="vertical"
                                                 style={{
-                                                    position: 'relative',
+                                                    position: 'absolute',
                                                     top: 0,
                                                     right: 0,
                                                     width: '8px',
@@ -580,7 +587,7 @@ export default function Sheet() {
                                     <tr key={rowLabel}>
                                         <td
                                             className="bg-gray-50 border-b border-r border-gray-200 p-2 text-center text-xs font-semibold text-gray-500 select-none relative"
-                                            style={{ height: `${rowHeights[rowLabel] || DEFAULT_ROW_HEIGHT}px`, width: `${rowLabelWidth}px` }}
+                                            style={{ position: 'relative',height: `${rowHeights[rowLabel] || DEFAULT_ROW_HEIGHT}px`, width: `${rowLabelWidth}px`,padding :`0` }}
                                         >
                                             {rowLabel}
                                              <div
@@ -589,7 +596,7 @@ export default function Sheet() {
                                                 role="separator"
                                                 aria-orientation="horizontal"
                                                 style={{
-                                                    position: 'relative',
+                                                    position: 'absolute',
                                                     left: 0,
                                                     bottom: 0,
                                                     width: '100%',
