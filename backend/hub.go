@@ -154,6 +154,31 @@ func (h *Hub) run() {
 				} else {
 					log.Printf("Error unmarshalling MOVE_ROW payload: %v", err)
 				}
+			} else if message.Type == "MOVE_COL" {
+				var mv struct {
+					FromCol   string `json:"fromCol"`
+					TargetCol string `json:"targetCol"`
+					User      string `json:"user"`
+				}
+				if err := json.Unmarshal(message.Payload, &mv); err == nil {
+					sheet := globalSheetManager.GetSheet(message.SheetID)
+					if sheet != nil {
+						moved := sheet.MoveColumnRight(mv.FromCol, mv.TargetCol, message.User)
+						if moved {
+							sheet.mu.RLock()
+							payload, _ := json.Marshal(sheet)
+							sheet.mu.RUnlock()
+							toSend = &Message{
+								Type:    "COL_MOVED",
+								SheetID: message.SheetID,
+								Payload: payload,
+								User:    message.User,
+							}
+						}
+					}
+				} else {
+					log.Printf("Error unmarshalling MOVE_COL payload: %v", err)
+				}
 			}
 
 			if clients, ok := h.rooms[message.SheetID]; ok {

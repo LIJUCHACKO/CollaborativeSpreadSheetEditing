@@ -57,6 +57,8 @@ export default function Sheet() {
     const [sortConfig, setSortConfig] = useState({ col: null, direction: null });
     // Row cut/paste state
     const [cutRow, setCutRow] = useState(null);
+    // Column cut/paste state
+    const [cutCol, setCutCol] = useState(null);
 
     const ws = useRef(null);
 
@@ -68,7 +70,7 @@ export default function Sheet() {
     const [visibleColsCount, setVisibleColsCount] = useState(7);
     const DEFAULT_COL_WIDTH = 112; // px (Tailwind w-28)
     const DEFAULT_ROW_HEIGHT = 40; // px (Tailwind h-10)
-    const DEFAULT_ROW_LABEL_WIDTH = 40; // px (Tailwind w-10)
+    const DEFAULT_ROW_LABEL_WIDTH = 60; // px (Tailwind w-10)
     const DEFAULT_COL_HEADER_HEIGHT = 32; // px
     const [colWidths, setColWidths] = useState(() => {
         const map = {};
@@ -140,13 +142,16 @@ export default function Sheet() {
                 } else if (msg.type === 'ROW_MOVED') {
                     // Server performed row move; refresh state from snapshot
                     setInitialState(msg.payload);
+                } else if (msg.type === 'COL_MOVED') {
+                    // Server performed column move; refresh state from snapshot
+                    setInitialState(msg.payload);
                 }
             } catch (e) {
                 console.error("WS Parse error", e);
             }
         };
 
-        socket.onclose = () => setConnected(false);
+        socket.onclose = () => {setConnected(false); setIsEditing(false)};
 
         ws.current = socket;
 
@@ -362,6 +367,16 @@ export default function Sheet() {
         }
 
         setCutRow(null);
+    };
+
+    const moveCutColRight = (targetCol) => {
+        if (cutCol == null) return;
+        if (isFilterActive) return; // keep parity with row behavior
+        if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+            const payload = { fromCol: String(cutCol), targetCol: String(targetCol), user: username };
+            ws.current.send(JSON.stringify({ type: 'MOVE_COL', sheet_id: id, payload }));
+        }
+        setCutCol(null);
     };
 
     const displayedRowHeaders = [
@@ -622,11 +637,34 @@ export default function Sheet() {
                                         <th
                                             key={h}
                                             className="bg-gray-50 border-b border-r border-gray-200 p-2 text-xs font-semibold text-gray-500 uppercase tracking-wider text-center select-none relative"
-                                            style={{position: 'relative', width: `${colWidths[h] || DEFAULT_COL_WIDTH}px`, height: `${colHeaderHeight}px` }}
+                                            style={{position: 'relative', width: `${colWidths[h] || DEFAULT_COL_WIDTH}px`, height: `${colHeaderHeight}px` ,padding :`0`}}
                                         >
                                             <div className="flex items-center justify-center gap-1">
                                                 <span>{h}</span>
-                                                
+                                                <div style={{ position: 'absolute', top: 2, left: 2, display: 'flex', gap: '4px', zIndex: 25 }}>
+                                                    { cutCol == null && connected && (<button
+                                                        type="button"
+                                                        className="btn btn-xs btn-light"
+                                                        disabled={isFilterActive}
+                                                        title={isFilterActive ? 'Disabled while filters are active' : `Cut column ${h}`}
+                                                        onClick={() => {setCutCol(h); setCutRow(null);}}
+                                                        style={{ padding: '0 4px', fontSize: '10px' }}
+                                                    >
+                                                        <span role="img" aria-label="cut">✂️</span>
+                                                    </button>)} 
+                                                    {cutCol != null && cutCol !== h && connected && (
+                                                        <button
+                                                            type="button"
+                                                            className="btn btn-xs btn-light"
+                                                            disabled={isFilterActive}
+                                                            title={isFilterActive ? 'Disabled while filters are active' : `Insert cut column to the right of ${h}`}
+                                                            onClick={() => { moveCutColRight(h); setCutRow(null); setCutCol(null); }}
+                                                            style={{ padding: '0 4px', fontSize: '10px' }}
+                                                        >
+                                                            <span role="img" aria-label="paste">📋</span>
+                                                        </button>
+                                                    )}
+                                                </div>
                                             </div>
                                             <span
                                                 onMouseDown={(e) => onColResizeMouseDown(h, e)}
@@ -718,32 +756,32 @@ export default function Sheet() {
                                 {displayedRowHeaders.map((rowLabel) => (
                                     <tr key={rowLabel}>
                                         <td
-                                            className="bg-gray-50 border-b border-r border-gray-200 p-2 text-center text-xs font-semibold text-gray-500 select-none relative"
+                                            className="bg-gray-50 border-b border-r border-gray-200 p-2 text-right text-xs font-semibold text-gray-500 select-none relative"
                                             style={{ position: 'relative',height: `${rowHeights[rowLabel] || DEFAULT_ROW_HEIGHT}px`, width: `${rowLabelWidth}px`,padding :`0` }}
                                         >
-                                            {rowLabel}
+                                            <span>{rowLabel}</span>
                                             {/* Row actions: Cut/Paste */}
-                                            <div style={{ position: 'absolute', top: 2, right: 2, display: 'flex', gap: '4px', zIndex: 25 }}>
-                                                <button
+                                            <div style={{ position: 'absolute', top: 0, left: 0, display: 'flex', gap: '4px', zIndex: 25 }}>
+                                                {cutRow === null && connected &&(<button
                                                     type="button"
                                                     className="btn btn-xs btn-light"
                                                     disabled={isFilterActive}
                                                     title={isFilterActive ? 'Disabled while filters are active' : 'Cut this row'}
-                                                    onClick={() => setCutRow(rowLabel)}
+                                                    onClick={() => {setCutRow(rowLabel); setCutCol(null);}}
                                                     style={{ padding: '0 4px', fontSize: '10px' }}
                                                 >
-                                                    Cut
-                                                </button>
-                                                {cutRow != null && cutRow !== rowLabel && (
+                                                    <span role="img" aria-label="cut">✂️</span>
+                                                </button>)}
+                                                {cutRow != null && cutRow !== rowLabel && connected &&(
                                                     <button
                                                         type="button"
                                                         className="btn btn-xs btn-light"
                                                         disabled={isFilterActive}
                                                         title={isFilterActive ? 'Disabled while filters are active' : `Insert cut row below row ${rowLabel}`}
-                                                        onClick={() => moveCutRowBelow(rowLabel)}
+                                                        onClick={() => { moveCutRowBelow(rowLabel); setCutRow(null); setCutCol(null); }}
                                                         style={{ padding: '0 4px', fontSize: '10px' }}
                                                     >
-                                                        Paste here
+                                                        <span role="img" aria-label="paste">📋</span>
                                                     </button>
                                                 )}
                                             </div>
@@ -784,12 +822,12 @@ export default function Sheet() {
                                                         data-row={rowLabel}
                                                         data-col={colLabel}
                                                         onFocus={() => { setFocusedCell({ row: rowLabel, col: colLabel }); setIsEditing(false); }}
-                                                        onDoubleClick={(e) => { setIsEditing(true); if (typeof e.target.select === 'function') e.target.select(); }}
+                                                        onDoubleClick={(e) => { if(connected)  {setIsEditing(true); setCutRow(null); setCutCol(null);}; if (typeof e.target.select === 'function') e.target.select(); }}
                                                       
                                                         onKeyDown={(e) => {
                                                             const keys = ['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'];
                                                             // Enter edit mode when typing any non-arrow key (including Enter)
-                                                            if (!keys.includes(e.key)) { setIsEditing(true); return; }
+                                                            if (!keys.includes(e.key)) { if(connected) setIsEditing(true); return; }
                                                             // In edit mode, allow default arrow behavior inside textarea and disable cell navigation
                                                             if (isEditing && keys.includes(e.key)) { return; }
                                                             e.preventDefault();
@@ -843,6 +881,7 @@ export default function Sheet() {
                                                         // Only update value locally while editing, commit on blur
                                                         onChange={(e) => {
                                                             // Update local state for textarea value
+                                                            if (connected)
                                                             updateCellState(rowLabel, colLabel, e.target.value);
                                                             
                                                         }}

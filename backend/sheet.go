@@ -342,6 +342,152 @@ func (s *Sheet) MoveRowBelow(fromRowStr, targetRowStr, user string) bool {
 	return true
 }
 
+// MoveColumnRight moves the column `fromColStr` to be directly right of `targetColStr`.
+// It shifts the intervening columns accordingly and preserves cell contents and column widths.
+// Returns true if a move occurred.
+func (s *Sheet) MoveColumnRight(fromColStr, targetColStr, user string) bool {
+	// Convert column labels to indices (A, B, C, ...)
+	toColIdx := func(label string) int {
+		idx := 0
+		for i := 0; i < len(label); i++ {
+			idx = idx*26 + int(label[i]-'A'+1)
+		}
+		return idx
+	}
+	toColLabel := func(idx int) string {
+		label := ""
+		for idx > 0 {
+			idx--
+			b := byte(int('A') + (idx % 26))
+			label = string([]byte{b}) + label
+			idx /= 26
+		}
+		return label
+	}
+
+	fromIdx := toColIdx(fromColStr)
+	targetIdx := toColIdx(targetColStr)
+	if fromIdx == 0 || targetIdx == 0 {
+		return false
+	}
+	destIdx := targetIdx + 1
+	if destIdx == fromIdx {
+		return false
+	}
+	if fromIdx < destIdx {
+		destIdx-- // Adjust for removal before insertion
+	}
+
+	s.mu.Lock()
+	// Find all affected columns
+	start := fromIdx
+	end := destIdx
+	if start > end {
+		start, end = end, start
+	}
+
+	// Snapshot cells for affected columns
+	cellsByColBefore := make(map[int]map[string]Cell)
+	for c := start; c <= end; c++ {
+		colLabel := toColLabel(c)
+		colCells := make(map[string]Cell)
+		for rowKey, rowMap := range s.Data {
+			if cell, ok := rowMap[colLabel]; ok {
+				colCells[rowKey] = cell
+			}
+		}
+		cellsByColBefore[c] = colCells
+	}
+	savedColCells := cellsByColBefore[fromIdx]
+
+	// Helper to clear a column
+	clearCol := func(colIdx int) {
+		colLabel := toColLabel(colIdx)
+		for _, rowMap := range s.Data {
+			delete(rowMap, colLabel)
+		}
+	}
+
+	// Perform shifts
+	if fromIdx < destIdx {
+		// Move right: shift [fromIdx+1..destIdx] left by 1
+		for k := fromIdx + 1; k <= destIdx; k++ {
+			target := k - 1
+			clearCol(target)
+			fromMap := cellsByColBefore[k]
+			for rowKey, cell := range fromMap {
+				if s.Data[rowKey] == nil {
+					s.Data[rowKey] = make(map[string]Cell)
+				}
+				s.Data[rowKey][toColLabel(target)] = cell
+			}
+		}
+		// Place saved col at destIdx
+		clearCol(destIdx)
+		for rowKey, cell := range savedColCells {
+			if s.Data[rowKey] == nil {
+				s.Data[rowKey] = make(map[string]Cell)
+			}
+			s.Data[rowKey][toColLabel(destIdx)] = cell
+		}
+	} else {
+		// Move left: shift [destIdx..fromIdx-1] right by 1
+		for k := fromIdx - 1; k >= destIdx; k-- {
+			target := k + 1
+			clearCol(target)
+			fromMap := cellsByColBefore[k]
+			for rowKey, cell := range fromMap {
+				if s.Data[rowKey] == nil {
+					s.Data[rowKey] = make(map[string]Cell)
+				}
+				s.Data[rowKey][toColLabel(target)] = cell
+			}
+		}
+		// Place saved col at destIdx
+		clearCol(destIdx)
+		for rowKey, cell := range savedColCells {
+			if s.Data[rowKey] == nil {
+				s.Data[rowKey] = make(map[string]Cell)
+			}
+			s.Data[rowKey][toColLabel(destIdx)] = cell
+		}
+	}
+
+	// Update ColWidths
+	if s.ColWidths == nil {
+		s.ColWidths = make(map[string]int)
+	}
+	newWidths := make(map[string]int, len(s.ColWidths))
+	for k, v := range s.ColWidths {
+		newWidths[k] = v
+	}
+	if fromIdx < destIdx {
+		for k := fromIdx + 1; k <= destIdx; k++ {
+			newWidths[toColLabel(k-1)] = s.ColWidths[toColLabel(k)]
+		}
+		newWidths[toColLabel(destIdx)] = s.ColWidths[toColLabel(fromIdx)]
+	} else {
+		for k := fromIdx - 1; k >= destIdx; k-- {
+			newWidths[toColLabel(k+1)] = s.ColWidths[toColLabel(k)]
+		}
+		newWidths[toColLabel(destIdx)] = s.ColWidths[toColLabel(fromIdx)]
+	}
+	s.ColWidths = newWidths
+
+	// Audit entry
+	s.AuditLog = append(s.AuditLog, AuditEntry{
+		Timestamp: time.Now(),
+		User:      user,
+		Action:    "MOVE_COL",
+		Details:   fmt.Sprintf("Moved column %s to right of column %s", fromColStr, targetColStr),
+	})
+
+	s.mu.Unlock()
+
+	// Save after unlock
+	globalSheetManager.SaveSheet(s)
+	return true
+}
 func itoa(i int) string {
 	return fmt.Sprintf("%d", i)
 }
