@@ -85,7 +85,6 @@ func (h *Hub) run() {
 			// Persist changes if it's an update
 			if message.Type == "UPDATE_CELL" {
 				// Parse payload
-				// Payload is json.RawMessage ([]byte)
 				var update struct {
 					Row   string `json:"row"`
 					Col   string `json:"col"`
@@ -96,6 +95,16 @@ func (h *Hub) run() {
 					sheet := globalSheetManager.GetSheet(message.SheetID)
 					if sheet != nil {
 						sheet.SetCell(update.Row, update.Col, update.Value, message.User)
+						// Broadcast updated sheet snapshot
+						sheet.mu.RLock()
+						payload, _ := json.Marshal(sheet)
+						sheet.mu.RUnlock()
+						toSend = &Message{
+							Type:    "ROW_COL_UPDATED",
+							SheetID: message.SheetID,
+							Payload: payload,
+							User:    message.User,
+						}
 					}
 				} else {
 					log.Printf("Error unmarshalling update payload: %v", err)
@@ -110,6 +119,16 @@ func (h *Hub) run() {
 					sheet := globalSheetManager.GetSheet(message.SheetID)
 					if sheet != nil {
 						sheet.SetColWidth(update.Col, update.Width, message.User)
+						// Broadcast updated sheet snapshot
+						sheet.mu.RLock()
+						payload, _ := json.Marshal(sheet)
+						sheet.mu.RUnlock()
+						toSend = &Message{
+							Type:    "ROW_COL_UPDATED",
+							SheetID: message.SheetID,
+							Payload: payload,
+							User:    message.User,
+						}
 					}
 				} else {
 					log.Printf("Error unmarshalling resize col payload: %v", err)
@@ -124,6 +143,16 @@ func (h *Hub) run() {
 					sheet := globalSheetManager.GetSheet(message.SheetID)
 					if sheet != nil {
 						sheet.SetRowHeight(update.Row, update.Height, message.User)
+						// Broadcast updated sheet snapshot
+						sheet.mu.RLock()
+						payload, _ := json.Marshal(sheet)
+						sheet.mu.RUnlock()
+						toSend = &Message{
+							Type:    "ROW_COL_UPDATED",
+							SheetID: message.SheetID,
+							Payload: payload,
+							User:    message.User,
+						}
 					}
 				} else {
 					log.Printf("Error unmarshalling resize row payload: %v", err)

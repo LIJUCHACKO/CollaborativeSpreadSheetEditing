@@ -145,6 +145,9 @@ export default function Sheet() {
                 } else if (msg.type === 'COL_MOVED') {
                     // Server performed column move; refresh state from snapshot
                     setInitialState(msg.payload);
+                } else if (msg.type === 'ROW_COL_UPDATED') {
+                    // Server broadcast after cell update or row/col resize; refresh state from snapshot
+                    setInitialState(msg.payload);
                 }
             } catch (e) {
                 console.error("WS Parse error", e);
