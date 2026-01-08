@@ -55,10 +55,13 @@ export default function Sheet() {
     const [isEditing, setIsEditing] = useState(false);
     // Sort configuration: { col: 'A'|'B'|..., direction: 'asc'|'desc' }
     const [sortConfig, setSortConfig] = useState({ col: null, direction: null });
+    // Row cut/paste state
+    const [cutRow, setCutRow] = useState(null);
 
     const ws = useRef(null);
 
     // Viewport state for virtualized grid
+    const [cellModified, setCellModified] = useState(0);
     const [rowStart, setRowStart] = useState(1);
     const [visibleRowsCount, setVisibleRowsCount] = useState(15);
     const [colStart, setColStart] = useState(1);
@@ -134,6 +137,9 @@ export default function Sheet() {
                     if (row && typeof height === 'number') {
                         setRowHeights(prev => ({ ...prev, [row]: height }));
                     }
+                } else if (msg.type === 'ROW_MOVED') {
+                    // Server performed row move; refresh state from snapshot
+                    setInitialState(msg.payload);
                 }
             } catch (e) {
                 console.error("WS Parse error", e);
@@ -184,19 +190,14 @@ export default function Sheet() {
             ...prev,
             [`${row}-${col}`]: { value, user }
         }));
-
-        setAuditLog(prev => [...prev, {
-            timestamp: new Date().toISOString(),
-            user: user,
-            action: "EDIT_CELL",
-            details: `Set cell ${row},${col} to ${value}`
-        }]);
+        setCellModified(1)
     };
 
     const handleCellChange = (r, c, value) => {
         // Optimistic update
-        updateCellState(String(r), String(c), value, username);
-
+        //updateCellState(String(r), String(c), value, username);
+        //send update to server only if changed
+        if (cellModified === 0) { return; }
         // Send to WB
         if (ws.current && ws.current.readyState === WebSocket.OPEN) {
             const msg = {
@@ -206,6 +207,7 @@ export default function Sheet() {
             };
             ws.current.send(JSON.stringify(msg));
         }
+        setCellModified(0);
     };
 
     const onGlobalMouseMove = (e) => {
@@ -345,6 +347,22 @@ export default function Sheet() {
 
         setFilteredRowHeaders(newFilteredRowHeaders);
     }, [filters, sortConfig, data]);
+
+    // Determine if filtering is active (used to disable row reordering)
+    const isFilterActive = Object.values(filters).some(v => v && v.trim() !== '');
+
+    const moveCutRowBelow = (targetRow) => {
+        if (cutRow == null) return;
+        if (isFilterActive) return; // disabled while filters are active
+
+        // Delegate row move to backend; it will broadcast updated sheet
+        if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+            const payload = { fromRow: String(cutRow), targetRow: String(targetRow), user: username };
+            ws.current.send(JSON.stringify({ type: 'MOVE_ROW', sheet_id: id, payload }));
+        }
+
+        setCutRow(null);
+    };
 
     const displayedRowHeaders = [
         1,
@@ -511,6 +529,13 @@ export default function Sheet() {
                         <div style={{ gridColumn: '2 / span 1', gridRow: '1 / span 1' }}
                              onWheel={(e) => {
                                  e.preventDefault();
+                                 // Commit edit and exit editing mode on scroll
+                                 setIsEditing(false);
+                                 const { row, col } = focusedCell;
+                                 const key = `${row}-${col}`;
+                                 if (data[key]) {
+                                     handleCellChange(row, col, data[key].value);
+                                 }
                                  const step = e.deltaY > 0 ? 1 : -1;
                                  const maxStart = Math.max(1, COLS - visibleColsCount + 1);
                                  setColStart(prev => Math.max(1, Math.min(maxStart, prev + step)));
@@ -520,7 +545,15 @@ export default function Sheet() {
                                 min={1}
                                 max={Math.max(1, COLS - visibleColsCount + 1)}
                                 value={colStart}
-                                onChange={(e) => setColStart(Math.max(1, Math.min(COLS - visibleColsCount + 1, parseInt(e.target.value, 10) || 1)))}
+                                onChange={(e) =>{ 
+                                    // Commit edit and exit editing mode on scroll
+                                    setIsEditing(false);
+                                    const { row, col } = focusedCell;
+                                    const key = `${row}-${col}`;
+                                    if (data[key]) {
+                                        handleCellChange(row, col, data[key].value);
+                                    }
+                                    setColStart(Math.max(1, Math.min(COLS - visibleColsCount + 1, parseInt(e.target.value, 10) || 1)))}}
                                 style={{ width: '100%' }}
                                 aria-label="Columns scrollbar"
                             />
@@ -530,6 +563,12 @@ export default function Sheet() {
                         <div style={{ gridColumn: '1 / span 1', gridRow: '2 / span 1' }}
                              onWheel={(e) => {
                                  e.preventDefault();
+                                 setIsEditing(false);
+                                 const { row, col } = focusedCell;
+                                 const key = `${row}-${col}`;
+                                 if (data[key]) {
+                                     handleCellChange(row, col, data[key].value);
+                                 }
                                  const step = e.deltaY > 0 ? 1 : -1;
                                  const maxStart = Math.max(1, ROWS - visibleRowsCount + 1);
                                  setRowStart(prev => Math.max(1, Math.min(maxStart, prev + step)));
@@ -540,7 +579,15 @@ export default function Sheet() {
                                 min={1}
                                 max={Math.max(1, ROWS - visibleRowsCount + 1)}
                                 value={rowStart}
-                                onChange={(e) => setRowStart(Math.max(1, Math.min(ROWS - visibleRowsCount + 1, parseInt(e.target.value, 10) || 1)))}
+                                onChange={(e) => {
+                                    setIsEditing(false);
+                                    const { row, col } = focusedCell;
+                                    const key = `${row}-${col}`;
+                                    if (data[key]) {
+                                        handleCellChange(row, col, data[key].value);
+                                    }
+                                    
+                                    setRowStart(Math.max(1, Math.min(ROWS - visibleRowsCount + 1, parseInt(e.target.value, 10) || 1)))}}
                                 style={{ writingMode: 'vertical-rl', height: '100%', width: '100%' }}
                                 aria-label="Rows scrollbar"
                             />
@@ -550,6 +597,12 @@ export default function Sheet() {
                         <div style={{ gridColumn: '2 / span 1', gridRow: '2 / span 1', overflow: 'auto' }}
                         onWheel={(e) => {
                                  e.preventDefault();
+                                 setIsEditing(false);
+                                 const { row, col } = focusedCell;
+                                 const key = `${row}-${col}`;
+                                 if (data[key]) {
+                                     handleCellChange(row, col, data[key].value);
+                                 }
                                  const step = e.deltaY > 0 ? 1 : -1;
                                  const maxStart = Math.max(1, ROWS - visibleRowsCount + 1);
                                  setRowStart(prev => Math.max(1, Math.min(maxStart, prev + step)));
@@ -669,6 +722,31 @@ export default function Sheet() {
                                             style={{ position: 'relative',height: `${rowHeights[rowLabel] || DEFAULT_ROW_HEIGHT}px`, width: `${rowLabelWidth}px`,padding :`0` }}
                                         >
                                             {rowLabel}
+                                            {/* Row actions: Cut/Paste */}
+                                            <div style={{ position: 'absolute', top: 2, right: 2, display: 'flex', gap: '4px', zIndex: 25 }}>
+                                                <button
+                                                    type="button"
+                                                    className="btn btn-xs btn-light"
+                                                    disabled={isFilterActive}
+                                                    title={isFilterActive ? 'Disabled while filters are active' : 'Cut this row'}
+                                                    onClick={() => setCutRow(rowLabel)}
+                                                    style={{ padding: '0 4px', fontSize: '10px' }}
+                                                >
+                                                    Cut
+                                                </button>
+                                                {cutRow != null && cutRow !== rowLabel && (
+                                                    <button
+                                                        type="button"
+                                                        className="btn btn-xs btn-light"
+                                                        disabled={isFilterActive}
+                                                        title={isFilterActive ? 'Disabled while filters are active' : `Insert cut row below row ${rowLabel}`}
+                                                        onClick={() => moveCutRowBelow(rowLabel)}
+                                                        style={{ padding: '0 4px', fontSize: '10px' }}
+                                                    >
+                                                        Paste here
+                                                    </button>
+                                                )}
+                                            </div>
                                              <div
                                                 onMouseDown={(e) => onRowResizeMouseDown(rowLabel, e)}
                                                 title="Drag to resize row"
@@ -707,7 +785,7 @@ export default function Sheet() {
                                                         data-col={colLabel}
                                                         onFocus={() => { setFocusedCell({ row: rowLabel, col: colLabel }); setIsEditing(false); }}
                                                         onDoubleClick={(e) => { setIsEditing(true); if (typeof e.target.select === 'function') e.target.select(); }}
-                                                        onBlur={() => setIsEditing(false)}
+                                                      
                                                         onKeyDown={(e) => {
                                                             const keys = ['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'];
                                                             // Enter edit mode when typing any non-arrow key (including Enter)
@@ -762,7 +840,17 @@ export default function Sheet() {
                                                                 }
                                                             }, 0);
                                                             }}
-                                                        onChange={(e) => handleCellChange(rowLabel, colLabel, e.target.value)}
+                                                        // Only update value locally while editing, commit on blur
+                                                        onChange={(e) => {
+                                                            // Update local state for textarea value
+                                                            updateCellState(rowLabel, colLabel, e.target.value);
+                                                            
+                                                        }}
+                                                        onBlur={(e) => {
+                                                            setIsEditing(false);
+                                                            // Commit value to backend only on blur
+                                                            handleCellChange(rowLabel, colLabel, e.target.value);
+                                                        }}
                                                     />
                                                     {cell.user && cell.user !== username && (
                                                         <div className="absolute top-0 right-0 w-0 h-0 border-t-[8px] border-r-[8px] border-t-purple-500 border-r-transparent transform rotate-90" title={`Edited by ${cell.user}`}></div>

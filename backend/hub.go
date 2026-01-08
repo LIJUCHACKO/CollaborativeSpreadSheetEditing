@@ -79,6 +79,8 @@ func (h *Hub) run() {
 			// The message payload should already be processed/updated in the sheet state before broadcasting?
 			// Or we handle the "command" here?
 			// For now, let's assume the caller handles state update and we just broadcast
+			// Determine final message to send (may differ from inbound command)
+			toSend := message
 
 			// Persist changes if it's an update
 			if message.Type == "UPDATE_CELL" {
@@ -126,6 +128,32 @@ func (h *Hub) run() {
 				} else {
 					log.Printf("Error unmarshalling resize row payload: %v", err)
 				}
+			} else if message.Type == "MOVE_ROW" {
+				var mv struct {
+					FromRow   string `json:"fromRow"`
+					TargetRow string `json:"targetRow"`
+					User      string `json:"user"`
+				}
+				if err := json.Unmarshal(message.Payload, &mv); err == nil {
+					sheet := globalSheetManager.GetSheet(message.SheetID)
+					if sheet != nil {
+						moved := sheet.MoveRowBelow(mv.FromRow, mv.TargetRow, message.User)
+						if moved {
+							// Broadcast updated sheet snapshot
+							sheet.mu.RLock()
+							payload, _ := json.Marshal(sheet)
+							sheet.mu.RUnlock()
+							toSend = &Message{
+								Type:    "ROW_MOVED",
+								SheetID: message.SheetID,
+								Payload: payload,
+								User:    message.User,
+							}
+						}
+					}
+				} else {
+					log.Printf("Error unmarshalling MOVE_ROW payload: %v", err)
+				}
 			}
 
 			if clients, ok := h.rooms[message.SheetID]; ok {
@@ -134,7 +162,7 @@ func (h *Hub) run() {
 					// but for optimizing latency we might optimistically update frontend.
 					// Google docs sends back.
 					select {
-					case client.send <- msgToBytes(message):
+					case client.send <- msgToBytes(toSend):
 					default:
 						close(client.send)
 						delete(clients, client)

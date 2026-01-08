@@ -144,14 +144,28 @@ func (s *Sheet) SetCell(row, col, value, user string) {
 	if s.Data[row] == nil {
 		s.Data[row] = make(map[string]Cell)
 	}
+	currentVal, exists := s.Data[row][col]
+	if exists && currentVal.Value == value {
+		// No change
+		s.mu.Unlock()
+		return
+	}
 	s.Data[row][col] = Cell{Value: value, User: user}
-
-	s.AuditLog = append(s.AuditLog, AuditEntry{
-		Timestamp: time.Now(),
-		User:      user,
-		Action:    "EDIT_CELL",
-		Details:   "Set cell " + row + "," + col + " to " + value,
-	})
+	if exists {
+		s.AuditLog = append(s.AuditLog, AuditEntry{
+			Timestamp: time.Now(),
+			User:      user,
+			Action:    "EDIT_CELL",
+			Details:   "Changed cell " + row + "," + col + " from " + currentVal.Value + " to " + value,
+		})
+	} else {
+		s.AuditLog = append(s.AuditLog, AuditEntry{
+			Timestamp: time.Now(),
+			User:      user,
+			Action:    "EDIT_CELL",
+			Details:   "Set cell " + row + "," + col + " to " + value,
+		})
+	}
 
 	s.mu.Unlock() // Unlock BEFORE saving to avoid deadlock (Save -> MarshalJSON -> tries RLock)
 
@@ -195,6 +209,137 @@ func (s *Sheet) SetRowHeight(row string, height int, user string) {
 	s.mu.Unlock()
 
 	globalSheetManager.SaveSheet(s)
+}
+
+// MoveRowBelow moves the row `fromRowStr` to be directly below `targetRowStr`.
+// It shifts the intervening rows accordingly and preserves cell contents and row heights.
+// Returns true if a move occurred.
+func (s *Sheet) MoveRowBelow(fromRowStr, targetRowStr, user string) bool {
+	// Parse integers
+	var fromRow, targetRow int
+	if _, err := fmt.Sscanf(fromRowStr, "%d", &fromRow); err != nil {
+		return false
+	}
+	if _, err := fmt.Sscanf(targetRowStr, "%d", &targetRow); err != nil {
+		return false
+	}
+
+	destIndex := targetRow + 1
+	if destIndex == fromRow { // no-op
+		return false
+	}
+	if fromRow < destIndex {
+		destIndex-- // Adjust for removal before insertion
+	}
+	s.mu.Lock()
+	// Snapshot cells for affected range
+	start := fromRow
+	end := destIndex
+	if start > end {
+		start, end = end, start
+	}
+
+	cellsByRowBefore := make(map[int]map[string]Cell)
+	for r := start; r <= end; r++ {
+		rowKey := itoa(r)
+		if m, ok := s.Data[rowKey]; ok {
+			clone := make(map[string]Cell, len(m))
+			for c, cell := range m {
+				clone[c] = cell
+			}
+			cellsByRowBefore[r] = clone
+		} else {
+			cellsByRowBefore[r] = make(map[string]Cell)
+		}
+	}
+
+	savedRowCells := cellsByRowBefore[fromRow]
+
+	// Helper to clear a row
+	clearRow := func(row int) {
+		rowKey := itoa(row)
+		delete(s.Data, rowKey)
+	}
+
+	// Perform shifts
+	if fromRow < destIndex {
+		// Move down: shift [fromRow+1..destIndex] up by 1
+		for k := fromRow + 1; k <= destIndex; k++ {
+			target := k - 1
+			clearRow(target)
+			fromMap := cellsByRowBefore[k]
+			if len(fromMap) > 0 {
+				s.Data[itoa(target)] = make(map[string]Cell, len(fromMap))
+				for col, cell := range fromMap {
+					s.Data[itoa(target)][col] = cell
+				}
+			}
+		}
+		// Place saved row at destIndex
+		clearRow(destIndex)
+		if len(savedRowCells) > 0 {
+			s.Data[itoa(destIndex)] = make(map[string]Cell, len(savedRowCells))
+			for col, cell := range savedRowCells {
+				s.Data[itoa(destIndex)][col] = cell
+			}
+		}
+	} else {
+		// Move up: shift [destIndex..fromRow-1] down by 1
+		for k := fromRow - 1; k >= destIndex; k-- {
+			target := k + 1
+			clearRow(target)
+			fromMap := cellsByRowBefore[k]
+			if len(fromMap) > 0 {
+				s.Data[itoa(target)] = make(map[string]Cell, len(fromMap))
+				for col, cell := range fromMap {
+					s.Data[itoa(target)][col] = cell
+				}
+			}
+		}
+		// Place saved row at destIndex
+		clearRow(destIndex)
+		if len(savedRowCells) > 0 {
+			s.Data[itoa(destIndex)] = make(map[string]Cell, len(savedRowCells))
+			for col, cell := range savedRowCells {
+				s.Data[itoa(destIndex)][col] = cell
+			}
+		}
+	}
+
+	// Update RowHeights
+	if s.RowHeights == nil {
+		s.RowHeights = make(map[string]int)
+	}
+	newHeights := make(map[string]int, len(s.RowHeights))
+	for k, v := range s.RowHeights {
+		newHeights[k] = v
+	}
+	if fromRow < destIndex {
+		for k := fromRow + 1; k <= destIndex; k++ {
+			newHeights[itoa(k-1)] = s.RowHeights[itoa(k)]
+		}
+		newHeights[itoa(destIndex)] = s.RowHeights[itoa(fromRow)]
+	} else {
+		for k := fromRow - 1; k >= destIndex; k-- {
+			newHeights[itoa(k+1)] = s.RowHeights[itoa(k)]
+		}
+		newHeights[itoa(destIndex)] = s.RowHeights[itoa(fromRow)]
+	}
+	s.RowHeights = newHeights
+
+	// Audit entry
+	s.AuditLog = append(s.AuditLog, AuditEntry{
+		Timestamp: time.Now(),
+		User:      user,
+		Action:    "MOVE_ROW",
+		Details:   fmt.Sprintf("Moved row %d to below row %d", fromRow, targetRow),
+	})
+
+	s.mu.Unlock()
+
+	// Save after unlock
+	globalSheetManager.SaveSheet(s)
+	return true
 }
 
 func itoa(i int) string {
