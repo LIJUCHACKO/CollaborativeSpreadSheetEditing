@@ -26,7 +26,8 @@ export default function Login() {
     const endpoint = isRegistering ? '/api/register' : '/api/login';
 
     try {
-      const res = await fetch(`http://localhost:8080${endpoint}`, {
+      const host = import.meta.env.VITE_BACKEND_HOST || 'localhost  ';
+      const res = await fetch(`http://${host}:8080${endpoint}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password }),

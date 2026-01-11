@@ -47,7 +47,8 @@ export default function Dashboard() {
 
     const fetchSheets = async () => {
         try {
-            const res = await authenticatedFetch('http://localhost:8080/api/sheets');
+            const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
+            const res = await authenticatedFetch(`http://${host}:8080/api/sheets`);
             if (res.ok) {
                 const data = await res.json();
                 setSheets(data || []);
@@ -66,7 +67,8 @@ export default function Dashboard() {
         if (!newSheetName.trim()) return;
 
         try {
-            const res = await authenticatedFetch('http://localhost:8080/api/sheets', {
+            const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
+            const res = await authenticatedFetch(`http://${host}:8080/api/sheets`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ name: newSheetName, user: username }),
@@ -272,7 +274,7 @@ export default function Dashboard() {
                         <tbody>
                             {displayedSheets.map((sheet) => (
                                 <tr key={sheet.id} style={{ cursor: 'pointer' }}>
-                                    <td onClick={() => !editingSheetId && navigate(`/sheet/${sheet.id}`)}>
+                                    <td onClick={() => !editingSheetId &&  window.open(`/sheet/${sheet.id}`)}>
                                         {editingSheetId === sheet.id ? (
                                             <input
                                                 type="text"
@@ -293,8 +295,8 @@ export default function Dashboard() {
                                             sheet.name
                                         )}
                                     </td>
-                                    <td onClick={() => !editingSheetId && navigate(`/sheet/${sheet.id}`)}>{sheet.owner}</td>
-                                    <td className="font-mono" onClick={() => !editingSheetId && navigate(`/sheet/${sheet.id}`)}>{sheet.id}</td>
+                                    <td onClick={() => !editingSheetId &&  window.open(`/sheet/${sheet.id}`)}>{sheet.owner}</td>
+                                    <td className="font-mono" onClick={() => !editingSheetId &&  window.open(`/sheet/${sheet.id}`)}>{sheet.id}</td>
                                     <td className="text-end">
                                         {editingSheetId === sheet.id ? (
                                             <>

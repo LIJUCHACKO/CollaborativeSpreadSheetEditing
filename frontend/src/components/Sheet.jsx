@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState, useRef, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
     FileSpreadsheet,
@@ -60,6 +60,178 @@ export default function Sheet() {
     // Column cut/paste state
     const [cutCol, setCutCol] = useState(null);
 
+    // Multi-cell selection and clipboard state
+    const [selectionStart, setSelectionStart] = useState(null); // { row, col }
+    const [selectedRange, setSelectedRange] = useState(null); // { startRow, startCol, endRow, endCol }
+    const [isSelecting, setIsSelecting] = useState(false);
+    const [copiedBlock, setCopiedBlock] = useState(null); // { rows, cols, values: string[][] }
+    const [contextMenu, setContextMenu] = useState({ visible: false, x: 0, y: 0, cell: null });
+    // Shared selection from other instances of the same user
+    const [sharedSelection, setSharedSelection] = useState(null); // { startRow, startCol, endRow, endCol }
+
+    const colIndexMap = useMemo(() => {
+        const map = {};
+        COL_HEADERS.forEach((c, i) => { map[c] = i; });
+        return map;
+    }, []);
+
+    const colLabelAt = (index) => COL_HEADERS[index] || null;
+    const isCellSelected = (rowLabel, colLabel) => {
+        if (!selectedRange) return false;
+        const rMin = Math.min(selectedRange.startRow, selectedRange.endRow);
+        const rMax = Math.max(selectedRange.startRow, selectedRange.endRow);
+        const cStartIdx = colIndexMap[selectedRange.startCol] ?? -1;
+        const cEndIdx = colIndexMap[selectedRange.endCol] ?? -1;
+        const cMin = Math.min(cStartIdx, cEndIdx);
+        const cMax = Math.max(cStartIdx, cEndIdx);
+        const cIdx = colIndexMap[colLabel] ?? -1;
+        return rowLabel >= rMin && rowLabel <= rMax && cIdx >= cMin && cIdx <= cMax;
+    };
+
+    const startSelection = (rowLabel, colLabel) => {
+        console.log(rowLabel, colLabel);
+        setIsSelecting(true);
+        setSelectionStart({ row: rowLabel, col: colLabel });
+        setSelectedRange({ startRow: rowLabel, startCol: colLabel, endRow: rowLabel, endCol: colLabel });
+        setIsEditing(false);
+        setCutRow(null);
+        setCutCol(null);
+        setContextMenu(prev => ({ ...prev, visible: false }));
+    };
+
+    const extendSelection = (rowLabel, colLabel) => {
+        if (!isSelecting || !selectionStart) return;
+        //console.log( rowLabel,  colLabel );
+        setSelectedRange(prev => ({ ...prev, endRow: rowLabel, endCol: colLabel }));
+    };
+
+    const endSelection = () => {
+        if(!connected) return
+        if (!isSelecting) return;
+        setIsSelecting(false);
+        if (!selectedRange) return;
+
+        // Build copied block values from current selected range
+        const rMin = Math.min(selectedRange.startRow, selectedRange.endRow);
+        const rMax = Math.max(selectedRange.startRow, selectedRange.endRow);
+        const cStartIdx = colIndexMap[selectedRange.startCol] ?? -1;
+        const cEndIdx = colIndexMap[selectedRange.endCol] ?? -1;
+        const cMin = Math.min(cStartIdx, cEndIdx);
+        const cMax = Math.max(cStartIdx, cEndIdx);
+        const values = [];
+        for (let r = rMin; r <= rMax; r++) {
+            const rowArr = [];
+            for (let ci = cMin; ci <= cMax; ci++) {
+                const colLabel = colLabelAt(ci);
+                const key = `${r}-${colLabel}`;
+                rowArr.push((data[key]?.value ?? '').toString());
+            }
+            values.push(rowArr);
+        }
+        const block = { rows: rMax - rMin + 1, cols: cMax - cMin + 1, values };
+        //setCopiedBlock(block);
+        //console.log("going to Send selection:");
+        // Send selection range and values to backend so other instances of the same user can paste
+        if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+            const payload = {
+                startRow: rMin,
+                startCol: colLabelAt(cMin),
+                endRow: rMax,
+                endCol: colLabelAt(cMax),
+                sheet_id: id,
+                values,
+            };
+            ws.current.send(JSON.stringify({ type: 'SELECTION_COPIED', sheet_id: id, payload }));
+            //console.log("Send selection:",values);
+        }
+    };
+
+    const closeContextMenu = () => setContextMenu({ visible: false, x: 0, y: 0, cell: null });
+
+    const showContextMenu = (e, rowLabel, colLabel) => {
+        e.preventDefault();
+        setIsEditing(false);
+        setContextMenu({ visible: true, x: e.clientX, y: e.clientY, cell: { row: rowLabel, col: colLabel } });
+    };
+
+    const handleCopySelection = () => {
+        if (!selectedRange) return;
+        const rMin = Math.min(selectedRange.startRow, selectedRange.endRow);
+        const rMax = Math.max(selectedRange.startRow, selectedRange.endRow);
+        const cStartIdx = colIndexMap[selectedRange.startCol] ?? -1;
+        const cEndIdx = colIndexMap[selectedRange.endCol] ?? -1;
+        const cMin = Math.min(cStartIdx, cEndIdx);
+        const cMax = Math.max(cStartIdx, cEndIdx);
+        const values = [];
+        for (let r = rMin; r <= rMax; r++) {
+            const rowArr = [];
+            for (let ci = cMin; ci <= cMax; ci++) {
+                const colLabel = colLabelAt(ci);
+                const key = `${r}-${colLabel}`;
+                rowArr.push((data[key]?.value ?? '').toString());
+            }
+            values.push(rowArr);
+        }
+        //setCopiedBlock({ rows: rMax - rMin + 1, cols: cMax - cMin + 1, values });
+        closeContextMenu();
+    };
+
+    const handlePasteAt = (anchorRow, anchorColLabel) => {
+        if (!copiedBlock || !anchorColLabel) return;
+        const anchorIdx = colIndexMap[anchorColLabel] ?? -1;
+        if (anchorIdx < 0) return;
+        const updates = {};
+        let hasConflict = false;
+        for (let rOff = 0; rOff < copiedBlock.rows; rOff++) {
+            const r = anchorRow + rOff;
+            if (r < 1 || r > ROWS) continue;
+            for (let cOff = 0; cOff < copiedBlock.cols; cOff++) {
+                const cIdx = anchorIdx + cOff;
+                if (cIdx < 0 || cIdx >= COLS) continue;
+                const cLabel = colLabelAt(cIdx);
+                if (!cLabel) continue;
+                const key = `${r}-${cLabel}`;
+                const existing = (data[key]?.value ?? '').toString();
+                if (existing !== '') hasConflict = true;
+            }
+        }
+
+        if (hasConflict) {
+            const ok = window.confirm('Destination cells contain data. Overwrite?');
+            if (!ok) { closeContextMenu(); return; }
+        }
+
+        for (let rOff = 0; rOff < copiedBlock.rows; rOff++) {
+            const r = anchorRow + rOff;
+            if (r < 1 || r > ROWS) continue;
+            for (let cOff = 0; cOff < copiedBlock.cols; cOff++) {
+                const cIdx = anchorIdx + cOff;
+                if (cIdx < 0 || cIdx >= COLS) continue;
+                const cLabel = colLabelAt(cIdx);
+                if (!cLabel) continue;
+                const key = `${r}-${cLabel}`;
+                const value = copiedBlock.values[rOff][cOff] ?? '';
+                updates[key] = { value, user: username };
+            }
+        }
+
+        // Apply local state in one batch
+        setData(prev => ({ ...prev, ...updates }));
+
+        // Broadcast each cell update to server
+        if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+            Object.entries(updates).forEach(([key, cell]) => {
+                if (cell.value !== '') {
+                    const [rowStr, colLabel] = key.split('-');
+                    const payload = { row: rowStr, col: colLabel, value: cell.value, user: username };
+                    ws.current.send(JSON.stringify({ type: 'UPDATE_CELL', sheet_id: id, payload }));
+                }
+            });
+        }
+
+        closeContextMenu();
+    };
+
     const ws = useRef(null);
 
     // Viewport state for virtualized grid
@@ -113,53 +285,86 @@ export default function Sheet() {
             }
         }, 60000); // Check every minute
 
-        // Connect to WS
-        const socket = new WebSocket(`ws://localhost:8080/ws?user=${encodeURIComponent(username)}&id=${id}`);
+        // WebSocket connection with reconnection logic
+        let reconnectTimeout = null;
+        let shouldReconnect = true;
 
-        socket.onopen = () => {
-            console.log('Connected to WS');
-            setConnected(true);
-        };
+        function connectWS() {
+            const host = import.meta.env.VITE_BACKEND_HOST || '192.168.0.102';
+            const socket = new WebSocket(`ws://${host}:8080/ws?user=${encodeURIComponent(username)}&id=${id}`);
 
-        socket.onmessage = (event) => {
-            try {
-                const msg = JSON.parse(event.data);
-                if (msg.type === 'INIT') {
-                    setInitialState(msg.payload);
-                } else if (msg.type === 'UPDATE_CELL') {
-                    const { row, col, value, user } = msg.payload;
-                    updateCellState(row, col, value, user);
-                } else if (msg.type === 'RESIZE_COL') {
-                    const { col, width } = msg.payload || {};
-                    if (col && typeof width === 'number') {
-                        setColWidths(prev => ({ ...prev, [col]: width }));
+            socket.onopen = () => {
+                console.log('Connected to WS');
+                setConnected(true);
+            };
+
+            socket.onmessage = (event) => {
+                try {
+                    const msg = JSON.parse(event.data);
+                    if (msg.type === 'INIT') {
+                        setInitialState(msg.payload);
+                    } else if (msg.type === 'UPDATE_CELL') {
+                        const { row, col, value, user } = msg.payload;
+                        updateCellState(row, col, value, user);
+                    } else if (msg.type === 'RESIZE_COL') {
+                        const { col, width } = msg.payload || {};
+                        if (col && typeof width === 'number') {
+                            setColWidths(prev => ({ ...prev, [col]: width }));
+                        }
+                    } else if (msg.type === 'RESIZE_ROW') {
+                        const { row, height } = msg.payload || {};
+                        if (row && typeof height === 'number') {
+                            setRowHeights(prev => ({ ...prev, [row]: height }));
+                        }
+                    } else if (msg.type === 'ROW_MOVED') {
+                        setInitialState(msg.payload);
+                    } else if (msg.type === 'COL_MOVED') {
+                        setInitialState(msg.payload);
+                    } else if (msg.type === 'ROW_COL_UPDATED') {
+                        setInitialState(msg.payload);
+                    } else if (msg.type === 'SELECTION_SHARED') {
+                        const { startRow, startCol, endRow, endCol, sheet_id,   values } = msg.payload || {};
+                        if (startRow && startCol && endRow && endCol) {
+                            setSharedSelection({ startRow, startCol, endRow, endCol, sheet_id });
+                            if (Array.isArray(values)) {
+                                const rows = Math.max(0, endRow - startRow + 1);
+                                const cStartIdx = colIndexMap[startCol] ?? -1;
+                                const cEndIdx = colIndexMap[endCol] ?? -1;
+                                const cols = Math.max(0, Math.abs(cEndIdx - cStartIdx) + 1);
+                                setCopiedBlock({ rows, cols, values });
+                            }
+                        }
                     }
-                } else if (msg.type === 'RESIZE_ROW') {
-                    const { row, height } = msg.payload || {};
-                    if (row && typeof height === 'number') {
-                        setRowHeights(prev => ({ ...prev, [row]: height }));
-                    }
-                } else if (msg.type === 'ROW_MOVED') {
-                    // Server performed row move; refresh state from snapshot
-                    setInitialState(msg.payload);
-                } else if (msg.type === 'COL_MOVED') {
-                    // Server performed column move; refresh state from snapshot
-                    setInitialState(msg.payload);
-                } else if (msg.type === 'ROW_COL_UPDATED') {
-                    // Server broadcast after cell update or row/col resize; refresh state from snapshot
-                    setInitialState(msg.payload);
+                } catch (e) {
+                    console.error("WS Parse error", e);
                 }
-            } catch (e) {
-                console.error("WS Parse error", e);
-            }
-        };
+            };
 
-        socket.onclose = () => {setConnected(false); setIsEditing(false)};
+            socket.onclose = () => {
+                setConnected(false); setIsEditing(false);
+                console.log('Disconnected from WS');
+                if (shouldReconnect) {
+                    // Try to reconnect after 2 seconds
+                    reconnectTimeout = setTimeout(() => {
+                        connectWS();
+                    }, 2000);
+                }
+            };
 
-        ws.current = socket;
+            socket.onerror = (e) => {
+                console.error('WebSocket error', e);
+                socket.close();
+            };
+
+            ws.current = socket;
+        }
+
+        connectWS();
 
         return () => {
-            socket.close();
+            shouldReconnect = false;
+            if (ws.current) ws.current.close();
+            if (reconnectTimeout) clearTimeout(reconnectTimeout);
             clearInterval(sessionCheckInterval);
         };
     }, [id, username, navigate]);
@@ -297,6 +502,17 @@ export default function Sheet() {
             window.removeEventListener('mouseup', onGlobalMouseUp);
         };
     }, []);
+
+    useEffect(() => {
+        const onWindowMouseUp = () => {};
+        const onWindowClick = () => closeContextMenu();
+        window.addEventListener('mouseup', onWindowMouseUp);
+        window.addEventListener('click', onWindowClick);
+        return () => {
+            window.removeEventListener('mouseup', onWindowMouseUp);
+            window.removeEventListener('click', onWindowClick);
+        };
+    }, [isSelecting]);
 
     // Update filteredRowHeaders when filters or sort change
     useEffect(() => {
@@ -802,30 +1018,79 @@ export default function Sheet() {
                                                     cursor: 'row-resize',
                                                     userSelect: 'none',
                                                     background: 'rgba(99,102,241,0.15)',
-                                                    borderTop: '1px solid #6366f1',
+                                                    borderTop: '1px solid #0ead23ff',
                                                     zIndex: 20,
                                                     touchAction: 'none'
                                                 }}
                                             ></div>
                                         </td>
                                         {displayedColHeaders.map((colLabel) => {
+                                            // Only render cell if sheetId matches current id
+                                            
                                             const key = `${rowLabel}-${colLabel}`;
                                             const cell = data[key] || { value: '' };
+                                            //const selected = isCellSelected(rowLabel, colLabel);
+                                            const inShared = sharedSelection ? (function(){
+                                                const rMin = Math.min(sharedSelection.startRow, sharedSelection.endRow);
+                                                const rMax = Math.max(sharedSelection.startRow, sharedSelection.endRow);
+                                                const cStartIdx = colIndexMap[sharedSelection.startCol] ?? -1;
+                                                const cEndIdx = colIndexMap[sharedSelection.endCol] ?? -1;
+                                                const cMin = Math.min(cStartIdx, cEndIdx);
+                                                const cMax = Math.max(cStartIdx, cEndIdx);
+                                                const cIdx = colIndexMap[colLabel] ?? -1;
+                                                return rowLabel >= rMin && rowLabel <= rMax && cIdx >= cMin && cIdx <= cMax;
+                                            })() : false;
+                                            const boundaryStyles = (function(){
+                                                if (!sharedSelection) return {};
+                                                // Disable shared selection borders if it belongs to a different sheet
+                                                //console.log('sharedSelection.sheet_id', sharedSelection.sheet_id, 'current id', id);
+                                                if (sharedSelection.sheet_id && sharedSelection.sheet_id !== id) return {};
+                                                const rMin = Math.min(sharedSelection.startRow, sharedSelection.endRow);
+                                                const rMax = Math.max(sharedSelection.startRow, sharedSelection.endRow);
+                                                const cStartIdx = colIndexMap[sharedSelection.startCol] ?? -1;
+                                                const cEndIdx = colIndexMap[sharedSelection.endCol] ?? -1;
+                                                const cMin = Math.min(cStartIdx, cEndIdx);
+                                                const cMax = Math.max(cStartIdx, cEndIdx);
+                                                const cIdx = colIndexMap[colLabel] ?? -1;
+                                                const color = '#6366f1';
+                                                const style = {};
+                                                if (rowLabel === rMin && cIdx >= cMin && cIdx <= cMax) style.borderTop = `2px solid ${color}`;
+                                                if (rowLabel === rMax && cIdx >= cMin && cIdx <= cMax) style.borderBottom = `2px solid ${color}`;
+                                                if (cIdx === cMin && rowLabel >= rMin && rowLabel <= rMax) style.borderLeft = `2px solid ${color}`;
+                                                if (cIdx === cMax && rowLabel >= rMin && rowLabel <= rMax) style.borderRight = `2px solid ${color}`;
+                                                return style;
+                                            })();
+
                                             return (
                                                 <td
                                                     key={key}
-                                                    className="border-b border-r border-gray-200 p-0 relative min-w-[7rem] group bg-white hover:bg-indigo-50/20 transition-colors"
-                                                    style={{ width: `${colWidths[colLabel] || DEFAULT_COL_WIDTH}px`, height: `${rowHeights[rowLabel] || DEFAULT_ROW_HEIGHT}px` }}
+                                                    className={`border-b border-r bg-gray-100 p-0 relative min-w-[7rem] group ${ inShared ? 'bg-indigo-50' : 'bg-white'} hover:bg-green-50/20 transition-colors`}
+                                                    style={{ width: `${colWidths[colLabel] || DEFAULT_COL_WIDTH}px`, height: `${rowHeights[rowLabel] || DEFAULT_ROW_HEIGHT}px`, ...boundaryStyles }}
+                                                    onContextMenu={(e) => {  !isEditing && showContextMenu(e, rowLabel, colLabel)}}
                                                 >
                                                     <textarea
-                                                        className="w-full h-full px-3 py-1 text-sm outline-none border-2 border-transparent focus:border-indigo-500 focus:ring-0 z-10 relative bg-transparent text-gray-800 resize-none"
+                                                        className={`w-full h-full px-3 py-1 text-sm outline-none border-2 border-transparent focus:border-green-100 focus:ring-0 z-10 relative bg-transparent text-gray-800 resize-none`}
                                                         rows={1}
                                                         style={{ width: '100%', height: '100%', boxSizing: 'border-box', display: 'block', overflow: 'auto', resize: 'none', whiteSpace: 'pre-wrap' }}
                                                         value={cell.value}
                                                         data-row={rowLabel}
                                                         data-col={colLabel}
                                                         onFocus={() => { setFocusedCell({ row: rowLabel, col: colLabel }); setIsEditing(false); }}
+                                                        onMouseOver={e => { e.target.focus(); }}
                                                         onDoubleClick={(e) => { if(connected)  {setIsEditing(true); setCutRow(null); setCutCol(null);}; if (typeof e.target.select === 'function') e.target.select(); }}
+                                                        onMouseDown={(e) => { 
+                                                            e.preventDefault();
+                                                            e.target.focus();
+                                                            if (e.button === 0 ) {
+                                                                startSelection(rowLabel, colLabel);
+                                                            }
+                                                        }}
+                                                        onMouseEnter={() => {extendSelection(rowLabel, colLabel);}   } 
+                                                        onMouseUp={(e) => {
+                                                                    extendSelection(rowLabel, colLabel);
+                                                                    endSelection(); 
+
+                                                        }}
                                                       
                                                         onKeyDown={(e) => {
                                                             const keys = ['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'];
@@ -894,6 +1159,30 @@ export default function Sheet() {
                                                             handleCellChange(rowLabel, colLabel, e.target.value);
                                                         }}
                                                     />
+                                                    
+                                                        {/* Context Menu */}
+                                                        {contextMenu.visible && (
+                                                            <div
+                                                                style={{ position: 'fixed', top: contextMenu.y, left: contextMenu.x, zIndex: 2000 }}
+                                                                className="bg-white border shadow rounded-md p-2 text-sm"
+                                                                onClick={(e) => e.stopPropagation()}
+                                                            >
+                                                                <button
+                                                                    className="block w-full text-left px-2 py-1 hover:bg-gray-100 rounded"
+                                                                    disabled={!selectedRange}
+                                                                    onClick={handleCopySelection}
+                                                                >
+                                                                    Copy
+                                                                </button>
+                                                                <button
+                                                                    className="block w-full text-left px-2 py-1 hover:bg-gray-100 rounded"
+                                                                    disabled={!copiedBlock || !contextMenu.cell}
+                                                                    onClick={() => handlePasteAt(contextMenu.cell.row, contextMenu.cell.col)}
+                                                                >
+                                                                    Paste
+                                                                </button>
+                                                            </div>
+                                                        )}
                                                     {cell.user && cell.user !== username && (
                                                         <div className="absolute top-0 right-0 w-0 h-0 border-t-[8px] border-r-[8px] border-t-purple-500 border-r-transparent transform rotate-90" title={`Edited by ${cell.user}`}></div>
                                                     )}

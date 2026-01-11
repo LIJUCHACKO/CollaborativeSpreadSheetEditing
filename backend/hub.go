@@ -208,6 +208,79 @@ func (h *Hub) run() {
 				} else {
 					log.Printf("Error unmarshalling MOVE_COL payload: %v", err)
 				}
+			} else if message.Type == "INSERT_ROW" {
+				var ins struct {
+					TargetRow string `json:"targetRow"`
+					User      string `json:"user"`
+				}
+				if err := json.Unmarshal(message.Payload, &ins); err == nil {
+					sheet := globalSheetManager.GetSheet(message.SheetID)
+					if sheet != nil {
+						inserted := sheet.InsertRowBelow(ins.TargetRow, message.User)
+						if inserted {
+							sheet.mu.RLock()
+							payload, _ := json.Marshal(sheet)
+							sheet.mu.RUnlock()
+							toSend = &Message{
+								Type:    "ROW_COL_UPDATED",
+								SheetID: message.SheetID,
+								Payload: payload,
+								User:    message.User,
+							}
+						}
+					}
+				} else {
+					log.Printf("Error unmarshalling INSERT_ROW payload: %v", err)
+				}
+			} else if message.Type == "INSERT_COL" {
+				var ins struct {
+					TargetCol string `json:"targetCol"`
+					User      string `json:"user"`
+				}
+				if err := json.Unmarshal(message.Payload, &ins); err == nil {
+					sheet := globalSheetManager.GetSheet(message.SheetID)
+					if sheet != nil {
+						inserted := sheet.InsertColumnRight(ins.TargetCol, message.User)
+						if inserted {
+							sheet.mu.RLock()
+							payload, _ := json.Marshal(sheet)
+							sheet.mu.RUnlock()
+							toSend = &Message{
+								Type:    "ROW_COL_UPDATED",
+								SheetID: message.SheetID,
+								Payload: payload,
+								User:    message.User,
+							}
+						}
+					}
+				} else {
+					log.Printf("Error unmarshalling INSERT_COL payload: %v", err)
+				}
+			} else if message.Type == "SELECTION_COPIED" {
+				// Forward selection range/values only to the same user's clients within the sheet room
+				// Payload is forwarded as-is; clients will interpret it and render boundaries / clipboard
+				toSend = &Message{
+					Type:    "SELECTION_SHARED",
+					SheetID: message.SheetID,
+					Payload: message.Payload,
+					User:    message.User,
+				}
+				//fmt.Println("received selection to broadcast:", string(message.Payload))
+				for _, clients := range h.rooms {
+					for client := range clients {
+						if client.userID != message.User {
+							continue
+						}
+						select {
+						case client.send <- msgToBytes(toSend):
+						default:
+							close(client.send)
+							delete(clients, client)
+						}
+					}
+				}
+				// Skip the general broadcast below because we already filtered by user
+				continue
 			}
 
 			if clients, ok := h.rooms[message.SheetID]; ok {
