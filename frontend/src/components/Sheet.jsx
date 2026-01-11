@@ -89,7 +89,7 @@ export default function Sheet() {
     };
 
     const startSelection = (rowLabel, colLabel) => {
-        console.log(rowLabel, colLabel);
+        //console.log(rowLabel, colLabel);
         setIsSelecting(true);
         setSelectionStart({ row: rowLabel, col: colLabel });
         setSelectedRange({ startRow: rowLabel, startCol: colLabel, endRow: rowLabel, endCol: colLabel });
@@ -598,6 +598,22 @@ export default function Sheet() {
         setCutCol(null);
     };
 
+    const insertRowBelow = (targetRow) => {
+        if (isFilterActive) return;
+        if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+            const payload = { targetRow: String(targetRow), user: username };
+            ws.current.send(JSON.stringify({ type: 'INSERT_ROW', sheet_id: id, payload }));
+        }
+    };
+
+    const insertColumnRight = (targetCol) => {
+        if (isFilterActive) return;
+        if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+            const payload = { targetCol: String(targetCol), user: username };
+            ws.current.send(JSON.stringify({ type: 'INSERT_COL', sheet_id: id, payload }));
+        }
+    };
+
     const displayedRowHeaders = [
         1,
         ...filteredRowHeaders.slice(
@@ -861,16 +877,30 @@ export default function Sheet() {
                                             <div className="flex items-center justify-center gap-1">
                                                 <span>{h}</span>
                                                 <div style={{ position: 'absolute', top: 2, left: 2, display: 'flex', gap: '4px', zIndex: 25 }}>
-                                                    { cutCol == null && connected && (<button
-                                                        type="button"
-                                                        className="btn btn-xs btn-light"
-                                                        disabled={isFilterActive}
-                                                        title={isFilterActive ? 'Disabled while filters are active' : `Cut column ${h}`}
-                                                        onClick={() => {setCutCol(h); setCutRow(null);}}
-                                                        style={{ padding: '0 4px', fontSize: '10px' }}
-                                                    >
-                                                        <span role="img" aria-label="cut">✂️</span>
-                                                    </button>)} 
+                                                    {connected && (
+                                                        <button
+                                                            type="button"
+                                                            className="btn btn-xs btn-light"
+                                                            disabled={isFilterActive}
+                                                            title={isFilterActive ? 'Disabled while filters are active' : `Insert column to the right of ${h}`}
+                                                            onClick={() => insertColumnRight(h)}
+                                                            style={{ padding: '0 4px', fontSize: '10px' }}
+                                                        >
+                                                            <span role="img" aria-label="insert-col">➕</span>
+                                                        </button>
+                                                    )}
+                                                    { cutCol == null && connected && (
+                                                        <button
+                                                            type="button"
+                                                            className="btn btn-xs btn-light"
+                                                            disabled={isFilterActive}
+                                                            title={isFilterActive ? 'Disabled while filters are active' : `Cut column ${h}`}
+                                                            onClick={() => {setCutCol(h); setCutRow(null);}}
+                                                            style={{ padding: '0 4px', fontSize: '10px' }}
+                                                        >
+                                                            <span role="img" aria-label="cut">✂️</span>
+                                                        </button>
+                                                    )}
                                                     {cutCol != null && cutCol !== h && connected && (
                                                         <button
                                                             type="button"
@@ -978,16 +1008,28 @@ export default function Sheet() {
                                             className="bg-gray-50 border-b border-r border-gray-200 p-2 text-right text-xs font-semibold text-gray-500 select-none relative"
                                             style={{ position: 'relative',height: `${rowHeights[rowLabel] || DEFAULT_ROW_HEIGHT}px`, width: `${rowLabelWidth}px`,padding :`0` }}
                                         >
-                                            <span>{rowLabel}</span>
-                                            {/* Row actions: Cut/Paste */}
+                                            
+                                            {/* Row actions: Insert / Cut / Paste */}
                                             <div style={{ position: 'absolute', top: 0, left: 0, display: 'flex', gap: '4px', zIndex: 25 }}>
+                                                {connected && (
+                                                    <button
+                                                        type="button"
+                                                        className="btn btn-xs btn-light"
+                                                        disabled={isFilterActive}
+                                                        title={isFilterActive ? 'Disabled while filters are active' : `Insert row below ${rowLabel}`}
+                                                        onClick={() => insertRowBelow(rowLabel)}
+                                                        style={{ padding: '0 0px', fontSize: '8px' }}
+                                                    >
+                                                        <span role="img" aria-label="insert-row">➕</span>
+                                                    </button>
+                                                )}
                                                 {cutRow === null && connected &&(<button
                                                     type="button"
                                                     className="btn btn-xs btn-light"
                                                     disabled={isFilterActive}
                                                     title={isFilterActive ? 'Disabled while filters are active' : 'Cut this row'}
                                                     onClick={() => {setCutRow(rowLabel); setCutCol(null);}}
-                                                    style={{ padding: '0 4px', fontSize: '10px' }}
+                                                    style={{ padding: '0 0px', fontSize: '8px' }}
                                                 >
                                                     <span role="img" aria-label="cut">✂️</span>
                                                 </button>)}
@@ -998,12 +1040,14 @@ export default function Sheet() {
                                                         disabled={isFilterActive}
                                                         title={isFilterActive ? 'Disabled while filters are active' : `Insert cut row below row ${rowLabel}`}
                                                         onClick={() => { moveCutRowBelow(rowLabel); setCutRow(null); setCutCol(null); }}
-                                                        style={{ padding: '0 4px', fontSize: '10px' }}
+                                                        style={{ padding: '0 0px', fontSize: '8px' }}
                                                     >
                                                         <span role="img" aria-label="paste">📋</span>
                                                     </button>
                                                 )}
+                                                
                                             </div>
+                                            <span>{rowLabel}</span>
                                              <div
                                                 onMouseDown={(e) => onRowResizeMouseDown(rowLabel, e)}
                                                 title="Drag to resize row"

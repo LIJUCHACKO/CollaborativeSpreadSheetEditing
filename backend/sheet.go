@@ -211,6 +211,89 @@ func (s *Sheet) SetRowHeight(row string, height int, user string) {
 	globalSheetManager.SaveSheet(s)
 }
 
+// InsertRowBelow inserts a new empty row directly below `targetRowStr`, shifting subsequent rows (data and heights) down by one.
+// Returns true if an insertion occurred.
+func (s *Sheet) InsertRowBelow(targetRowStr, user string) bool {
+	var targetRow int
+	if _, err := fmt.Sscanf(targetRowStr, "%d", &targetRow); err != nil {
+		return false
+	}
+
+	insertRow := targetRow + 1
+
+	s.mu.Lock()
+
+	// Shift existing rows [insertRow..] down by 1
+	maxRow := 0
+	for rowKey := range s.Data {
+		var r int
+		if _, err := fmt.Sscanf(rowKey, "%d", &r); err == nil {
+			if r > maxRow {
+				maxRow = r
+			}
+		}
+	}
+	for r := maxRow; r >= insertRow; r-- {
+		fromKey := itoa(r)
+		toKey := itoa(r + 1)
+		if rowData, ok := s.Data[fromKey]; ok {
+			delete(s.Data, fromKey)
+			s.Data[toKey] = rowData
+		} else {
+			delete(s.Data, toKey)
+		}
+	}
+
+	// Ensure the new row exists but empty
+	newKey := itoa(insertRow)
+	if s.Data == nil {
+		s.Data = make(map[string]map[string]Cell)
+	}
+	if _, ok := s.Data[newKey]; !ok {
+		s.Data[newKey] = make(map[string]Cell)
+	}
+
+	// Shift RowHeights
+	if s.RowHeights == nil {
+		s.RowHeights = make(map[string]int)
+	}
+	maxHeightRow := 0
+	for rowKey := range s.RowHeights {
+		var r int
+		if _, err := fmt.Sscanf(rowKey, "%d", &r); err == nil {
+			if r > maxHeightRow {
+				maxHeightRow = r
+			}
+		}
+	}
+	for r := maxHeightRow; r >= insertRow; r-- {
+		fromKey := itoa(r)
+		toKey := itoa(r + 1)
+		if h, ok := s.RowHeights[fromKey]; ok {
+			delete(s.RowHeights, fromKey)
+			s.RowHeights[toKey] = h
+		} else {
+			delete(s.RowHeights, toKey)
+		}
+	}
+	// New row height defaults to existing height of target row, if any
+	if h, ok := s.RowHeights[targetRowStr]; ok {
+		s.RowHeights[newKey] = h
+	}
+
+	s.AuditLog = append(s.AuditLog, AuditEntry{
+		Timestamp: time.Now(),
+		User:      user,
+		Action:    "INSERT_ROW",
+		Details:   "Inserted row " + newKey + " below row " + targetRowStr,
+	})
+
+	s.mu.Unlock()
+
+	globalSheetManager.SaveSheet(s)
+	return true
+}
+
 // MoveRowBelow moves the row `fromRowStr` to be directly below `targetRowStr`.
 // It shifts the intervening rows accordingly and preserves cell contents and row heights.
 // Returns true if a move occurred.
@@ -485,6 +568,117 @@ func (s *Sheet) MoveColumnRight(fromColStr, targetColStr, user string) bool {
 	s.mu.Unlock()
 
 	// Save after unlock
+	globalSheetManager.SaveSheet(s)
+	return true
+}
+
+// InsertColumnRight inserts a new empty column directly to the right of `targetColStr`,
+// shifting subsequent columns (data and widths) right by one. Returns true if insertion occurred.
+func (s *Sheet) InsertColumnRight(targetColStr, user string) bool {
+	// Reuse the same helpers as MoveColumnRight
+	toColIdx := func(label string) int {
+		idx := 0
+		for i := 0; i < len(label); i++ {
+			idx = idx*26 + int(label[i]-'A'+1)
+		}
+		return idx
+	}
+	toColLabel := func(idx int) string {
+		label := ""
+		for idx > 0 {
+			idx--
+			b := byte(int('A') + (idx % 26))
+			label = string([]byte{b}) + label
+			idx /= 26
+		}
+		return label
+	}
+
+	targetIdx := toColIdx(targetColStr)
+	if targetIdx == 0 {
+		return false
+	}
+	insertIdx := targetIdx + 1
+
+	s.mu.Lock()
+
+	// Determine current max column index based on ColWidths and Data
+	maxIdx := 0
+	for col := range s.ColWidths {
+		if idx := toColIdx(col); idx > maxIdx {
+			maxIdx = idx
+		}
+	}
+	for _, rowMap := range s.Data {
+		for col := range rowMap {
+			if idx := toColIdx(col); idx > maxIdx {
+				maxIdx = idx
+			}
+		}
+	}
+
+	// Shift cells for all rows from right to left
+	for idx := maxIdx; idx >= insertIdx; idx-- {
+		fromLabel := toColLabel(idx)
+		toLabel := toColLabel(idx + 1)
+		for rowKey, rowMap := range s.Data {
+			if cell, ok := rowMap[fromLabel]; ok {
+				if s.Data[rowKey] == nil {
+					s.Data[rowKey] = make(map[string]Cell)
+				}
+				rowMap[toLabel] = cell
+				delete(rowMap, fromLabel)
+			} else {
+				delete(rowMap, toLabel)
+			}
+		}
+	}
+
+	// Ensure the new column exists as empty in all rows (optional but consistent)
+	newLabel := toColLabel(insertIdx)
+	for rowKey := range s.Data {
+		if s.Data[rowKey] == nil {
+			s.Data[rowKey] = make(map[string]Cell)
+		}
+		if _, ok := s.Data[rowKey][newLabel]; !ok {
+			s.Data[rowKey][newLabel] = Cell{}
+		}
+	}
+
+	// Shift ColWidths
+	if s.ColWidths == nil {
+		s.ColWidths = make(map[string]int)
+	}
+	maxWidthIdx := 0
+	for col := range s.ColWidths {
+		if idx := toColIdx(col); idx > maxWidthIdx {
+			maxWidthIdx = idx
+		}
+	}
+	for idx := maxWidthIdx; idx >= insertIdx; idx-- {
+		fromLabel := toColLabel(idx)
+		toLabel := toColLabel(idx + 1)
+		if w, ok := s.ColWidths[fromLabel]; ok {
+			delete(s.ColWidths, fromLabel)
+			s.ColWidths[toLabel] = w
+		} else {
+			delete(s.ColWidths, toLabel)
+		}
+	}
+	// New column width defaults to existing width of target column, if any
+	if w, ok := s.ColWidths[targetColStr]; ok {
+		s.ColWidths[newLabel] = w
+	}
+
+	s.AuditLog = append(s.AuditLog, AuditEntry{
+		Timestamp: time.Now(),
+		User:      user,
+		Action:    "INSERT_COL",
+		Details:   "Inserted column " + newLabel + " to the right of column " + targetColStr,
+	})
+
+	s.mu.Unlock()
+
 	globalSheetManager.SaveSheet(s)
 	return true
 }
