@@ -16,7 +16,7 @@ import {
     Settings,
     Filter
 } from 'lucide-react';
-import { isSessionValid, clearAuth, getUsername } from '../utils/auth';
+import { isSessionValid, clearAuth, getUsername, authenticatedFetch } from '../utils/auth';
 import './bootstrap/dist/css/bootstrap.min.css';
 
 const ROWS = 600;
@@ -257,6 +257,35 @@ export default function Sheet() {
     const [rowLabelWidth, setRowLabelWidth] = useState(DEFAULT_ROW_LABEL_WIDTH);
     const [colHeaderHeight, setColHeaderHeight] = useState(DEFAULT_COL_HEADER_HEIGHT);
     const dragRef = useRef({ type: null, label: null, startPos: 0, startSize: 0 });
+
+    const handleDownloadXlsx = async () => {
+        try {
+            const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
+            const res = await authenticatedFetch(`http://${host}:8080/api/export?sheet_id=${encodeURIComponent(id)}`, {
+                method: 'GET',
+            });
+
+            if (!res.ok) {
+                const text = await res.text();
+                alert(`Failed to export sheet: ${text}`);
+                return;
+            }
+
+            const blob = await res.blob();
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            const safeName = (sheetName || 'sheet') + '.xlsx';
+            a.download = safeName;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            window.URL.revokeObjectURL(url);
+        } catch (err) {
+            console.error('Error downloading XLSX', err);
+            alert('An unexpected error occurred while exporting the sheet.');
+        }
+    };
 
     const rowEnd = Math.min(rowStart + visibleRowsCount - 1, ROWS);
     const colEnd = Math.min(colStart + visibleColsCount - 1, COLS);
@@ -667,7 +696,13 @@ export default function Sheet() {
                     <span className="navbar-text d-flex align-items-center fw-bold ">
                         <FileSpreadsheet className="me-2" />{sheetName}
                         <span className="mx-3">|</span>
-                        <button className="btn btn-outline-primary btn-sm d-flex align-items-center"><Download className="me-1" /></button>
+                        <button
+                            className="btn btn-outline-primary btn-sm d-flex align-items-center"
+                            onClick={handleDownloadXlsx}
+                            title="Download as XLSX"
+                        >
+                            <Download className="me-1" />
+                        </button>
                         <button
                             onClick={() => setSidebarOpen(!isSidebarOpen)}
                             className={`btn btn-outline-primary btn-sm d-flex align-items-center ${isSidebarOpen ? 'active' : ''}`}
