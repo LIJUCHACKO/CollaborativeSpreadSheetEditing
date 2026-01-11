@@ -281,6 +281,14 @@ func (h *Hub) run() {
 				}
 				// Skip the general broadcast below because we already filtered by user
 				continue
+			} else if message.Type == "PING" {
+				// Optional: reply with a PONG only to sender to confirm connectivity
+				toSend = &Message{
+					Type:    "PONG",
+					SheetID: message.SheetID,
+					Payload: nil,
+					User:    message.User,
+				}
 			}
 
 			if clients, ok := h.rooms[message.SheetID]; ok {

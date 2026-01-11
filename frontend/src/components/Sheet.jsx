@@ -287,6 +287,7 @@ export default function Sheet() {
 
         // WebSocket connection with reconnection logic
         let reconnectTimeout = null;
+        let heartbeatInterval = null;
         let shouldReconnect = true;
 
         function connectWS() {
@@ -296,6 +297,14 @@ export default function Sheet() {
             socket.onopen = () => {
                 console.log('Connected to WS');
                 setConnected(true);
+
+                // Start heartbeat ping to keep connection alive
+                if (heartbeatInterval) clearInterval(heartbeatInterval);
+                heartbeatInterval = setInterval(() => {
+                    if (socket.readyState === WebSocket.OPEN && !connected) {
+                        socket.send(JSON.stringify({ type: 'PING', sheet_id: id }));
+                    }
+                }, 4000); // 4s
             };
 
             socket.onmessage = (event) => {
@@ -334,6 +343,9 @@ export default function Sheet() {
                                 setCopiedBlock({ rows, cols, values });
                             }
                         }
+                    }else if (msg.type === 'PONG') {
+                        console.log("Received PONG from server");
+                        setConnected(true);setIsEditing(true);
                     }
                 } catch (e) {
                     console.error("WS Parse error", e);
@@ -343,17 +355,23 @@ export default function Sheet() {
             socket.onclose = () => {
                 setConnected(false); setIsEditing(false);
                 console.log('Disconnected from WS');
+                if (heartbeatInterval) {
+                    clearInterval(heartbeatInterval);
+                    heartbeatInterval = null;
+                }
                 if (shouldReconnect) {
                     // Try to reconnect after 2 seconds
                     reconnectTimeout = setTimeout(() => {
                         connectWS();
-                    }, 2000);
+                    }, 5000);
                 }
             };
 
             socket.onerror = (e) => {
                 console.error('WebSocket error', e);
-                socket.close();
+                // Log current readyState for debugging ping/pong issues
+                console.log('WS readyState on error:', socket.readyState);
+                // Let onclose handle reconnection; avoid forcing close here unless needed
             };
 
             ws.current = socket;
@@ -365,6 +383,7 @@ export default function Sheet() {
             shouldReconnect = false;
             if (ws.current) ws.current.close();
             if (reconnectTimeout) clearTimeout(reconnectTimeout);
+            if (heartbeatInterval) clearInterval(heartbeatInterval);
             clearInterval(sessionCheckInterval);
         };
     }, [id, username, navigate]);
