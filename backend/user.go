@@ -146,6 +146,25 @@ func (um *UserManager) cleanupExpiredSessions() {
 	}
 }
 
+// Exists returns true if a user with the given username exists
+func (um *UserManager) Exists(username string) bool {
+	um.mu.RLock()
+	defer um.mu.RUnlock()
+	_, ok := um.users[username]
+	return ok
+}
+
+// ListUsernames returns a list of all registered usernames
+func (um *UserManager) ListUsernames() []string {
+	um.mu.RLock()
+	defer um.mu.RUnlock()
+	list := make([]string, 0, len(um.users))
+	for uname := range um.users {
+		list = append(list, uname)
+	}
+	return list
+}
+
 func (um *UserManager) Load() {
 	um.mu.Lock()
 	defer um.mu.Unlock()

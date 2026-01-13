@@ -38,7 +38,6 @@ type AuditEntry struct {
 
 type Permissions struct {
 	Editors []string `json:"editors"`
-	Viewers []string `json:"viewers"` // In this simple model, assume public read if empty, or specific list
 }
 
 type Sheet struct {
@@ -51,6 +50,24 @@ type Sheet struct {
 	ColWidths   map[string]int             `json:"col_widths,omitempty"`
 	RowHeights  map[string]int             `json:"row_heights,omitempty"`
 	mu          sync.RWMutex
+}
+
+// IsEditor returns true if user is the owner or listed as an editor.
+func (s *Sheet) IsEditor(user string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if user == "" {
+		return false
+	}
+	if user == s.Owner {
+		return true
+	}
+	for _, e := range s.Permissions.Editors {
+		if e == user {
+			return true
+		}
+	}
+	return false
 }
 
 type SheetManager struct {
@@ -293,6 +310,87 @@ func (s *Sheet) SetRowHeight(row string, height int, user string) {
 	s.mu.Unlock()
 
 	globalSheetManager.SaveSheet(s)
+}
+
+// UpdatePermissions sets editors list; only owner may change settings.
+// Ensures owner is always in editors.
+func (s *Sheet) UpdatePermissions(editors []string, performedBy string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if performedBy != s.Owner {
+		return false
+	}
+	// dedupe helpers
+	uniq := func(in []string) []string {
+		m := make(map[string]struct{})
+		out := make([]string, 0, len(in))
+		for _, v := range in {
+			if v == "" {
+				continue
+			}
+			if _, ok := m[v]; !ok {
+				m[v] = struct{}{}
+				out = append(out, v)
+			}
+		}
+		return out
+	}
+	editors = uniq(editors)
+	// Ensure owner in editors
+	hasOwner := false
+	for _, e := range editors {
+		if e == s.Owner {
+			hasOwner = true
+			break
+		}
+	}
+	if !hasOwner {
+		editors = append(editors, s.Owner)
+	}
+
+	s.Permissions.Editors = editors
+	s.AuditLog = append(s.AuditLog, AuditEntry{
+		Timestamp: time.Now(),
+		User:      performedBy,
+		Action:    "UPDATE_PERMISSIONS",
+		Details:   fmt.Sprintf("Editors: %v", editors),
+	})
+	go globalSheetManager.SaveSheet(s)
+	return true
+}
+
+// TransferOwnership changes the owner to newOwner; only current owner may transfer.
+// New owner is ensured in editors list.
+func (s *Sheet) TransferOwnership(newOwner, performedBy string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if performedBy != s.Owner {
+		return false
+	}
+	old := s.Owner
+	if newOwner == "" || newOwner == old {
+		return false
+	}
+	s.Owner = newOwner
+	// Ensure new owner in editors
+	found := false
+	for _, e := range s.Permissions.Editors {
+		if e == newOwner {
+			found = true
+			break
+		}
+	}
+	if !found {
+		s.Permissions.Editors = append(s.Permissions.Editors, newOwner)
+	}
+	s.AuditLog = append(s.AuditLog, AuditEntry{
+		Timestamp: time.Now(),
+		User:      performedBy,
+		Action:    "TRANSFER_OWNERSHIP",
+		Details:   fmt.Sprintf("Owner changed from %s to %s", old, newOwner),
+	})
+	go globalSheetManager.SaveSheet(s)
+	return true
 }
 
 // InsertRowBelow inserts a new empty row directly below `targetRowStr`, shifting subsequent rows (data and heights) down by one.

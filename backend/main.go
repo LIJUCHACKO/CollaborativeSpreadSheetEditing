@@ -356,6 +356,178 @@ func main() {
 		}
 	})
 
+	// Get a single sheet by id
+	http.HandleFunc("/api/sheet", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		token := r.Header.Get("Authorization")
+		_, err := globalUserManager.ValidateToken(token)
+		if err != nil {
+			http.Error(w, "Unauthorized: "+err.Error(), http.StatusUnauthorized)
+			return
+		}
+
+		id := r.URL.Query().Get("id")
+		if id == "" {
+			http.Error(w, "id is required", http.StatusBadRequest)
+			return
+		}
+
+		sheet := globalSheetManager.GetSheet(id)
+		if sheet == nil {
+			http.Error(w, "Sheet not found", http.StatusNotFound)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(sheet)
+	})
+
+	// List all usernames (for selection)
+	http.HandleFunc("/api/users", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		token := r.Header.Get("Authorization")
+		_, err := globalUserManager.ValidateToken(token)
+		if err != nil {
+			http.Error(w, "Unauthorized: "+err.Error(), http.StatusUnauthorized)
+			return
+		}
+		users := globalUserManager.ListUsernames()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(users)
+	})
+
+	// Get/Update permissions for a sheet
+	http.HandleFunc("/api/sheet/permissions", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, PUT, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		token := r.Header.Get("Authorization")
+		username, err := globalUserManager.ValidateToken(token)
+		if err != nil {
+			http.Error(w, "Unauthorized: "+err.Error(), http.StatusUnauthorized)
+			return
+		}
+
+		sheetID := r.URL.Query().Get("sheet_id")
+		if sheetID == "" {
+			http.Error(w, "sheet_id is required", http.StatusBadRequest)
+			return
+		}
+		sheet := globalSheetManager.GetSheet(sheetID)
+		if sheet == nil {
+			http.Error(w, "Sheet not found", http.StatusNotFound)
+			return
+		}
+
+		if r.Method == http.MethodGet {
+			resp := map[string]interface{}{
+				"owner":       sheet.Owner,
+				"permissions": sheet.Permissions,
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
+
+		if r.Method == http.MethodPut {
+			var req struct {
+				Editors []string `json:"editors"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if !sheet.UpdatePermissions(req.Editors, username) {
+				http.Error(w, "Forbidden: owner only", http.StatusForbidden)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{"message": "Permissions updated"})
+			return
+		}
+
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	})
+
+	// Transfer ownership of a sheet
+	http.HandleFunc("/api/sheet/transfer_owner", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "PUT, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if r.Method != http.MethodPut {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		token := r.Header.Get("Authorization")
+		username, err := globalUserManager.ValidateToken(token)
+		if err != nil {
+			http.Error(w, "Unauthorized: "+err.Error(), http.StatusUnauthorized)
+			return
+		}
+		var req struct {
+			SheetID  string `json:"sheet_id"`
+			NewOwner string `json:"new_owner"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if req.SheetID == "" || req.NewOwner == "" {
+			http.Error(w, "sheet_id and new_owner required", http.StatusBadRequest)
+			return
+		}
+		sheet := globalSheetManager.GetSheet(req.SheetID)
+		if sheet == nil {
+			http.Error(w, "Sheet not found", http.StatusNotFound)
+			return
+		}
+		if !globalUserManager.Exists(req.NewOwner) {
+			http.Error(w, "new_owner does not exist", http.StatusBadRequest)
+			return
+		}
+		if !sheet.TransferOwnership(req.NewOwner, username) {
+			http.Error(w, "Forbidden: owner only", http.StatusForbidden)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"message": "Ownership transferred"})
+	})
+
 	// Simple health check
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("OK"))

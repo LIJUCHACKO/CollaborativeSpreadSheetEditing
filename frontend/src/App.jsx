@@ -3,6 +3,7 @@ import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
 import Login from './components/Login';
 import Dashboard from './components/Dashboard';
 import Sheet from './components/Sheet';
+import Settings from './components/Settings';
 
 function App() {
   return (
@@ -11,6 +12,7 @@ function App() {
         <Route path="/" element={<Login />} />
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="/sheet/:id" element={<Sheet />} />
+        <Route path="/settings/:id" element={<Settings />} />
       </Routes>
     </Router>
   );

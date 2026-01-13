@@ -55,7 +55,9 @@ export default function Sheet() {
     const [isEditing, setIsEditing] = useState(false);
         // Sheet owner state
         const [owner, setOwner] = useState('');
+        const [editors, setEditors] = useState([]);
         const isOwner = owner && username && owner === username;
+        const canEdit = isOwner || (username && editors.includes(username));
     // Sort configuration: { col: 'A'|'B'|..., direction: 'asc'|'desc' }
     const [sortConfig, setSortConfig] = useState({ col: null, direction: null });
     // Row cut/paste state
@@ -396,6 +398,11 @@ export default function Sheet() {
                     }else if (msg.type === 'PONG') {
                         console.log("Received PONG from server");
                         setConnected(true);setIsEditing(true);
+                    } else if (msg.type === 'EDIT_DENIED') {
+                        // Optional UX: show a brief warning when non-editor attempts edit
+                        if (!canEdit) {
+                            alert('You are not allowed to edit this sheet.');
+                        }
                     }
                 } catch (e) {
                     console.error("WS Parse error", e);
@@ -461,6 +468,9 @@ export default function Sheet() {
         if (sheet.owner) {
             setOwner(sheet.owner);
         }
+        if (sheet.permissions && Array.isArray(sheet.permissions.editors)) {
+            setEditors(sheet.permissions.editors);
+        }
         // Apply persisted column widths / row heights if present
         if (sheet.col_widths) {
             setColWidths(prev => ({ ...prev, ...sheet.col_widths }));
@@ -484,7 +494,7 @@ export default function Sheet() {
         //send update to server only if changed
         if (cellModified === 0) { return; }
         // Send to WB
-        if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+        if (canEdit && ws.current && ws.current.readyState === WebSocket.OPEN) {
             const msg = {
                 type: 'UPDATE_CELL',
                 sheet_id: id,
@@ -522,7 +532,7 @@ export default function Sheet() {
     const onGlobalMouseUp = () => {
         const { type, label, lastSize } = dragRef.current || {};
         // Send resize update to server on mouse up
-        if ((type === 'col' || type === 'row') && ws.current && ws.current.readyState === WebSocket.OPEN && label && typeof lastSize === 'number') {
+        if ((type === 'col' || type === 'row') && ws.current && ws.current.readyState === WebSocket.OPEN && label && typeof lastSize === 'number' && canEdit) {
             if (type === 'col') {
                 const payload = { col: label, width: lastSize, user: username };
                 ws.current.send(JSON.stringify({ type: 'RESIZE_COL', sheet_id: id, payload }));
@@ -676,7 +686,7 @@ export default function Sheet() {
         if (isFilterActive) return; // disabled while filters are active
 
         // Delegate row move to backend; it will broadcast updated sheet
-        if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+        if (canEdit && ws.current && ws.current.readyState === WebSocket.OPEN) {
             const payload = { fromRow: String(cutRow), targetRow: String(targetRow), user: username };
             ws.current.send(JSON.stringify({ type: 'MOVE_ROW', sheet_id: id, payload }));
         }
@@ -687,7 +697,7 @@ export default function Sheet() {
     const moveCutColRight = (targetCol) => {
         if (cutCol == null) return;
         if (isFilterActive) return; // keep parity with row behavior
-        if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+        if (canEdit && ws.current && ws.current.readyState === WebSocket.OPEN) {
             const payload = { fromCol: String(cutCol), targetCol: String(targetCol), user: username };
             ws.current.send(JSON.stringify({ type: 'MOVE_COL', sheet_id: id, payload }));
         }
@@ -696,7 +706,7 @@ export default function Sheet() {
 
     const insertRowBelow = (targetRow) => {
         if (isFilterActive) return;
-        if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+        if (canEdit && ws.current && ws.current.readyState === WebSocket.OPEN) {
             const payload = { targetRow: String(targetRow), user: username };
             ws.current.send(JSON.stringify({ type: 'INSERT_ROW', sheet_id: id, payload }));
         }
@@ -704,7 +714,7 @@ export default function Sheet() {
 
     const insertColumnRight = (targetCol) => {
         if (isFilterActive) return;
-        if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+        if (canEdit && ws.current && ws.current.readyState === WebSocket.OPEN) {
             const payload = { targetCol: String(targetCol), user: username };
             ws.current.send(JSON.stringify({ type: 'INSERT_COL', sheet_id: id, payload }));
         }
@@ -834,6 +844,13 @@ export default function Sheet() {
                             title="Download as XLSX"
                         >
                             <Download className="me-1" />
+                        </button>
+                        <button
+                            onClick={() => navigate(`/settings/${id}`)}
+                            className="btn btn-outline-primary btn-sm d-flex align-items-center ms-2"
+                            title="Settings"
+                        >
+                            <Settings className="me-1" />
                         </button>
                         <button
                             onClick={toggleSidebar}
@@ -1067,7 +1084,7 @@ export default function Sheet() {
                                             <div className="flex items-center justify-center gap-1">
                                                 <span>{h}</span>
                                                 <div style={{ position: 'absolute', top: 2, left: 2, display: 'flex', gap: '4px', zIndex: 25 }}>
-                                                    {connected && (
+                                                    {connected && canEdit && (
                                                         <button
                                                             type="button"
                                                             className="btn btn-xs btn-light"
@@ -1079,7 +1096,7 @@ export default function Sheet() {
                                                             <span role="img" aria-label="insert-col">➕</span>
                                                         </button>
                                                     )}
-                                                    { cutCol == null && connected && (
+                                                    { cutCol == null && connected && canEdit && (
                                                         <button
                                                             type="button"
                                                             className="btn btn-xs btn-light"
@@ -1094,7 +1111,7 @@ export default function Sheet() {
                                                             <span role="img" aria-label="cut">✂️</span>
                                                         </button>
                                                     )}
-                                                    {cutCol != null && cutCol !== h && connected && (
+                                                    {cutCol != null && cutCol !== h && connected && canEdit && (
                                                         <button
                                                             type="button"
                                                             className="btn btn-xs btn-light"
@@ -1204,7 +1221,7 @@ export default function Sheet() {
                                             
                                             {/* Row actions: Insert / Cut / Paste */}
                                             <div style={{ position: 'absolute', top: 0, left: 0, display: 'flex', gap: '4px', zIndex: 25 }}>
-                                                {connected && (
+                                                {connected && canEdit && (
                                                     <button
                                                         type="button"
                                                         className="btn btn-xs btn-light"
@@ -1216,7 +1233,7 @@ export default function Sheet() {
                                                         <span role="img" aria-label="insert-row">➕</span>
                                                     </button>
                                                 )}
-                                                {cutRow === null && connected &&(<button
+                                                {cutRow === null && connected && canEdit &&(<button
                                                     type="button"
                                                     className="btn btn-xs btn-light"
                                                     disabled={isFilterActive}
@@ -1229,7 +1246,7 @@ export default function Sheet() {
                                                 >
                                                     <span role="img" aria-label="cut">✂️</span>
                                                 </button>)}
-                                                {cutRow != null && cutRow !== rowLabel && connected &&(
+                                                {cutRow != null && cutRow !== rowLabel && connected && canEdit &&(
                                                     <button
                                                         type="button"
                                                         className="btn btn-xs btn-light"
@@ -1315,10 +1332,10 @@ export default function Sheet() {
                                                         value={cell.value}
                                                         data-row={rowLabel}
                                                         data-col={colLabel}
-                                                        readOnly={!!cell.locked}
+                                                        readOnly={!!cell.locked || !canEdit}
                                                         onFocus={() => { setFocusedCell({ row: rowLabel, col: colLabel }); setIsEditing(false); }}
                                                         onMouseOver={e => { e.target.focus(); }}
-                                                        onDoubleClick={(e) => { if(cell.locked) return; if(connected)  {setIsEditing(true); setCutRow(null); setCutCol(null);}; if (typeof e.target.select === 'function') e.target.select(); }}
+                                                        onDoubleClick={(e) => { if(cell.locked || !canEdit) return; if(connected)  {setIsEditing(true); setCutRow(null); setCutCol(null);}; if (typeof e.target.select === 'function') e.target.select(); }}
                                                         onMouseDown={(e) => { 
                                                             e.preventDefault();
                                                             e.target.focus();
@@ -1390,7 +1407,7 @@ export default function Sheet() {
                                                         // Only update value locally while editing, commit on blur
                                                         onChange={(e) => {
                                                             // Update local state for textarea value
-                                                            if (cell.locked) return;
+                                                            if (cell.locked || !canEdit) return;
                                                             if (connected)
                                                             updateCellState(rowLabel, colLabel, e.target.value);
                                                             
@@ -1398,7 +1415,7 @@ export default function Sheet() {
                                                         onBlur={(e) => {
                                                             setIsEditing(false);
                                                             // Commit value to backend only on blur
-                                                            if (!cell.locked) handleCellChange(rowLabel, colLabel, e.target.value);
+                                                            if (!cell.locked && canEdit) handleCellChange(rowLabel, colLabel, e.target.value);
                                                         }}
                                                     />
 
