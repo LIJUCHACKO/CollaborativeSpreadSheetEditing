@@ -23,8 +23,10 @@ func ensureDataDir() error {
 }
 
 type Cell struct {
-	Value string `json:"value"`
-	User  string `json:"user,omitempty"` // Last edited by
+	Value    string `json:"value"`
+	User     string `json:"user,omitempty"` // Last edited by
+	Locked   bool   `json:"locked,omitempty"`
+	LockedBy string `json:"locked_by,omitempty"`
 }
 
 type AuditEntry struct {
@@ -145,12 +147,24 @@ func (s *Sheet) SetCell(row, col, value, user string) {
 		s.Data[row] = make(map[string]Cell)
 	}
 	currentVal, exists := s.Data[row][col]
+	// Prevent edits to locked cells
+	if exists && currentVal.Locked {
+		s.AuditLog = append(s.AuditLog, AuditEntry{
+			Timestamp: time.Now(),
+			User:      user,
+			Action:    "EDIT_DENIED",
+			Details:   "Attempted edit on locked cell " + row + "," + col,
+		})
+		s.mu.Unlock()
+		return
+	}
 	if exists && currentVal.Value == value {
 		// No change
 		s.mu.Unlock()
 		return
 	}
-	s.Data[row][col] = Cell{Value: value, User: user}
+	// Preserve existing lock metadata on write
+	s.Data[row][col] = Cell{Value: value, User: user, Locked: currentVal.Locked, LockedBy: currentVal.LockedBy}
 	if exists {
 		s.AuditLog = append(s.AuditLog, AuditEntry{
 			Timestamp: time.Now(),
@@ -172,6 +186,76 @@ func (s *Sheet) SetCell(row, col, value, user string) {
 	// Persist changes
 	// Optimally we shouldn't save on every cell edit for performance, but for this task it ensures safety.
 	globalSheetManager.SaveSheet(s)
+}
+
+// IsCellLocked returns whether the given cell is locked.
+func (s *Sheet) IsCellLocked(row, col string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.Data[row] == nil {
+		return false
+	}
+	c, ok := s.Data[row][col]
+	if !ok {
+		return false
+	}
+	return c.Locked
+}
+
+// LockCell locks a cell. Only the sheet owner may lock.
+func (s *Sheet) LockCell(row, col, user string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if user != s.Owner {
+		return false
+	}
+	if s.Data[row] == nil {
+		s.Data[row] = make(map[string]Cell)
+	}
+	cell := s.Data[row][col]
+	if cell.Locked {
+		return true // already locked
+	}
+	cell.Locked = true
+	cell.LockedBy = user
+	s.Data[row][col] = cell
+	s.AuditLog = append(s.AuditLog, AuditEntry{
+		Timestamp: time.Now(),
+		User:      user,
+		Action:    "LOCK_CELL",
+		Details:   "Locked cell " + row + "," + col,
+	})
+	// Save after unlock via manager
+	go globalSheetManager.SaveSheet(s)
+	return true
+}
+
+// UnlockCell unlocks a cell. Only the sheet owner may unlock.
+func (s *Sheet) UnlockCell(row, col, user string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if user != s.Owner {
+		return false
+	}
+	cell, ok := s.Data[row][col]
+	if !ok {
+		return false
+	}
+	if !cell.Locked {
+		return true // already unlocked
+	}
+	cell.Locked = false
+	cell.LockedBy = ""
+	s.Data[row][col] = cell
+	s.AuditLog = append(s.AuditLog, AuditEntry{
+		Timestamp: time.Now(),
+		User:      user,
+		Action:    "UNLOCK_CELL",
+		Details:   "Unlocked cell " + row + "," + col,
+	})
+	// Save after unlock via manager
+	go globalSheetManager.SaveSheet(s)
+	return true
 }
 
 func (s *Sheet) SetColWidth(col string, width int, user string) {
@@ -315,6 +399,21 @@ func (s *Sheet) MoveRowBelow(fromRowStr, targetRowStr, user string) bool {
 		destIndex-- // Adjust for removal before insertion
 	}
 	s.mu.Lock()
+	// Prevent cutting a row containing locked cells
+	if rowMap, ok := s.Data[fromRowStr]; ok {
+		for _, cell := range rowMap {
+			if cell.Locked {
+				s.AuditLog = append(s.AuditLog, AuditEntry{
+					Timestamp: time.Now(),
+					User:      user,
+					Action:    "MOVE_ROW_DENIED",
+					Details:   "Attempted cut/move of locked row " + fromRowStr,
+				})
+				s.mu.Unlock()
+				return false
+			}
+		}
+	}
 	// Snapshot cells for affected range
 	start := fromRow
 	end := destIndex
@@ -462,6 +561,21 @@ func (s *Sheet) MoveColumnRight(fromColStr, targetColStr, user string) bool {
 	}
 
 	s.mu.Lock()
+	// Prevent cutting a column containing any locked cell
+	for rowKey, rowMap := range s.Data {
+		if cell, ok := rowMap[fromColStr]; ok {
+			if cell.Locked {
+				s.AuditLog = append(s.AuditLog, AuditEntry{
+					Timestamp: time.Now(),
+					User:      user,
+					Action:    "MOVE_COL_DENIED",
+					Details:   "Attempted cut/move of locked column " + fromColStr + " (row " + rowKey + ")",
+				})
+				s.mu.Unlock()
+				return false
+			}
+		}
+	}
 	// Find all affected columns
 	start := fromIdx
 	end := destIdx

@@ -53,6 +53,9 @@ export default function Sheet() {
     const [showFilters, setShowFilters] = useState(false);
     const [focusedCell, setFocusedCell] = useState({ row: 1, col: COL_HEADERS[0] });
     const [isEditing, setIsEditing] = useState(false);
+        // Sheet owner state
+        const [owner, setOwner] = useState('');
+        const isOwner = owner && username && owner === username;
     // Sort configuration: { col: 'A'|'B'|..., direction: 'asc'|'desc' }
     const [sortConfig, setSortConfig] = useState({ col: null, direction: null });
     // Row cut/paste state
@@ -68,6 +71,11 @@ export default function Sheet() {
     const [contextMenu, setContextMenu] = useState({ visible: false, x: 0, y: 0, cell: null });
     // Shared selection from other instances of the same user
     const [sharedSelection, setSharedSelection] = useState(null); // { startRow, startCol, endRow, endCol }
+    // Highlight selected audit log entry
+    const [selectedAuditId, setSelectedAuditId] = useState(null);
+    // Preserve audit log scroll position across open/close
+    const auditLogRef = useRef(null);
+    const auditLogScrollTopRef = useRef(0);
 
     const colIndexMap = useMemo(() => {
         const map = {};
@@ -101,7 +109,6 @@ export default function Sheet() {
 
     const extendSelection = (rowLabel, colLabel) => {
         if (!isSelecting || !selectionStart) return;
-        //console.log( rowLabel,  colLabel );
         setSelectedRange(prev => ({ ...prev, endRow: rowLabel, endCol: colLabel }));
     };
 
@@ -128,9 +135,6 @@ export default function Sheet() {
             }
             values.push(rowArr);
         }
-        const block = { rows: rMax - rMin + 1, cols: cMax - cMin + 1, values };
-        //setCopiedBlock(block);
-        //console.log("going to Send selection:");
         // Send selection range and values to backend so other instances of the same user can paste
         if (ws.current && ws.current.readyState === WebSocket.OPEN) {
             const payload = {
@@ -182,6 +186,23 @@ export default function Sheet() {
         if (anchorIdx < 0) return;
         const updates = {};
         let hasConflict = false;
+        // Prevent pasting into any locked destination cells
+        for (let rOff = 0; rOff < copiedBlock.rows; rOff++) {
+            const r = anchorRow + rOff;
+            if (r < 1 || r > ROWS) continue;
+            for (let cOff = 0; cOff < copiedBlock.cols; cOff++) {
+                const cIdx = anchorIdx + cOff;
+                if (cIdx < 0 || cIdx >= COLS) continue;
+                const cLabel = colLabelAt(cIdx);
+                if (!cLabel) continue;
+                const key = `${r}-${cLabel}`;
+                if (data[key]?.locked) {
+                    alert('Cannot paste: destination includes locked cell(s).');
+                    closeContextMenu();
+                    return;
+                }
+            }
+        }
         for (let rOff = 0; rOff < copiedBlock.rows; rOff++) {
             const r = anchorRow + rOff;
             if (r < 1 || r > ROWS) continue;
@@ -437,6 +458,9 @@ export default function Sheet() {
         } else {
             setSheetName(id);
         }
+        if (sheet.owner) {
+            setOwner(sheet.owner);
+        }
         // Apply persisted column widths / row heights if present
         if (sheet.col_widths) {
             setColWidths(prev => ({ ...prev, ...sheet.col_widths }));
@@ -562,6 +586,13 @@ export default function Sheet() {
         };
     }, [isSelecting]);
 
+    // When sidebar opens, restore previous scroll position
+    useEffect(() => {
+        if (isSidebarOpen && auditLogRef.current) {
+            auditLogRef.current.scrollTop = auditLogScrollTopRef.current;
+        }
+    }, [isSidebarOpen]);
+
     // Update filteredRowHeaders when filters or sort change
     useEffect(() => {
         const activeFilters = Object.entries(filters).filter(([col, val]) => val && val.trim() !== '');
@@ -623,6 +654,23 @@ export default function Sheet() {
     // Determine if filtering is active (used to disable row reordering)
     const isFilterActive = Object.values(filters).some(v => v && v.trim() !== '');
 
+    const hasLockedInRow = (rowLabel) => {
+        for (let ci = 0; ci < COLS; ci++) {
+            const cLabel = colLabelAt(ci);
+            const key = `${rowLabel}-${cLabel}`;
+            if (data[key]?.locked) return true;
+        }
+        return false;
+    };
+
+    const hasLockedInCol = (colLabel) => {
+        for (let r = 1; r <= ROWS; r++) {
+            const key = `${r}-${colLabel}`;
+            if (data[key]?.locked) return true;
+        }
+        return false;
+    };
+
     const moveCutRowBelow = (targetRow) => {
         if (cutRow == null) return;
         if (isFilterActive) return; // disabled while filters are active
@@ -659,6 +707,90 @@ export default function Sheet() {
         if (ws.current && ws.current.readyState === WebSocket.OPEN) {
             const payload = { targetCol: String(targetCol), user: username };
             ws.current.send(JSON.stringify({ type: 'INSERT_COL', sheet_id: id, payload }));
+        }
+    };
+
+    // Close sidebar capturing current scroll position
+    const closeSidebar = () => {
+        if (auditLogRef.current) {
+            auditLogScrollTopRef.current = auditLogRef.current.scrollTop;
+        }
+        setSidebarOpen(false);
+    };
+
+    // Toggle sidebar and preserve scroll when closing
+    const toggleSidebar = () => {
+        if (isSidebarOpen) {
+            if (auditLogRef.current) {
+                auditLogScrollTopRef.current = auditLogRef.current.scrollTop;
+            }
+            setSidebarOpen(false);
+        } else {
+            setSidebarOpen(true);
+        }
+    };
+
+    // Navigate to a specific cell and ensure it's visible, then focus it
+    const navigateToCell = (targetRow, targetColLabel) => {
+        if (!targetRow || !targetColLabel) return;
+        // Adjust rowStart so targetRow is within visible window
+        const rowIdx = filteredRowHeaders.indexOf(targetRow);
+        if (rowIdx !== -1) {
+            const maxRowStart = Math.max(1, filteredRowHeaders.length - visibleRowsCount + 1);
+            const desiredStart = Math.max(1, Math.min(maxRowStart, rowIdx));
+            setRowStart(desiredStart);
+        }
+        // Adjust colStart so targetCol is within visible window
+        const colIdx = COL_HEADERS.indexOf(targetColLabel);
+        if (colIdx !== -1) {
+            const maxColStart = Math.max(1, COLS - visibleColsCount + 1);
+            const desiredColStart = Math.max(1, Math.min(maxColStart, colIdx));
+            setColStart(desiredColStart);
+        }
+        // Set focus state and focus the element after re-render
+        setFocusedCell({ row: targetRow, col: targetColLabel });
+        setIsEditing(false);
+        setTimeout(() => {
+            const el = document.querySelector(`textarea[data-row="${targetRow}"][data-col="${targetColLabel}"]`);
+            if (el) {
+                el.focus();
+                if (typeof el.scrollIntoView === 'function') el.scrollIntoView({ block: 'center', inline: 'center' });
+                if (typeof el.select === 'function') el.select();
+            }
+        }, 50);
+    };
+
+    // Extract row/col from audit log details and navigate
+    const navigateToCellFromDetails = (details) => {
+        closeSidebar();
+        if (!details || typeof details !== 'string') return;
+        // Patterns: "Set cell 28,C to ..." or "Changed cell 4,B from ..."
+        const match = details.match(/(?:Set|Changed)\s+cell\s+(\d+),([A-Z]+)\s+/);
+        if (match) {
+            const row = parseInt(match[1], 10);
+            const colLabel = match[2];
+            if (!Number.isNaN(row) && COL_HEADERS.includes(colLabel)) {
+                navigateToCell(row, colLabel);
+            }
+            return;
+        }
+        // Optional: focus column for resize events like "Set width of column C to 93"
+        const colMatch = details.match(/column\s+([A-Z]+)\s+/);
+        if (colMatch) {
+            const colLabel = colMatch[1];
+            if (COL_HEADERS.includes(colLabel)) {
+                // Focus header row at current first displayed row (use row 1)
+                navigateToCell(1, colLabel);
+            }
+            return;
+        }
+        // Optional: focus row for resize like "Set height of row 12 to ..."
+        const rowMatch = details.match(/row\s+(\d+)\s+/);
+        if (rowMatch) {
+            const row = parseInt(rowMatch[1], 10);
+            if (!Number.isNaN(row)) {
+                navigateToCell(row, focusedCell.col);
+            }
         }
     };
 
@@ -704,7 +836,7 @@ export default function Sheet() {
                             <Download className="me-1" />
                         </button>
                         <button
-                            onClick={() => setSidebarOpen(!isSidebarOpen)}
+                            onClick={toggleSidebar}
                             className={`btn btn-outline-primary btn-sm d-flex align-items-center ${isSidebarOpen ? 'active' : ''}`}
                         >
                             <History className="me-1" />
@@ -780,16 +912,19 @@ export default function Sheet() {
                                 <History className="me-2" size={18} /> Activity Log
                             </h5>
                             <button 
-                                onClick={() => setSidebarOpen(false)} 
+                                onClick={closeSidebar} 
                                 className="btn btn-sm btn-light"
                                 aria-label="Close sidebar"
                             >
                                 <ArrowLeft size={18} />
                             </button>
                         </div>
-                        <div className="overflow-auto p-3" style={{ height: 'calc(100% - 56px)' ,overflowY:'scroll'}}>
-                            {auditLog.slice().reverse().map((entry, i) => (
-                                <div key={i} className="d-flex gap-2 mb-3 p-2 rounded hover-bg-light">
+                        <div ref={auditLogRef} className="overflow-auto p-3" style={{ height: 'calc(100% - 56px)' ,overflowY:'scroll'}}>
+                            {auditLog.slice().reverse().map((entry, i) => {
+                                const entryId = `${entry.timestamp || i}|${entry.user || ''}|${entry.action || ''}|${entry.details || ''}`;
+                                const isSelected = selectedAuditId === entryId;
+                                return (
+                                <div key={entryId} className={`d-flex gap-2 mb-3 p-2 rounded hover-bg-light ${isSelected ? 'bg-green-500 border border-green-200' : ''}`} style={{ cursor: 'pointer' }} onClick={() => { setSelectedAuditId(entryId); navigateToCellFromDetails(entry.details || entry.action); }}>
                                     <div className="flex-shrink-0">
                                         <div 
                                             className="rounded-circle bg-gradient d-flex align-items-center justify-content-center text-white fw-bold"
@@ -815,7 +950,8 @@ export default function Sheet() {
                                         </p>
                                     </div>
                                 </div>
-                            ))}
+                                );
+                            })}
                             {auditLog.length === 0 && (
                                 <div className="text-center text-muted py-5">
                                     <History className="mb-2" size={48} opacity={0.3} />
@@ -949,7 +1085,10 @@ export default function Sheet() {
                                                             className="btn btn-xs btn-light"
                                                             disabled={isFilterActive}
                                                             title={isFilterActive ? 'Disabled while filters are active' : `Cut column ${h}`}
-                                                            onClick={() => {setCutCol(h); setCutRow(null);}}
+                                                            onClick={() => {
+                                                                if (hasLockedInCol(h)) { alert('Cannot cut: column has locked cell(s).'); return; }
+                                                                setCutCol(h); setCutRow(null);
+                                                            }}
                                                             style={{ padding: '0 4px', fontSize: '10px' }}
                                                         >
                                                             <span role="img" aria-label="cut">✂️</span>
@@ -1082,7 +1221,10 @@ export default function Sheet() {
                                                     className="btn btn-xs btn-light"
                                                     disabled={isFilterActive}
                                                     title={isFilterActive ? 'Disabled while filters are active' : 'Cut this row'}
-                                                    onClick={() => {setCutRow(rowLabel); setCutCol(null);}}
+                                                    onClick={() => {
+                                                        if (hasLockedInRow(rowLabel)) { alert('Cannot cut: row has locked cell(s).'); return; }
+                                                        setCutRow(rowLabel); setCutCol(null);
+                                                    }}
                                                     style={{ padding: '0 0px', fontSize: '8px' }}
                                                 >
                                                     <span role="img" aria-label="cut">✂️</span>
@@ -1173,9 +1315,10 @@ export default function Sheet() {
                                                         value={cell.value}
                                                         data-row={rowLabel}
                                                         data-col={colLabel}
+                                                        readOnly={!!cell.locked}
                                                         onFocus={() => { setFocusedCell({ row: rowLabel, col: colLabel }); setIsEditing(false); }}
                                                         onMouseOver={e => { e.target.focus(); }}
-                                                        onDoubleClick={(e) => { if(connected)  {setIsEditing(true); setCutRow(null); setCutCol(null);}; if (typeof e.target.select === 'function') e.target.select(); }}
+                                                        onDoubleClick={(e) => { if(cell.locked) return; if(connected)  {setIsEditing(true); setCutRow(null); setCutCol(null);}; if (typeof e.target.select === 'function') e.target.select(); }}
                                                         onMouseDown={(e) => { 
                                                             e.preventDefault();
                                                             e.target.focus();
@@ -1193,7 +1336,7 @@ export default function Sheet() {
                                                         onKeyDown={(e) => {
                                                             const keys = ['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'];
                                                             // Enter edit mode when typing any non-arrow key (including Enter)
-                                                            if (!keys.includes(e.key)) { if(connected) setIsEditing(true); return; }
+                                                            if (!keys.includes(e.key)) { if(cell.locked) return; if(connected) setIsEditing(true); return; }
                                                             // In edit mode, allow default arrow behavior inside textarea and disable cell navigation
                                                             if (isEditing && keys.includes(e.key)) { return; }
                                                             e.preventDefault();
@@ -1247,6 +1390,7 @@ export default function Sheet() {
                                                         // Only update value locally while editing, commit on blur
                                                         onChange={(e) => {
                                                             // Update local state for textarea value
+                                                            if (cell.locked) return;
                                                             if (connected)
                                                             updateCellState(rowLabel, colLabel, e.target.value);
                                                             
@@ -1254,9 +1398,10 @@ export default function Sheet() {
                                                         onBlur={(e) => {
                                                             setIsEditing(false);
                                                             // Commit value to backend only on blur
-                                                            handleCellChange(rowLabel, colLabel, e.target.value);
+                                                            if (!cell.locked) handleCellChange(rowLabel, colLabel, e.target.value);
                                                         }}
                                                     />
+
                                                     
                                                         {/* Context Menu */}
                                                         {contextMenu.visible && (
@@ -1279,6 +1424,38 @@ export default function Sheet() {
                                                                 >
                                                                     Paste
                                                                 </button>
+                                                                {isOwner && contextMenu.cell && (
+                                                                    <>
+                                                                        {!data[`${contextMenu.cell.row}-${contextMenu.cell.col}`]?.locked && (
+                                                                            <button
+                                                                                className="block w-full text-left px-2 py-1 hover:bg-gray-100 rounded"
+                                                                                onClick={() => {
+                                                                                    if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+                                                                                        const payload = { row: String(contextMenu.cell.row), col: String(contextMenu.cell.col), user: username };
+                                                                                        ws.current.send(JSON.stringify({ type: 'LOCK_CELL', sheet_id: id, payload }));
+                                                                                    }
+                                                                                    closeContextMenu();
+                                                                                }}
+                                                                            >
+                                                                                Lock Cell
+                                                                            </button>
+                                                                        )}
+                                                                        {data[`${contextMenu.cell.row}-${contextMenu.cell.col}`]?.locked && (
+                                                                            <button
+                                                                                className="block w-full text-left px-2 py-1 hover:bg-gray-100 rounded"
+                                                                                onClick={() => {
+                                                                                    if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+                                                                                        const payload = { row: String(contextMenu.cell.row), col: String(contextMenu.cell.col), user: username };
+                                                                                        ws.current.send(JSON.stringify({ type: 'UNLOCK_CELL', sheet_id: id, payload }));
+                                                                                    }
+                                                                                    closeContextMenu();
+                                                                                }}
+                                                                            >
+                                                                                Unlock Cell
+                                                                            </button>
+                                                                        )}
+                                                                    </>
+                                                                )}
                                                             </div>
                                                         )}
                                                     {cell.user && cell.user !== username && (

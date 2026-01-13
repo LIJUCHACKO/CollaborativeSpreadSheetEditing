@@ -109,6 +109,79 @@ func (h *Hub) run() {
 				} else {
 					log.Printf("Error unmarshalling update payload: %v", err)
 				}
+			} else if message.Type == "LOCK_CELL" {
+				var req struct {
+					Row  string `json:"row"`
+					Col  string `json:"col"`
+					User string `json:"user"`
+				}
+				if err := json.Unmarshal(message.Payload, &req); err == nil {
+					sheet := globalSheetManager.GetSheet(message.SheetID)
+					if sheet != nil {
+						if sheet.LockCell(req.Row, req.Col, message.User) {
+							// Broadcast full sheet state
+							sheet.mu.RLock()
+							payload, _ := json.Marshal(sheet)
+							sheet.mu.RUnlock()
+							toSend = &Message{
+								Type:    "ROW_COL_UPDATED",
+								SheetID: message.SheetID,
+								Payload: payload,
+								User:    message.User,
+							}
+						} else {
+							deniedPayload, _ := json.Marshal(map[string]string{
+								"row":    req.Row,
+								"col":    req.Col,
+								"reason": "owner-only",
+							})
+							toSend = &Message{
+								Type:    "LOCK_DENIED",
+								SheetID: message.SheetID,
+								Payload: deniedPayload,
+								User:    message.User,
+							}
+						}
+					}
+				} else {
+					log.Printf("Error unmarshalling LOCK_CELL payload: %v", err)
+				}
+			} else if message.Type == "UNLOCK_CELL" {
+				var req struct {
+					Row  string `json:"row"`
+					Col  string `json:"col"`
+					User string `json:"user"`
+				}
+				if err := json.Unmarshal(message.Payload, &req); err == nil {
+					sheet := globalSheetManager.GetSheet(message.SheetID)
+					if sheet != nil {
+						if sheet.UnlockCell(req.Row, req.Col, message.User) {
+							sheet.mu.RLock()
+							payload, _ := json.Marshal(sheet)
+							sheet.mu.RUnlock()
+							toSend = &Message{
+								Type:    "ROW_COL_UPDATED",
+								SheetID: message.SheetID,
+								Payload: payload,
+								User:    message.User,
+							}
+						} else {
+							deniedPayload, _ := json.Marshal(map[string]string{
+								"row":    req.Row,
+								"col":    req.Col,
+								"reason": "owner-only",
+							})
+							toSend = &Message{
+								Type:    "UNLOCK_DENIED",
+								SheetID: message.SheetID,
+								Payload: deniedPayload,
+								User:    message.User,
+							}
+						}
+					}
+				} else {
+					log.Printf("Error unmarshalling UNLOCK_CELL payload: %v", err)
+				}
 			} else if message.Type == "RESIZE_COL" {
 				var update struct {
 					Col   string `json:"col"`
