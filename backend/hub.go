@@ -82,8 +82,42 @@ func (h *Hub) run() {
 			// Determine final message to send (may differ from inbound command)
 			toSend := message
 
+			// Helper: deny non-editors for mutating operations
+			denyIfNotEditor := func() bool {
+				sheet := globalSheetManager.GetSheet(message.SheetID)
+				if sheet == nil {
+					return true
+				}
+				if !sheet.IsEditor(message.User) {
+					deniedPayload, _ := json.Marshal(map[string]string{
+						"reason": "not-editor",
+						"type":   message.Type,
+					})
+					// Send denial only to the sender
+					toSend = &Message{Type: "EDIT_DENIED", SheetID: message.SheetID, Payload: deniedPayload, User: message.User}
+					if clients, ok := h.rooms[message.SheetID]; ok {
+						for client := range clients {
+							if client.userID != message.User {
+								continue
+							}
+							select {
+							case client.send <- msgToBytes(toSend):
+							default:
+								close(client.send)
+								delete(clients, client)
+							}
+						}
+					}
+					return true
+				}
+				return false
+			}
+
 			// Persist changes if it's an update
 			if message.Type == "UPDATE_CELL" {
+				if denyIfNotEditor() {
+					continue
+				}
 				// Parse payload
 				var update struct {
 					Row   string `json:"row"`
@@ -183,6 +217,9 @@ func (h *Hub) run() {
 					log.Printf("Error unmarshalling UNLOCK_CELL payload: %v", err)
 				}
 			} else if message.Type == "RESIZE_COL" {
+				if denyIfNotEditor() {
+					continue
+				}
 				var update struct {
 					Col   string `json:"col"`
 					Width int    `json:"width"`
@@ -207,6 +244,9 @@ func (h *Hub) run() {
 					log.Printf("Error unmarshalling resize col payload: %v", err)
 				}
 			} else if message.Type == "RESIZE_ROW" {
+				if denyIfNotEditor() {
+					continue
+				}
 				var update struct {
 					Row    string `json:"row"`
 					Height int    `json:"height"`
@@ -231,6 +271,9 @@ func (h *Hub) run() {
 					log.Printf("Error unmarshalling resize row payload: %v", err)
 				}
 			} else if message.Type == "MOVE_ROW" {
+				if denyIfNotEditor() {
+					continue
+				}
 				var mv struct {
 					FromRow   string `json:"fromRow"`
 					TargetRow string `json:"targetRow"`
@@ -257,6 +300,9 @@ func (h *Hub) run() {
 					log.Printf("Error unmarshalling MOVE_ROW payload: %v", err)
 				}
 			} else if message.Type == "MOVE_COL" {
+				if denyIfNotEditor() {
+					continue
+				}
 				var mv struct {
 					FromCol   string `json:"fromCol"`
 					TargetCol string `json:"targetCol"`
@@ -282,6 +328,9 @@ func (h *Hub) run() {
 					log.Printf("Error unmarshalling MOVE_COL payload: %v", err)
 				}
 			} else if message.Type == "INSERT_ROW" {
+				if denyIfNotEditor() {
+					continue
+				}
 				var ins struct {
 					TargetRow string `json:"targetRow"`
 					User      string `json:"user"`
@@ -306,6 +355,9 @@ func (h *Hub) run() {
 					log.Printf("Error unmarshalling INSERT_ROW payload: %v", err)
 				}
 			} else if message.Type == "INSERT_COL" {
+				if denyIfNotEditor() {
+					continue
+				}
 				var ins struct {
 					TargetCol string `json:"targetCol"`
 					User      string `json:"user"`
