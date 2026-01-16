@@ -348,7 +348,7 @@ export default function Sheet() {
 
         function connectWS() {
             const host = import.meta.env.VITE_BACKEND_HOST || '192.168.0.102';
-            const socket = new WebSocket(`ws://${host}:8080/ws?user=${encodeURIComponent(username)}&id=${id}`, 'echo-protocol');
+            const socket = new WebSocket(`ws://${host}:8080/ws?user=${encodeURIComponent(username)}&id=${id}` );
 
             socket.onopen = () => {
                 console.log('Connected to WS');
