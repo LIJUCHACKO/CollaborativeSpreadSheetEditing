@@ -23,6 +23,7 @@ func main() {
 	// Initialize Sheet Manager (already initialized via global var in sheet.go, but good practice to be explicit if it wasn't)
 	globalSheetManager.Load()
 	globalUserManager.Load()
+	globalChatManager.Load()
 
 	http.HandleFunc("/api/export", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")

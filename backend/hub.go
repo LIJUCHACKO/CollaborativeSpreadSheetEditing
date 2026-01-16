@@ -62,6 +62,11 @@ func (h *Hub) run() {
 					User:    "system",
 				}
 				client.send <- msgToBytes(msg)
+				// Also send global chat history independent of sheet
+				history := globalChatManager.HistoryFor(client.userID)
+				chatPayload, _ := json.Marshal(history)
+				client.send <- msgToBytes(&Message{Type: "CHAT_HISTORY", SheetID: "", Payload: chatPayload, User: "system"})
+
 			}
 
 		case client := <-h.unregister:
@@ -406,6 +411,50 @@ func (h *Hub) run() {
 				}
 				// Skip the general broadcast below because we already filtered by user
 				continue
+			} else if message.Type == "CHAT_MESSAGE" {
+				// Payload: { text: string, user: string }
+				var chat struct {
+					Text string `json:"text"`
+					User string `json:"user"`
+					To   string `json:"to"`
+				}
+				if err := json.Unmarshal(message.Payload, &chat); err == nil {
+					appended := globalChatManager.Append(message.User, chat.Text, chat.To)
+					payload, _ := json.Marshal(appended)
+					toSend = &Message{Type: "CHAT_APPENDED", SheetID: "", Payload: payload, User: message.User}
+					// Broadcast
+					if appended.To == "" || appended.To == "all" {
+						// broadcast to everyone
+						for _, clients := range h.rooms {
+							for client := range clients {
+								select {
+								case client.send <- msgToBytes(toSend):
+								default:
+									close(client.send)
+									delete(clients, client)
+								}
+							}
+						}
+					} else {
+						// direct message: send to sender and recipient only
+						for _, clients := range h.rooms {
+							for client := range clients {
+								if client.userID != appended.User && client.userID != appended.To {
+									continue
+								}
+								select {
+								case client.send <- msgToBytes(toSend):
+								default:
+									close(client.send)
+									delete(clients, client)
+								}
+							}
+						}
+					}
+					continue // skip per-room broadcast
+				} else {
+					log.Printf("Error unmarshalling CHAT_MESSAGE payload: %v", err)
+				}
 			} else if message.Type == "PING" {
 				// Optional: reply with a PONG only to sender to confirm connectivity
 				toSend = &Message{

@@ -73,6 +73,11 @@ export default function Sheet() {
     const [contextMenu, setContextMenu] = useState({ visible: false, x: 0, y: 0, cell: null });
     // Shared selection from other instances of the same user
     const [sharedSelection, setSharedSelection] = useState(null); // { startRow, startCol, endRow, endCol }
+    // Chat state
+    const [chatMessages, setChatMessages] = useState([]); // [{timestamp, user, text, to}]
+    const [chatInput, setChatInput] = useState('');
+    const [chatRecipient, setChatRecipient] = useState('all');
+    const [allUsers, setAllUsers] = useState([]);
     // Highlight selected audit log entry
     const [selectedAuditId, setSelectedAuditId] = useState(null);
     // Preserve audit log scroll position across open/close
@@ -339,29 +344,54 @@ export default function Sheet() {
 
         // WebSocket connection with reconnection logic
         let reconnectTimeout = null;
-        let heartbeatInterval = null;
         let shouldReconnect = true;
 
         function connectWS() {
             const host = import.meta.env.VITE_BACKEND_HOST || '192.168.0.102';
-            const socket = new WebSocket(`ws://${host}:8080/ws?user=${encodeURIComponent(username)}&id=${id}`);
+            const socket = new WebSocket(`ws://${host}:8080/ws?user=${encodeURIComponent(username)}&id=${id}`, 'echo-protocol');
 
             socket.onopen = () => {
                 console.log('Connected to WS');
                 setConnected(true);
 
-                // Start heartbeat ping to keep connection alive
-                if (heartbeatInterval) clearInterval(heartbeatInterval);
-                heartbeatInterval = setInterval(() => {
-                    if (socket.readyState === WebSocket.OPEN && !connected) {
+                // SEND initial PING after 5 secs  (connection disconnects in firefox )
+                function sendInitialPing() {
+                    if (socket.readyState === WebSocket.OPEN) {
                         socket.send(JSON.stringify({ type: 'PING', sheet_id: id }));
                     }
-                }, 4000); // 4s
+                }
+
+                setTimeout(sendInitialPing, 5000);
+
             };
 
             socket.onmessage = (event) => {
                 try {
-                    const msg = JSON.parse(event.data);
+                    //console.log("WS Message:", event.data);
+
+                    // Backend may concatenate multiple JSON messages without a separator.
+                    // Split into individual JSON objects and handle each one.
+                    const raw = event.data;
+                    const messages = [];
+                    let depth = 0;
+                    let start = -1;
+                    for (let i = 0; i < raw.length; i++) {
+                        const ch = raw[i];
+                        if (ch === '{') {
+                            if (depth === 0) start = i;
+                            depth++;
+                        } else if (ch === '}') {
+                            depth--;
+                            if (depth === 0 && start !== -1) {
+                                messages.push(raw.slice(start, i + 1));
+                                start = -1;
+                            }
+                        }
+                    }
+
+                    const parsedMessages = messages.length > 0 ? messages.map(m => JSON.parse(m)) : [JSON.parse(raw)];
+
+                    parsedMessages.forEach((msg) => {
                     if (msg.type === 'INIT') {
                         setInitialState(msg.payload);
                     } else if (msg.type === 'UPDATE_CELL') {
@@ -383,6 +413,15 @@ export default function Sheet() {
                         setInitialState(msg.payload);
                     } else if (msg.type === 'ROW_COL_UPDATED') {
                         setInitialState(msg.payload);
+                    } else if (msg.type === 'CHAT_HISTORY') {
+                        const list = Array.isArray(msg.payload) ? msg.payload : [];
+                        console.log("Chat history:", list);
+                        setChatMessages(list);
+                    } else if (msg.type === 'CHAT_APPENDED') {
+                        const appended = msg.payload;
+                        if (appended && appended.text) {
+                            setChatMessages(prev => [...prev, appended]);
+                        }
                     } else if (msg.type === 'SELECTION_SHARED') {
                         const { startRow, startCol, endRow, endCol, sheet_id,   values } = msg.payload || {};
                         if (startRow && startCol && endRow && endCol) {
@@ -404,6 +443,7 @@ export default function Sheet() {
                             alert('You are not allowed to edit this sheet.');
                         }
                     }
+                    });
                 } catch (e) {
                     console.error("WS Parse error", e);
                 }
@@ -412,10 +452,6 @@ export default function Sheet() {
             socket.onclose = () => {
                 setConnected(false); setIsEditing(false);
                 console.log('Disconnected from WS');
-                if (heartbeatInterval) {
-                    clearInterval(heartbeatInterval);
-                    heartbeatInterval = null;
-                }
                 if (shouldReconnect) {
                     // Try to reconnect after 2 seconds
                     reconnectTimeout = setTimeout(() => {
@@ -436,11 +472,24 @@ export default function Sheet() {
 
         connectWS();
 
+        // Fetch users for chat recipient dropdown
+        (async () => {
+            try {
+                const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
+                const res = await authenticatedFetch(`http://${host}:8080/api/users`);
+                if (res.ok) {
+                    const list = await res.json();
+                    if (Array.isArray(list)) setAllUsers(list);
+                }
+            } catch (e) {
+                // ignore fetch errors in chat recipients
+            }
+        })();
+
         return () => {
             shouldReconnect = false;
             if (ws.current) ws.current.close();
             if (reconnectTimeout) clearTimeout(reconnectTimeout);
-            if (heartbeatInterval) clearInterval(heartbeatInterval);
             clearInterval(sessionCheckInterval);
         };
     }, [id, username, navigate]);
@@ -471,6 +520,7 @@ export default function Sheet() {
         if (sheet.permissions && Array.isArray(sheet.permissions.editors)) {
             setEditors(sheet.permissions.editors);
         }
+        // Chat history now comes via CHAT_HISTORY, not from the sheet
         // Apply persisted column widths / row heights if present
         if (sheet.col_widths) {
             setColWidths(prev => ({ ...prev, ...sheet.col_widths }));
@@ -772,7 +822,7 @@ export default function Sheet() {
 
     // Extract row/col from audit log details and navigate
     const navigateToCellFromDetails = (details) => {
-        closeSidebar();
+        //closeSidebar();
         if (!details || typeof details !== 'string') return;
         // Patterns: "Set cell 28,C to ..." or "Changed cell 4,B from ..."
         const match = details.match(/(?:Set|Changed)\s+cell\s+(\d+),([A-Z]+)\s+/);
@@ -920,10 +970,8 @@ export default function Sheet() {
             <div style={{ display: 'inline' ,float: 'left'}} className="flex flex-1 overflow-hidden relative">
                 {/* Sidebar / Audit Log */}
                 {isSidebarOpen && (
-                    <div
-                        className="position-absolute top-0 end-0 bg-white border-start shadow-lg"
-                        style={{ width: '500px',  zIndex: 1050, height: '100%' }}
-                    >
+                     <div style={{ position: 'fixed', right: 16, top: 70, width: 360, height: 'calc(70% - 32px)', zIndex: 1100 }}>
+                   
                         <div className="d-flex justify-content-between align-items-center p-3 border-bottom bg-light">
                             <h5 className="mb-0 d-flex align-items-center">
                                 <History className="me-2" size={18} /> Activity Log
@@ -936,7 +984,7 @@ export default function Sheet() {
                                 <ArrowLeft size={18} />
                             </button>
                         </div>
-                        <div ref={auditLogRef} className="overflow-auto p-3" style={{ height: 'calc(100% - 56px)' ,overflowY:'scroll'}}>
+                        <div ref={auditLogRef} className="overflow-auto p-3" style={{ height: 'calc(70% - 56px)' ,overflowY:'scroll'}}>
                             {auditLog.slice().reverse().map((entry, i) => {
                                 const entryId = `${entry.timestamp || i}|${entry.user || ''}|${entry.action || ''}|${entry.details || ''}`;
                                 const isSelected = selectedAuditId === entryId;
@@ -982,6 +1030,7 @@ export default function Sheet() {
                 <div className="flex-1 overflow-hidden p-6 bg-gray-100/50" >
                     {/* Scrollbars + Grid layout */}
                     <div className="h-full w-full" style={{ display: 'grid', gridTemplateColumns: '24px auto', gridTemplateRows: '24px auto' }}>
+                        
                         {/* Top horizontal column scrollbar */}
                         <div style={{ gridColumn: '2 / span 1', gridRow: '1 / span 1' }}
                              onWheel={(e) => {
@@ -1335,19 +1384,25 @@ export default function Sheet() {
                                                         readOnly={!!cell.locked || !canEdit}
                                                         onFocus={() => { setFocusedCell({ row: rowLabel, col: colLabel }); setIsEditing(false); }}
                                                         onMouseOver={e => { e.target.focus(); }}
-                                                        onDoubleClick={(e) => { if(cell.locked || !canEdit) return; if(connected)  {setIsEditing(true); setCutRow(null); setCutCol(null);}; if (typeof e.target.select === 'function') e.target.select(); }}
+                                                        onDoubleClick={(e) => { if(isEditing) return; if(cell.locked || !canEdit) return; if(connected)  {setIsEditing(true); setCutRow(null); setCutCol(null);}; if (typeof e.target.select === 'function') e.target.select(); }}
                                                         onMouseDown={(e) => { 
+                                                            if (isEditing) {
+                                                                // In edit mode: allow normal text selection, but keep focus
+                                                                // Do NOT call preventDefault or selection handlers
+                                                                return;
+                                                            }
                                                             e.preventDefault();
                                                             e.target.focus();
                                                             if (e.button === 0 ) {
                                                                 startSelection(rowLabel, colLabel);
                                                             }
                                                         }}
-                                                        onMouseEnter={() => {extendSelection(rowLabel, colLabel);}   } 
+                                                        onMouseEnter={() => { if(!isEditing) extendSelection(rowLabel, colLabel);}   } 
                                                         onMouseUp={(e) => {
-                                                                    extendSelection(rowLabel, colLabel);
-                                                                    endSelection(); 
-
+                                                                    if(!isEditing) {
+                                                                        extendSelection(rowLabel, colLabel);
+                                                                        endSelection(); 
+                                                                    }
                                                         }}
                                                       
                                                         onKeyDown={(e) => {
@@ -1485,6 +1540,74 @@ export default function Sheet() {
                                 ))}
                             </tbody>
                         </table>
+                            </div>
+                        </div>
+
+                        {/* Chat panel (fixed bottom-right) */}
+                        <div style={{ position: 'fixed', right: 16, bottom: 16, width: 360, zIndex: 1100 }}>
+                            <div className="card shadow-sm">
+                                <div className="card-header py-2 d-flex align-items-center justify-content-between">
+                                    <span className="fw-semibold small d-flex align-items-center"><MessageSquare size={16} className="me-2"/> Chat</span>
+                                    <span className="badge bg-light text-dark">{chatMessages.length}</span>
+                                </div>
+                                <div className="card-body p-2" style={{ maxHeight: 240, overflowY: 'auto' }}>
+                                    {chatMessages.length === 0 && (
+                                        <div className="text-muted small text-center py-2">No messages yet.</div>
+                                    )}
+                                    {chatMessages.map((m, idx) => (
+                                        <div key={`${m.timestamp || idx}-${m.user}-${idx}`} className="mb-2">
+                                            <div className="d-flex justify-content-between">
+                                                <span className="fw-semibold small">{m.user}{m.to && m.to !== 'all' ? ` → @${m.to}` : ''}</span>
+                                                <span className="text-muted small">{m.timestamp ? new Date(m.timestamp).toLocaleString() : ''}</span>
+                                            </div>
+                                            <div className="small">{m.text}</div>
+                                        </div>
+                                    ))}
+                                </div>
+                                <div className="card-footer p-2">
+                                    <div className="input-group input-group-sm">
+                                        <select className="form-select" style={{ maxWidth: 140 }} value={chatRecipient} onChange={(e)=>setChatRecipient(e.target.value)}>
+                                            <option value="all">All</option>
+                                            {allUsers.map(u => (
+                                                <option key={u} value={u}>{u}</option>
+                                            ))}
+                                        </select>
+                                        <input
+                                            type="text"
+                                            className="form-control"
+                                            placeholder="Type a message"
+                                            value={chatInput}
+                                            onChange={(e) => setChatInput(e.target.value)}
+                                            onKeyDown={(e) => {
+                                                if (e.key === 'Enter') {
+                                                    e.preventDefault();
+                                                    if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+                                                        const text = chatInput.trim();
+                                                        if (text) {
+                                                            const to = chatRecipient || 'all';
+                                                            ws.current.send(JSON.stringify({ type: 'CHAT_MESSAGE', sheet_id: id, payload: { text, user: username, to } }));
+                                                            setChatInput('');
+                                                        }
+                                                    }
+                                                }
+                                            }}
+                                        />
+                                        <button
+                                            className="btn btn-outline-primary"
+                                            type="button"
+                                            onClick={() => {
+                                                if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+                                                    const text = chatInput.trim();
+                                                    if (text) {
+                                                        const to = chatRecipient || 'all';
+                                                        ws.current.send(JSON.stringify({ type: 'CHAT_MESSAGE', sheet_id: id, payload: { text, user: username, to } }));
+                                                        setChatInput('');
+                                                    }
+                                                }
+                                            }}
+                                        >Send</button>
+                                    </div>
+                                </div>
                             </div>
                         </div>
                     </div>
