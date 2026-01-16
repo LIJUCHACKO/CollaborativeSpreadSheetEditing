@@ -1384,7 +1384,23 @@ export default function Sheet() {
                                                         readOnly={!!cell.locked || !canEdit}
                                                         onFocus={() => { setFocusedCell({ row: rowLabel, col: colLabel }); setIsEditing(false); }}
                                                         onMouseOver={e => { e.target.focus(); }}
-                                                        onDoubleClick={(e) => { if(isEditing) return; if(cell.locked || !canEdit) return; if(connected)  {setIsEditing(true); setCutRow(null); setCutCol(null);}; if (typeof e.target.select === 'function') e.target.select(); }}
+                                                        onDoubleClick={(e) => {
+                                                            if (isEditing) return;
+                                                            if (cell.locked || !canEdit) return;
+                                                            // Prevent default double-click text selection
+                                                            e.preventDefault();
+                                                            e.target.focus();
+                                                            if (connected) {
+                                                                setIsEditing(true);
+                                                                setCutRow(null);
+                                                                setCutCol(null);
+                                                            }
+                                                            // Clear any selection by collapsing caret
+                                                            if (typeof e.target.setSelectionRange === 'function') {
+                                                                const len = e.target.value.length;
+                                                                e.target.setSelectionRange(len, len);
+                                                            }
+                                                        }}
                                                         onMouseDown={(e) => { 
                                                             if (isEditing) {
                                                                 // In edit mode: allow normal text selection, but keep focus
