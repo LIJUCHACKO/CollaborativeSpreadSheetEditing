@@ -5,6 +5,8 @@ import (
 	"flag"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -291,24 +293,34 @@ func main() {
 		}
 
 		if r.Method == "GET" {
-			// Ensure we load if not loaded? Or assume Load called at start.
-			// Let's assume Load called at main.
-			sheets := globalSheetManager.ListSheets()
-			json.NewEncoder(w).Encode(sheets)
+			project := r.URL.Query().Get("project")
+			all := globalSheetManager.ListSheets()
+			if project == "" {
+				json.NewEncoder(w).Encode(all)
+				return
+			}
+			filtered := make([]*Sheet, 0)
+			for _, s := range all {
+				if s != nil && s.ProjectName == project {
+					filtered = append(filtered, s)
+				}
+			}
+			json.NewEncoder(w).Encode(filtered)
 			return
 		}
 
 		if r.Method == "POST" {
 			var req struct {
-				Name string `json:"name"`
-				User string `json:"user"`
+				Name        string `json:"name"`
+				User        string `json:"user"`
+				ProjectName string `json:"project_name"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
 			// Use authenticated username instead of client-provided user
-			sheet := globalSheetManager.CreateSheet(req.Name, username)
+			sheet := globalSheetManager.CreateSheet(req.Name, username, req.ProjectName)
 			json.NewEncoder(w).Encode(sheet)
 			return
 		}
@@ -353,6 +365,108 @@ func main() {
 
 			w.WriteHeader(http.StatusOK)
 			json.NewEncoder(w).Encode(map[string]string{"message": "Sheet deleted"})
+			return
+		}
+	})
+
+	// Projects API (filesystem-backed via DATA/<project>)
+	http.HandleFunc("/api/projects", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		token := r.Header.Get("Authorization")
+		_, err := globalUserManager.ValidateToken(token)
+		if err != nil {
+			http.Error(w, "Unauthorized: "+err.Error(), http.StatusUnauthorized)
+			return
+		}
+
+		switch r.Method {
+		case http.MethodGet:
+			entries, err := os.ReadDir(dataDir)
+			if err != nil {
+				http.Error(w, "Failed to read projects", http.StatusInternalServerError)
+				return
+			}
+			type Project struct {
+				Name string `json:"name"`
+			}
+			projects := make([]Project, 0)
+			for _, e := range entries {
+				if e.IsDir() {
+					projects = append(projects, Project{Name: e.Name()})
+				}
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(projects)
+			return
+
+		case http.MethodPost:
+			var req struct {
+				Name string `json:"name"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
+				http.Error(w, "Project name required", http.StatusBadRequest)
+				return
+			}
+			if err := os.MkdirAll(filepath.Join(dataDir, req.Name), 0755); err != nil {
+				http.Error(w, "Failed to create project", http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{"name": req.Name})
+			return
+
+		case http.MethodPut:
+			var req struct{ OldName, NewName string }
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.OldName == "" || req.NewName == "" {
+				http.Error(w, "OldName and NewName required", http.StatusBadRequest)
+				return
+			}
+			oldPath := filepath.Join(dataDir, req.OldName)
+			newPath := filepath.Join(dataDir, req.NewName)
+			if err := os.Rename(oldPath, newPath); err != nil {
+				http.Error(w, "Failed to rename project", http.StatusInternalServerError)
+				return
+			}
+			// Update in-memory sheets' ProjectName
+			for _, s := range globalSheetManager.ListSheets() {
+				if s.ProjectName == req.OldName {
+					s.mu.Lock()
+					s.ProjectName = req.NewName
+					s.mu.Unlock()
+					globalSheetManager.SaveSheet(s)
+				}
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{"message": "Project renamed"})
+			return
+
+		case http.MethodDelete:
+			name := r.URL.Query().Get("name")
+			if name == "" {
+				http.Error(w, "Project name required", http.StatusBadRequest)
+				return
+			}
+			// Delete sheets in memory and files
+			globalSheetManager.DeleteSheetsByProject(name)
+			// Remove directory
+			if err := os.RemoveAll(filepath.Join(dataDir, name)); err != nil {
+				http.Error(w, "Failed to delete project", http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{"message": "Project deleted"})
+			return
+
+		default:
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 	})

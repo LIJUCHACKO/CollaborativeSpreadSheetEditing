@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useParams, Link } from 'react-router-dom';
 import {
     FileSpreadsheet,
     Plus,
@@ -14,6 +14,7 @@ import './bootstrap/dist/css/bootstrap.min.css';
 import { isSessionValid, clearAuth, authenticatedFetch, getUsername } from '../utils/auth';
 
 export default function Dashboard() {
+    const { project } = useParams();
     const [sheets, setSheets] = useState([]);
     const [newSheetName, setNewSheetName] = useState('');
     const [isCreating, setIsCreating] = useState(true);
@@ -48,7 +49,8 @@ export default function Dashboard() {
     const fetchSheets = async () => {
         try {
             const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
-            const res = await authenticatedFetch(`http://${host}:8080/api/sheets`);
+            const query = project ? `?project=${encodeURIComponent(project)}` : '';
+            const res = await authenticatedFetch(`http://${host}:8080/api/sheets${query}`);
             if (res.ok) {
                 const data = await res.json();
                 setSheets(data || []);
@@ -68,10 +70,11 @@ export default function Dashboard() {
 
         try {
             const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
+            const body = project ? { name: newSheetName, user: username, project_name: project } : { name: newSheetName, user: username };
             const res = await authenticatedFetch(`http://${host}:8080/api/sheets`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name: newSheetName, user: username }),
+                body: JSON.stringify(body),
             });
             if (res.ok) {
                 const sheet = await res.json();
@@ -183,7 +186,7 @@ export default function Dashboard() {
                 <div className="container-fluid">
                     <a className="navbar-brand d-flex align-items-center" href="#">
                         <FileSpreadsheet className="me-2" />
-                        SheetMaster
+                        {project ? `Project: ${project}` : 'SheetMaster'}
                     </a>
                     <button
                         className="navbar-toggler"
@@ -219,6 +222,11 @@ export default function Dashboard() {
             </nav>
 
             <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8">
+                {project && (
+                    <div className="mb-3">
+                        <Link to="/projects" className="btn btn-sm btn-outline-secondary">← Back to Projects</Link>
+                    </div>
+                )}
                 
 
                 {/* Create Sheet Modal/Collapse */}

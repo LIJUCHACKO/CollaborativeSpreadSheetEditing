@@ -45,7 +45,7 @@ export default function Login() {
           localStorage.setItem('auth_token', data.token);
           localStorage.setItem('chat_username', data.username);
           localStorage.setItem('login_time', new Date().getTime().toString());
-          navigate('/dashboard');
+          navigate('/projects');
         }
       } else {
         const text = await res.text();

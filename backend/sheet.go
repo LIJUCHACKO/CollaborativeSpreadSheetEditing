@@ -44,6 +44,7 @@ type Sheet struct {
 	ID          string                     `json:"id"`
 	Name        string                     `json:"name"`
 	Owner       string                     `json:"owner"`
+	ProjectName string                     `json:"project_name,omitempty"`
 	Data        map[string]map[string]Cell `json:"data"` // Row -> Col -> Cell
 	AuditLog    []AuditEntry               `json:"audit_log"`
 	Permissions Permissions                `json:"permissions"`
@@ -82,7 +83,18 @@ func (sm *SheetManager) saveSheetLocked(sheet *Sheet) {
 		return
 	}
 
-	filePath := getSheetFilePath(sheet.ID)
+	// Determine path based on project folder if present
+	var dir string
+	if sheet.ProjectName != "" {
+		dir = filepath.Join(dataDir, sheet.ProjectName)
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			log.Printf("Error creating project directory %s: %v", dir, err)
+			return
+		}
+	} else {
+		dir = dataDir
+	}
+	filePath := filepath.Join(dir, sheet.ID+".json")
 	file, err := os.Create(filePath)
 	if err != nil {
 		log.Printf("Error saving sheet %s: %v", sheet.ID, err)
@@ -114,18 +126,19 @@ var globalSheetManager = &SheetManager{
 	sheets: make(map[string]*Sheet),
 }
 
-func (sm *SheetManager) CreateSheet(name, owner string) *Sheet {
+func (sm *SheetManager) CreateSheet(name, owner, projectName string) *Sheet {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
 	id := generateID() // Need to implement this or use a simple counter
 	sheet := &Sheet{
-		ID:         id,
-		Name:       name,
-		Owner:      owner,
-		Data:       make(map[string]map[string]Cell),
-		ColWidths:  make(map[string]int),
-		RowHeights: make(map[string]int),
+		ID:          id,
+		Name:        name,
+		Owner:       owner,
+		ProjectName: projectName,
+		Data:        make(map[string]map[string]Cell),
+		ColWidths:   make(map[string]int),
+		RowHeights:  make(map[string]int),
 		Permissions: Permissions{
 			Editors: []string{owner},
 		},
@@ -937,19 +950,41 @@ func (sm *SheetManager) DeleteSheet(id string) bool {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	if _, exists := sm.sheets[id]; !exists {
+	sheet, exists := sm.sheets[id]
+	if !exists {
 		return false
 	}
 
 	delete(sm.sheets, id)
 
 	// Remove the sheet file
-	filePath := getSheetFilePath(id)
+	var filePath string
+	if sheet.ProjectName != "" {
+		filePath = filepath.Join(dataDir, sheet.ProjectName, id+".json")
+	} else {
+		filePath = getSheetFilePath(id)
+	}
 	if err := os.Remove(filePath); err != nil {
 		log.Printf("Error deleting sheet file %s: %v", filePath, err)
 	}
 
 	return true
+}
+
+// DeleteSheetsByProject removes all sheets in a given project from memory and disk.
+func (sm *SheetManager) DeleteSheetsByProject(projectName string) {
+	sm.mu.Lock()
+	// Collect ids to delete to avoid mutating map during iteration
+	ids := make([]string, 0)
+	for id, s := range sm.sheets {
+		if s.ProjectName == projectName {
+			ids = append(ids, id)
+		}
+	}
+	sm.mu.Unlock()
+	for _, id := range ids {
+		sm.DeleteSheet(id)
+	}
 }
 
 func (sm *SheetManager) SaveSheet(sheet *Sheet) {
@@ -977,31 +1012,70 @@ func (sm *SheetManager) Load() {
 		return
 	}
 
-	// Read all .json files from DATA directory
-	files, err := filepath.Glob(filepath.Join(dataDir, "*.json"))
-	if err != nil {
-		log.Printf("Error reading DATA directory: %v", err)
-		return
+	loadedCount := 0
+
+	// Load sheets from root (backward compatibility)
+	rootFiles, err := filepath.Glob(filepath.Join(dataDir, "*.json"))
+	if err == nil {
+		for _, filePath := range rootFiles {
+			base := filepath.Base(filePath)
+			// Skip non-sheet files like chat.json, projects.json, users.json
+			if base == "chat.json" || base == "projects.json" || base == "users.json" {
+				continue
+			}
+			file, err := os.Open(filePath)
+			if err != nil {
+				log.Printf("Error opening sheet file %s: %v", filePath, err)
+				continue
+			}
+			var sheet Sheet
+			if err := json.NewDecoder(file).Decode(&sheet); err != nil {
+				log.Printf("Error decoding sheet file %s: %v", filePath, err)
+				file.Close()
+				continue
+			}
+			file.Close()
+			sm.sheets[sheet.ID] = &sheet
+			loadedCount++
+		}
 	}
 
-	loadedCount := 0
-	for _, filePath := range files {
-		file, err := os.Open(filePath)
-		if err != nil {
-			log.Printf("Error opening sheet file %s: %v", filePath, err)
-			continue
+	// Load sheets from project subdirectories
+	entries, err := os.ReadDir(dataDir)
+	if err != nil {
+		log.Printf("Error reading DATA directory: %v", err)
+	} else {
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			project := entry.Name()
+			files, err := filepath.Glob(filepath.Join(dataDir, project, "*.json"))
+			if err != nil {
+				log.Printf("Error listing files for project %s: %v", project, err)
+				continue
+			}
+			for _, filePath := range files {
+				file, err := os.Open(filePath)
+				if err != nil {
+					log.Printf("Error opening sheet file %s: %v", filePath, err)
+					continue
+				}
+				var sheet Sheet
+				if err := json.NewDecoder(file).Decode(&sheet); err != nil {
+					log.Printf("Error decoding sheet file %s: %v", filePath, err)
+					file.Close()
+					continue
+				}
+				file.Close()
+				// If project name missing in file, infer from folder
+				if sheet.ProjectName == "" {
+					sheet.ProjectName = project
+				}
+				sm.sheets[sheet.ID] = &sheet
+				loadedCount++
+			}
 		}
-
-		var sheet Sheet
-		if err := json.NewDecoder(file).Decode(&sheet); err != nil {
-			log.Printf("Error decoding sheet file %s: %v", filePath, err)
-			file.Close()
-			continue
-		}
-		file.Close()
-
-		sm.sheets[sheet.ID] = &sheet
-		loadedCount++
 	}
 
 	log.Printf("Loaded %d sheets from disk", loadedCount)

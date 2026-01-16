@@ -48,6 +48,8 @@ export default function Sheet() {
     const [isSidebarOpen, setSidebarOpen] = useState(false);
     // Add sheetName state
     const [sheetName, setSheetName] = useState('');
+    // Project name for this sheet (used for back navigation)
+    const [projectName, setProjectName] = useState('');
     // Column filters state
     const [filters, setFilters] = useState({});
     const [showFilters, setShowFilters] = useState(false);
@@ -514,6 +516,9 @@ export default function Sheet() {
         } else {
             setSheetName(id);
         }
+        if (sheet.project_name) {
+            setProjectName(sheet.project_name);
+        }
         if (sheet.owner) {
             setOwner(sheet.owner);
         }
@@ -880,7 +885,13 @@ export default function Sheet() {
             <nav className="navbar navbar-expand-lg navbar-light" style={{ backgroundColor: 'skyblue' }}>
                 <div className="container-fluid">
                     <button
-                            onClick={() => navigate('/dashboard')}
+                            onClick={() => {
+                                if (projectName) {
+                                    navigate(`/project/${encodeURIComponent(projectName)}`);
+                                } else {
+                                    navigate('/projects');
+                                }
+                            }}
                             className="btn btn-outline-primary btn-sm d-flex align-items-center"
                         >
                             <ArrowLeft className="me-1" />
@@ -1029,7 +1040,7 @@ export default function Sheet() {
                 {/* Grid Area */}
                 <div className="flex-1 overflow-hidden p-6 bg-gray-100/50" >
                     {/* Scrollbars + Grid layout */}
-                    <div className="h-full w-full" style={{ display: 'grid', gridTemplateColumns: '24px auto', gridTemplateRows: '24px auto' }}>
+                    <div className="h-full w-full" style={{ display: 'grid', gridTemplateColumns: '24px auto', gridTemplateRows: '24px auto 24px' }}>
                         
                         {/* Top horizontal column scrollbar */}
                         <div style={{ gridColumn: '2 / span 1', gridRow: '1 / span 1' }}
@@ -1557,6 +1568,40 @@ export default function Sheet() {
                             </tbody>
                         </table>
                             </div>
+                        </div>
+
+                        {/* Bottom horizontal column scrollbar (alias) */}
+                        <div style={{ gridColumn: '2 / span 1', gridRow: '3 / span 1' }}
+                             onWheel={(e) => {
+                                 e.preventDefault();
+                                 // Commit edit and exit editing mode on scroll
+                                 setIsEditing(false);
+                                 const { row, col } = focusedCell;
+                                 const key = `${row}-${col}`;
+                                 if (data[key]) {
+                                     handleCellChange(row, col, data[key].value);
+                                 }
+                                 const step = e.deltaY > 0 ? 1 : -1;
+                                 const maxStart = Math.max(1, COLS - visibleColsCount + 1);
+                                 setColStart(prev => Math.max(1, Math.min(maxStart, prev + step)));
+                             }}>
+                            <input
+                                type="range"
+                                min={1}
+                                max={Math.max(1, COLS - visibleColsCount + 1)}
+                                value={colStart}
+                                onChange={(e) =>{
+                                    // Commit edit and exit editing mode on scroll
+                                    setIsEditing(false);
+                                    const { row, col } = focusedCell;
+                                    const key = `${row}-${col}`;
+                                    if (data[key]) {
+                                        handleCellChange(row, col, data[key].value);
+                                    }
+                                    setColStart(Math.max(1, Math.min(COLS - visibleColsCount + 1, parseInt(e.target.value, 10) || 1)))}}
+                                style={{ width: '100%' }}
+                                aria-label="Columns scrollbar (bottom)"
+                            />
                         </div>
 
                         {/* Chat panel (fixed bottom-right) */}

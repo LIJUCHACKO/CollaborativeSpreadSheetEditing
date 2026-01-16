@@ -149,7 +149,7 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 		sheetID = "default"
 		// Ensure default sheet exists
 		if globalSheetManager.GetSheet("default") == nil {
-			globalSheetManager.CreateSheet("default", "System")
+			globalSheetManager.CreateSheet("default", "System", "")
 		}
 	} else {
 		// Ensure sheet exists? Or auto-create?
@@ -157,7 +157,7 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 			// For simplicity, auto-create if it doesn't exist?
 			// Or typically we'd return 404, but upgrading WS is already done.
 			// Let's lazy create
-			globalSheetManager.CreateSheet(sheetID, user)
+			globalSheetManager.CreateSheet(sheetID, user, "")
 		}
 	}
 
