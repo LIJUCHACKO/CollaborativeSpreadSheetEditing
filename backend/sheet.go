@@ -72,6 +72,7 @@ func (s *Sheet) IsEditor(user string) bool {
 }
 
 type SheetManager struct {
+	// Keyed by composite key of project+id
 	sheets map[string]*Sheet
 	mu     sync.RWMutex
 }
@@ -126,6 +127,14 @@ var globalSheetManager = &SheetManager{
 	sheets: make(map[string]*Sheet),
 }
 
+// sheetKey builds a unique key combining project and sheet id.
+func sheetKey(project, id string) string {
+	if project == "" {
+		return id
+	}
+	return project + "::" + id
+}
+
 func (sm *SheetManager) CreateSheet(name, owner, projectName string) *Sheet {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
@@ -153,15 +162,93 @@ func (sm *SheetManager) CreateSheet(name, owner, projectName string) *Sheet {
 		Details:   "Created sheet " + name,
 	})
 
-	sm.sheets[id] = sheet
+	sm.sheets[sheetKey(projectName, id)] = sheet
 	sm.saveSheetLocked(sheet) // Persist individual sheet
 	return sheet
 }
 
+// GetSheet finds a sheet by id only. If multiple projects contain the same id,
+// the returned sheet is undefined. Prefer GetSheetBy.
 func (sm *SheetManager) GetSheet(id string) *Sheet {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
-	return sm.sheets[id]
+	for _, s := range sm.sheets {
+		if s != nil && s.ID == id {
+			return s
+		}
+	}
+	return nil
+}
+
+// GetSheetBy finds a sheet by id and project name.
+func (sm *SheetManager) GetSheetBy(id, project string) *Sheet {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	// Try direct composite key first
+	if s, ok := sm.sheets[sheetKey(project, id)]; ok {
+		return s
+	}
+	// Fallback: iterate (handles legacy keys)
+	for _, s := range sm.sheets {
+		if s != nil && s.ID == id && s.ProjectName == project {
+			return s
+		}
+	}
+	return nil
+}
+
+// CopySheetToProject creates a copy of source sheet into target project.
+// New sheet ID is generated; name defaults to source name if empty.
+func (sm *SheetManager) CopySheetToProject(sourceID, sourceProject, targetProject, newName, owner string) *Sheet {
+	// Locate source
+	src := sm.GetSheetBy(sourceID, sourceProject)
+	if src == nil {
+		return nil
+	}
+	// Build new sheet
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	id := generateID()
+	if newName == "" {
+		newName = src.Name
+	}
+	copySheet := &Sheet{
+		ID:          id,
+		Name:        newName,
+		Owner:       owner,
+		ProjectName: targetProject,
+		Data:        make(map[string]map[string]Cell),
+		ColWidths:   make(map[string]int),
+		RowHeights:  make(map[string]int),
+		Permissions: Permissions{Editors: []string{owner}},
+		AuditLog:    []AuditEntry{},
+	}
+	// Deep copy data
+	src.mu.RLock()
+	for r, cols := range src.Data {
+		copySheet.Data[r] = make(map[string]Cell, len(cols))
+		for c, cell := range cols {
+			copySheet.Data[r][c] = cell
+		}
+	}
+	for k, v := range src.ColWidths {
+		copySheet.ColWidths[k] = v
+	}
+	for k, v := range src.RowHeights {
+		copySheet.RowHeights[k] = v
+	}
+	src.mu.RUnlock()
+	// Audit entry
+	copySheet.AuditLog = append(copySheet.AuditLog, AuditEntry{
+		Timestamp: time.Now(),
+		User:      owner,
+		Action:    "COPY_SHEET",
+		Details:   fmt.Sprintf("Copied from project '%s' sheet '%s'", sourceProject, sourceID),
+	})
+	// Register and persist
+	sm.sheets[sheetKey(targetProject, id)] = copySheet
+	sm.saveSheetLocked(copySheet)
+	return copySheet
 }
 
 // Simple ID generator
@@ -926,8 +1013,15 @@ func (sm *SheetManager) RenameSheet(id, newName, user string) bool {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	sheet, exists := sm.sheets[id]
-	if !exists {
+	// Find sheet across projects
+	var sheet *Sheet
+	for _, s := range sm.sheets {
+		if s != nil && s.ID == id {
+			sheet = s
+			break
+		}
+	}
+	if sheet == nil {
 		return false
 	}
 
@@ -942,6 +1036,45 @@ func (sm *SheetManager) RenameSheet(id, newName, user string) bool {
 	})
 	sheet.mu.Unlock()
 
+	// Persist with existing key
+	sm.saveSheetLocked(sheet)
+	return true
+}
+
+// RenameSheetBy renames a sheet identified by id and project.
+func (sm *SheetManager) RenameSheetBy(id, project, newName, user string) bool {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	var sheet *Sheet
+	//var key string
+	// Prefer composite key match
+	if s, ok := sm.sheets[sheetKey(project, id)]; ok {
+		sheet = s
+	} else {
+		for _, s := range sm.sheets {
+			if s != nil && s.ID == id && s.ProjectName == project {
+				sheet = s
+				break
+			}
+		}
+	}
+	if sheet == nil {
+		return false
+	}
+
+	sheet.mu.Lock()
+	oldName := sheet.Name
+	sheet.Name = newName
+	sheet.AuditLog = append(sheet.AuditLog, AuditEntry{
+		Timestamp: time.Now(),
+		User:      user,
+		Action:    "RENAME_SHEET",
+		Details:   "Renamed sheet from '" + oldName + "' to '" + newName + "'",
+	})
+	sheet.mu.Unlock()
+
+	// Persist
 	sm.saveSheetLocked(sheet)
 	return true
 }
@@ -950,12 +1083,56 @@ func (sm *SheetManager) DeleteSheet(id string) bool {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	sheet, exists := sm.sheets[id]
-	if !exists {
+	// Find entry by id
+	var sheet *Sheet
+	for _, s := range sm.sheets {
+		if s != nil && s.ID == id {
+			sheet = s
+			break
+		}
+	}
+	if sheet == nil {
 		return false
 	}
 
-	delete(sm.sheets, id)
+	// Delete using computed composite key
+	delete(sm.sheets, sheetKey(sheet.ProjectName, id))
+
+	// Remove the sheet file
+	var filePath string
+	if sheet.ProjectName != "" {
+		filePath = filepath.Join(dataDir, sheet.ProjectName, id+".json")
+	} else {
+		filePath = getSheetFilePath(id)
+	}
+	if err := os.Remove(filePath); err != nil {
+		log.Printf("Error deleting sheet file %s: %v", filePath, err)
+	}
+
+	return true
+}
+
+// DeleteSheetBy deletes a sheet with id and project from memory and disk.
+func (sm *SheetManager) DeleteSheetBy(id, project string) bool {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	var sheet *Sheet
+	if s, ok := sm.sheets[sheetKey(project, id)]; ok {
+		sheet = s
+	} else {
+		for _, s := range sm.sheets {
+			if s != nil && s.ID == id && s.ProjectName == project {
+				sheet = s
+				break
+			}
+		}
+	}
+	if sheet == nil {
+		return false
+	}
+
+	delete(sm.sheets, sheetKey(project, id))
 
 	// Remove the sheet file
 	var filePath string
@@ -1035,7 +1212,7 @@ func (sm *SheetManager) Load() {
 				continue
 			}
 			file.Close()
-			sm.sheets[sheet.ID] = &sheet
+			sm.sheets[sheetKey(sheet.ProjectName, sheet.ID)] = &sheet
 			loadedCount++
 		}
 	}
@@ -1072,11 +1249,69 @@ func (sm *SheetManager) Load() {
 				if sheet.ProjectName == "" {
 					sheet.ProjectName = project
 				}
-				sm.sheets[sheet.ID] = &sheet
+				sm.sheets[sheetKey(sheet.ProjectName, sheet.ID)] = &sheet
 				loadedCount++
 			}
 		}
 	}
 
 	log.Printf("Loaded %d sheets from disk", loadedCount)
+}
+
+// DuplicateProject duplicates all sheets in source project into a new project name.
+func (sm *SheetManager) DuplicateProject(sourceProject, newProject string) error {
+	if sourceProject == "" || newProject == "" {
+		return fmt.Errorf("source and new project names required")
+	}
+	// Ensure destination directory
+	destDir := filepath.Join(dataDir, newProject)
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		return fmt.Errorf("failed to create dest project dir: %w", err)
+	}
+	// Gather sheets to duplicate
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	for _, s := range sm.sheets {
+		if s == nil || s.ProjectName != sourceProject {
+			continue
+		}
+		// Clone maintaining same ID and owner/permissions
+		clone := &Sheet{
+			ID:          s.ID,
+			Name:        s.Name,
+			Owner:       s.Owner,
+			ProjectName: newProject,
+			Data:        make(map[string]map[string]Cell),
+			ColWidths:   make(map[string]int),
+			RowHeights:  make(map[string]int),
+			Permissions: s.Permissions,
+			AuditLog:    append([]AuditEntry{}, s.AuditLog...),
+		}
+		// Deep copy state
+		s.mu.RLock()
+		for r, cols := range s.Data {
+			clone.Data[r] = make(map[string]Cell, len(cols))
+			for c, cell := range cols {
+				clone.Data[r][c] = cell
+			}
+		}
+		for k, v := range s.ColWidths {
+			clone.ColWidths[k] = v
+		}
+		for k, v := range s.RowHeights {
+			clone.RowHeights[k] = v
+		}
+		s.mu.RUnlock()
+		// Add duplication audit
+		clone.AuditLog = append(clone.AuditLog, AuditEntry{
+			Timestamp: time.Now(),
+			User:      "system",
+			Action:    "DUPLICATE_PROJECT",
+			Details:   fmt.Sprintf("Duplicated from project '%s'", sourceProject),
+		})
+		// Register and persist
+		sm.sheets[sheetKey(newProject, clone.ID)] = clone
+		sm.saveSheetLocked(clone)
+	}
+	return nil
 }

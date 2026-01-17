@@ -47,6 +47,9 @@ type Client struct {
 
 	// Current Sheet ID
 	sheetID string
+
+	// Project Name
+	projectName string
 }
 
 // readPump pumps messages from the websocket connection to the hub.
@@ -80,6 +83,7 @@ func (c *Client) readPump() {
 		// Force header info from client session to prevent spoofing if we were strict
 		msg.User = c.userID
 		msg.SheetID = c.sheetID // Ensure the message is routed to the client's current room
+		msg.Project = c.projectName
 
 		c.hub.broadcast <- &msg
 	}
@@ -147,21 +151,19 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	if sheetID == "" {
 		// Fallback or error? For now fallback to a default
 		sheetID = "default"
-		// Ensure default sheet exists
-		if globalSheetManager.GetSheet("default") == nil {
-			globalSheetManager.CreateSheet("default", "System", "")
-		}
+		// Do not auto-create here; frontend should create sheets explicitly.
 	} else {
 		// Ensure sheet exists? Or auto-create?
-		if globalSheetManager.GetSheet(sheetID) == nil {
-			// For simplicity, auto-create if it doesn't exist?
-			// Or typically we'd return 404, but upgrading WS is already done.
-			// Let's lazy create
-			globalSheetManager.CreateSheet(sheetID, user, "")
-		}
+		// Avoid auto-creation to keep IDs consistent.
 	}
 
-	client := &Client{hub: hub, conn: conn, send: make(chan []byte, 256), userID: user, sheetID: sheetID}
+	project := r.URL.Query().Get("project")
+	// Validate existence
+	if s := globalSheetManager.GetSheetBy(sheetID, project); s == nil {
+		log.Printf("WS connect: sheet not found id=%s project=%s", sheetID, project)
+	}
+
+	client := &Client{hub: hub, conn: conn, send: make(chan []byte, 256), userID: user, sheetID: sheetID, projectName: project}
 	client.hub.register <- client
 
 	// Allow collection of memory referenced by the caller by doing all work in

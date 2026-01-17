@@ -54,8 +54,8 @@ func main() {
 			http.Error(w, "sheet_id is required", http.StatusBadRequest)
 			return
 		}
-
-		sheet := globalSheetManager.GetSheet(sheetID)
+		project := r.URL.Query().Get("project")
+		sheet := globalSheetManager.GetSheetBy(sheetID, project)
 		if sheet == nil {
 			http.Error(w, "Sheet not found", http.StatusNotFound)
 			return
@@ -140,6 +140,54 @@ func main() {
 		}
 
 		log.Printf("User %s exported sheet %s to XLSX", username, sheetID)
+	})
+
+	// Copy a sheet from one project to another
+	http.HandleFunc("/api/sheet/copy", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		token := r.Header.Get("Authorization")
+		username, err := globalUserManager.ValidateToken(token)
+		if err != nil {
+			http.Error(w, "Unauthorized: "+err.Error(), http.StatusUnauthorized)
+			return
+		}
+
+		var req struct {
+			SourceID      string `json:"source_id"`
+			SourceProject string `json:"source_project"`
+			TargetProject string `json:"target_project"`
+			Name          string `json:"name"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if req.SourceID == "" || req.TargetProject == "" {
+			http.Error(w, "source_id and target_project required", http.StatusBadRequest)
+			return
+		}
+
+		newSheet := globalSheetManager.CopySheetToProject(req.SourceID, req.SourceProject, req.TargetProject, req.Name, username)
+		if newSheet == nil {
+			http.Error(w, "Source sheet not found", http.StatusNotFound)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(newSheet)
 	})
 
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
@@ -327,8 +375,9 @@ func main() {
 
 		if r.Method == "PUT" {
 			var req struct {
-				ID   string `json:"id"`
-				Name string `json:"name"`
+				ID          string `json:"id"`
+				Name        string `json:"name"`
+				ProjectName string `json:"project_name"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
@@ -340,7 +389,7 @@ func main() {
 				return
 			}
 
-			if !globalSheetManager.RenameSheet(req.ID, req.Name, username) {
+			if !globalSheetManager.RenameSheetBy(req.ID, req.ProjectName, req.Name, username) {
 				http.Error(w, "Sheet not found", http.StatusNotFound)
 				return
 			}
@@ -357,8 +406,9 @@ func main() {
 				http.Error(w, "Sheet ID required", http.StatusBadRequest)
 				return
 			}
-
-			if !globalSheetManager.DeleteSheet(id) {
+			project := r.URL.Query().Get("project")
+			// Project-aware delete
+			if !globalSheetManager.DeleteSheetBy(id, project) {
 				http.Error(w, "Sheet not found", http.StatusNotFound)
 				return
 			}
@@ -471,6 +521,56 @@ func main() {
 		}
 	})
 
+	// Duplicate a project: copy all sheets to a new project
+	http.HandleFunc("/api/projects/duplicate", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		token := r.Header.Get("Authorization")
+		_, err := globalUserManager.ValidateToken(token)
+		if err != nil {
+			http.Error(w, "Unauthorized: "+err.Error(), http.StatusUnauthorized)
+			return
+		}
+
+		var req struct {
+			Source string `json:"source_name"`
+			New    string `json:"new_name"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Source == "" || req.New == "" {
+			http.Error(w, "source_name and new_name required", http.StatusBadRequest)
+			return
+		}
+
+		// Ensure source exists
+		if _, err := os.Stat(filepath.Join(dataDir, req.Source)); os.IsNotExist(err) {
+			http.Error(w, "Source project not found", http.StatusNotFound)
+			return
+		}
+		// Ensure destination doesn't exist
+		if _, err := os.Stat(filepath.Join(dataDir, req.New)); err == nil {
+			http.Error(w, "Destination project already exists", http.StatusConflict)
+			return
+		}
+
+		if err := globalSheetManager.DuplicateProject(req.Source, req.New); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"message": "Project duplicated"})
+	})
+
 	// Get a single sheet by id
 	http.HandleFunc("/api/sheet", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -499,8 +599,8 @@ func main() {
 			http.Error(w, "id is required", http.StatusBadRequest)
 			return
 		}
-
-		sheet := globalSheetManager.GetSheet(id)
+		project := r.URL.Query().Get("project")
+		sheet := globalSheetManager.GetSheetBy(id, project)
 		if sheet == nil {
 			http.Error(w, "Sheet not found", http.StatusNotFound)
 			return
@@ -558,7 +658,8 @@ func main() {
 			http.Error(w, "sheet_id is required", http.StatusBadRequest)
 			return
 		}
-		sheet := globalSheetManager.GetSheet(sheetID)
+		project := r.URL.Query().Get("project")
+		sheet := globalSheetManager.GetSheetBy(sheetID, project)
 		if sheet == nil {
 			http.Error(w, "Sheet not found", http.StatusNotFound)
 			return
@@ -615,8 +716,9 @@ func main() {
 			return
 		}
 		var req struct {
-			SheetID  string `json:"sheet_id"`
-			NewOwner string `json:"new_owner"`
+			SheetID     string `json:"sheet_id"`
+			NewOwner    string `json:"new_owner"`
+			ProjectName string `json:"project_name"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -626,7 +728,7 @@ func main() {
 			http.Error(w, "sheet_id and new_owner required", http.StatusBadRequest)
 			return
 		}
-		sheet := globalSheetManager.GetSheet(req.SheetID)
+		sheet := globalSheetManager.GetSheetBy(req.SheetID, req.ProjectName)
 		if sheet == nil {
 			http.Error(w, "Sheet not found", http.StatusNotFound)
 			return
@@ -649,8 +751,28 @@ func main() {
 	})
 
 	log.Printf("Server started on %s", *addr)
-	err := http.ListenAndServe(*addr, nil)
+	// Wrap DefaultServeMux with a global CORS middleware so that even 404/405 responses
+	// include the appropriate CORS headers. This prevents CORS failures on project
+	// duplication and sheet copy requests when paths/methods mismatch or errors occur.
+	err := http.ListenAndServe(*addr, corsMiddleware(http.DefaultServeMux))
 	if err != nil {
 		log.Fatal("ListenAndServe: ", err)
 	}
+}
+
+// corsMiddleware ensures CORS headers are present on every response, including errors
+// and non-matching routes. It also short-circuits OPTIONS preflight requests.
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
 }

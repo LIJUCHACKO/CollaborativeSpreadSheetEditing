@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useNavigate, useParams, useLocation } from 'react-router-dom';
 import { isSessionValid, clearAuth, getUsername, authenticatedFetch } from '../utils/auth';
 import { ArrowLeft, Settings as SettingsIcon, User, Save } from 'lucide-react';
 import './bootstrap/dist/css/bootstrap.min.css';
@@ -7,7 +7,16 @@ import './bootstrap/dist/css/bootstrap.min.css';
 export default function Settings() {
   const { id } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
   const username = getUsername();
+  const project = (() => {
+    try {
+      const params = new URLSearchParams(location.search);
+      return params.get('project') || '';
+    } catch {
+      return '';
+    }
+  })();
 
   const [sheet, setSheet] = useState(null);
   const [users, setUsers] = useState([]);
@@ -25,7 +34,7 @@ export default function Settings() {
     const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
     const fetchData = async () => {
       try {
-        const sheetRes = await authenticatedFetch(`http://${host}:8080/api/sheet?id=${encodeURIComponent(id)}`);
+        const sheetRes = await authenticatedFetch(`http://${host}:8080/api/sheet?id=${encodeURIComponent(id)}${project ? `&project=${encodeURIComponent(project)}` : ''}`);
         if (!sheetRes.ok) {
           if (sheetRes.status === 401) {
             clearAuth();
@@ -63,7 +72,7 @@ export default function Settings() {
     if (!isOwner) return;
     try {
       const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
-      const res = await authenticatedFetch(`http://${host}:8080/api/sheet/permissions?sheet_id=${encodeURIComponent(id)}`, {
+      const res = await authenticatedFetch(`http://${host}:8080/api/sheet/permissions?sheet_id=${encodeURIComponent(id)}${project ? `&project=${encodeURIComponent(project)}` : ''}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ editors }),
@@ -91,7 +100,7 @@ export default function Settings() {
       const res = await authenticatedFetch(`http://${host}:8080/api/sheet/transfer_owner`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sheet_id: id, new_owner: newOwner }),
+        body: JSON.stringify(project ? { sheet_id: id, new_owner: newOwner, project_name: project } : { sheet_id: id, new_owner: newOwner }),
       });
       if (!res.ok) {
         const text = await res.text();
@@ -134,7 +143,7 @@ export default function Settings() {
     <div className="min-h-screen bg-gray-50 flex flex-col font-sans text-gray-900">
       <nav className="navbar navbar-expand-lg navbar-light" style={{ backgroundColor: 'skyblue' }}>
         <div className="container-fluid">
-          <button onClick={() => navigate(`/sheet/${id}`)} className="btn btn-outline-primary btn-sm d-flex align-items-center">
+          <button onClick={() => navigate(project ? `/sheet/${id}?project=${encodeURIComponent(project)}` : `/sheet/${id}`)} className="btn btn-outline-primary btn-sm d-flex align-items-center">
             <ArrowLeft className="me-1" />
           </button>
           <span className="navbar-text ms-2 d-flex align-items-center fw-bold">

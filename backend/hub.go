@@ -9,6 +9,7 @@ import (
 type Message struct {
 	Type    string          `json:"type"`
 	SheetID string          `json:"sheet_id"`
+	Project string          `json:"project,omitempty"`
 	Payload json.RawMessage `json:"payload"`
 	User    string          `json:"user,omitempty"` // Username of the sender
 }
@@ -42,15 +43,16 @@ func (h *Hub) run() {
 	for {
 		select {
 		case client := <-h.register:
-			if h.rooms[client.sheetID] == nil {
-				h.rooms[client.sheetID] = make(map[*Client]bool)
+			roomID := sheetKey(client.projectName, client.sheetID)
+			if h.rooms[roomID] == nil {
+				h.rooms[roomID] = make(map[*Client]bool)
 			}
-			h.rooms[client.sheetID][client] = true
-			log.Printf("Client registered to sheet %s: %s", client.sheetID, client.userID)
+			h.rooms[roomID][client] = true
+			log.Printf("Client registered to sheet %s (project %s): %s", client.sheetID, client.projectName, client.userID)
 
 			// Send current state to the new client
 			// In a real app, this should be handled safely with a mutex on the sheet
-			sheet := globalSheetManager.GetSheet(client.sheetID)
+			sheet := globalSheetManager.GetSheetBy(client.sheetID, client.projectName)
 			if sheet != nil {
 				sheet.mu.RLock()
 				payload, _ := json.Marshal(sheet)
@@ -70,14 +72,15 @@ func (h *Hub) run() {
 			}
 
 		case client := <-h.unregister:
-			if clients, ok := h.rooms[client.sheetID]; ok {
+			roomID := sheetKey(client.projectName, client.sheetID)
+			if clients, ok := h.rooms[roomID]; ok {
 				if _, ok := clients[client]; ok {
 					delete(clients, client)
 					close(client.send)
 					if len(clients) == 0 {
-						delete(h.rooms, client.sheetID)
+						delete(h.rooms, roomID)
 					}
-					log.Printf("Client unregistered from sheet %s", client.sheetID)
+					log.Printf("Client unregistered from sheet %s (project %s)", client.sheetID, client.projectName)
 				}
 			}
 		case message := <-h.broadcast:
@@ -89,7 +92,7 @@ func (h *Hub) run() {
 
 			// Helper: deny non-editors for mutating operations
 			denyIfNotEditor := func() bool {
-				sheet := globalSheetManager.GetSheet(message.SheetID)
+				sheet := globalSheetManager.GetSheetBy(message.SheetID, message.Project)
 				if sheet == nil {
 					return true
 				}
@@ -100,7 +103,7 @@ func (h *Hub) run() {
 					})
 					// Send denial only to the sender
 					toSend = &Message{Type: "EDIT_DENIED", SheetID: message.SheetID, Payload: deniedPayload, User: message.User}
-					if clients, ok := h.rooms[message.SheetID]; ok {
+					if clients, ok := h.rooms[sheetKey(message.Project, message.SheetID)]; ok {
 						for client := range clients {
 							if client.userID != message.User {
 								continue
@@ -131,7 +134,7 @@ func (h *Hub) run() {
 					User  string `json:"user"`
 				}
 				if err := json.Unmarshal(message.Payload, &update); err == nil {
-					sheet := globalSheetManager.GetSheet(message.SheetID)
+					sheet := globalSheetManager.GetSheetBy(message.SheetID, message.Project)
 					if sheet != nil {
 						sheet.SetCell(update.Row, update.Col, update.Value, message.User)
 						// Broadcast updated sheet snapshot
@@ -155,7 +158,7 @@ func (h *Hub) run() {
 					User string `json:"user"`
 				}
 				if err := json.Unmarshal(message.Payload, &req); err == nil {
-					sheet := globalSheetManager.GetSheet(message.SheetID)
+					sheet := globalSheetManager.GetSheetBy(message.SheetID, message.Project)
 					if sheet != nil {
 						if sheet.LockCell(req.Row, req.Col, message.User) {
 							// Broadcast full sheet state
@@ -192,7 +195,7 @@ func (h *Hub) run() {
 					User string `json:"user"`
 				}
 				if err := json.Unmarshal(message.Payload, &req); err == nil {
-					sheet := globalSheetManager.GetSheet(message.SheetID)
+					sheet := globalSheetManager.GetSheetBy(message.SheetID, message.Project)
 					if sheet != nil {
 						if sheet.UnlockCell(req.Row, req.Col, message.User) {
 							sheet.mu.RLock()
@@ -231,7 +234,7 @@ func (h *Hub) run() {
 					User  string `json:"user"`
 				}
 				if err := json.Unmarshal(message.Payload, &update); err == nil {
-					sheet := globalSheetManager.GetSheet(message.SheetID)
+					sheet := globalSheetManager.GetSheetBy(message.SheetID, message.Project)
 					if sheet != nil {
 						sheet.SetColWidth(update.Col, update.Width, message.User)
 						// Broadcast updated sheet snapshot
@@ -258,7 +261,7 @@ func (h *Hub) run() {
 					User   string `json:"user"`
 				}
 				if err := json.Unmarshal(message.Payload, &update); err == nil {
-					sheet := globalSheetManager.GetSheet(message.SheetID)
+					sheet := globalSheetManager.GetSheetBy(message.SheetID, message.Project)
 					if sheet != nil {
 						sheet.SetRowHeight(update.Row, update.Height, message.User)
 						// Broadcast updated sheet snapshot
@@ -285,7 +288,7 @@ func (h *Hub) run() {
 					User      string `json:"user"`
 				}
 				if err := json.Unmarshal(message.Payload, &mv); err == nil {
-					sheet := globalSheetManager.GetSheet(message.SheetID)
+					sheet := globalSheetManager.GetSheetBy(message.SheetID, message.Project)
 					if sheet != nil {
 						moved := sheet.MoveRowBelow(mv.FromRow, mv.TargetRow, message.User)
 						if moved {
@@ -314,7 +317,7 @@ func (h *Hub) run() {
 					User      string `json:"user"`
 				}
 				if err := json.Unmarshal(message.Payload, &mv); err == nil {
-					sheet := globalSheetManager.GetSheet(message.SheetID)
+					sheet := globalSheetManager.GetSheetBy(message.SheetID, message.Project)
 					if sheet != nil {
 						moved := sheet.MoveColumnRight(mv.FromCol, mv.TargetCol, message.User)
 						if moved {
@@ -341,7 +344,7 @@ func (h *Hub) run() {
 					User      string `json:"user"`
 				}
 				if err := json.Unmarshal(message.Payload, &ins); err == nil {
-					sheet := globalSheetManager.GetSheet(message.SheetID)
+					sheet := globalSheetManager.GetSheetBy(message.SheetID, message.Project)
 					if sheet != nil {
 						inserted := sheet.InsertRowBelow(ins.TargetRow, message.User)
 						if inserted {
@@ -368,7 +371,7 @@ func (h *Hub) run() {
 					User      string `json:"user"`
 				}
 				if err := json.Unmarshal(message.Payload, &ins); err == nil {
-					sheet := globalSheetManager.GetSheet(message.SheetID)
+					sheet := globalSheetManager.GetSheetBy(message.SheetID, message.Project)
 					if sheet != nil {
 						inserted := sheet.InsertColumnRight(ins.TargetCol, message.User)
 						if inserted {
@@ -465,7 +468,7 @@ func (h *Hub) run() {
 				}
 			}
 
-			if clients, ok := h.rooms[message.SheetID]; ok {
+			if clients, ok := h.rooms[sheetKey(message.Project, message.SheetID)]; ok {
 				for client := range clients {
 					// Don't send back to sender? Or do? usually do for confirmation,
 					// but for optimizing latency we might optimistically update frontend.

@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef, useMemo } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import {
     FileSpreadsheet,
     ArrowLeft,
@@ -37,6 +37,7 @@ const ROW_HEADERS = Array.from({ length: ROWS }, (_, i) => i + 1);
 export default function Sheet() {
     const { id } = useParams();
     const navigate = useNavigate();
+    const location = useLocation();
     const username = getUsername();
 
     // Grid State: map of "row-col" -> Cell
@@ -49,7 +50,14 @@ export default function Sheet() {
     // Add sheetName state
     const [sheetName, setSheetName] = useState('');
     // Project name for this sheet (used for back navigation)
-    const [projectName, setProjectName] = useState('');
+    const [projectName, setProjectName] = useState(() => {
+        try {
+            const params = new URLSearchParams(location.search);
+            return params.get('project') || '';
+        } catch {
+            return '';
+        }
+    });
     // Column filters state
     const [filters, setFilters] = useState({});
     const [showFilters, setShowFilters] = useState(false);
@@ -291,7 +299,8 @@ export default function Sheet() {
     const handleDownloadXlsx = async () => {
         try {
             const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
-            const res = await authenticatedFetch(`http://${host}:8080/api/export?sheet_id=${encodeURIComponent(id)}`, {
+            const projQS = projectName ? `&project=${encodeURIComponent(projectName)}` : '';
+            const res = await authenticatedFetch(`http://${host}:8080/api/export?sheet_id=${encodeURIComponent(id)}${projQS}`, {
                 method: 'GET',
             });
 
@@ -349,8 +358,9 @@ export default function Sheet() {
         let shouldReconnect = true;
 
         function connectWS() {
-            const host = import.meta.env.VITE_BACKEND_HOST || '192.168.0.102';
-            const socket = new WebSocket(`ws://${host}:8080/ws?user=${encodeURIComponent(username)}&id=${id}` );
+            const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
+            const projQS = projectName ? `&project=${encodeURIComponent(projectName)}` : '';
+            const socket = new WebSocket(`ws://${host}:8080/ws?user=${encodeURIComponent(username)}&id=${id}${projQS}` );
 
             socket.onopen = () => {
                 console.log('Connected to WS');
@@ -907,7 +917,7 @@ export default function Sheet() {
                             <Download className="me-1" />
                         </button>
                         <button
-                            onClick={() => navigate(`/settings/${id}`)}
+                            onClick={() => navigate(projectName ? `/settings/${id}?project=${encodeURIComponent(projectName)}` : `/settings/${id}`)}
                             className="btn btn-outline-primary btn-sm d-flex align-items-center ms-2"
                             title="Settings"
                         >

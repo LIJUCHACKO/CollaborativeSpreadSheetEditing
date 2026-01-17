@@ -21,6 +21,10 @@ export default function Dashboard() {
     const [searchQuery, setSearchQuery] = useState('');
     const [editingSheetId, setEditingSheetId] = useState(null);
     const [editingSheetName, setEditingSheetName] = useState('');
+    const [copyingSheetId, setCopyingSheetId] = useState(null);
+    const [copyName, setCopyName] = useState('');
+    const [targetProject, setTargetProject] = useState('');
+    const [projectsList, setProjectsList] = useState([]);
     const navigate = useNavigate();
     const username = getUsername();
 
@@ -81,7 +85,7 @@ export default function Dashboard() {
                 setNewSheetName('');
                 setIsCreating(false);
                 fetchSheets();
-                navigate(`/sheet/${sheet.id}`);
+                navigate(project ? `/sheet/${sheet.id}?project=${encodeURIComponent(project)}` : `/sheet/${sheet.id}`);
             } else if (res.status === 401) {
                 clearAuth();
                 alert('Your session has expired. Please log in again.');
@@ -94,7 +98,8 @@ export default function Dashboard() {
 
     const handleLogout = async () => {
         try {
-            await authenticatedFetch('http://localhost:8080/api/logout', {
+            const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
+            await authenticatedFetch(`http://${host}:8080/api/logout`, {
                 method: 'POST',
             });
         } catch (error) {
@@ -111,7 +116,8 @@ export default function Dashboard() {
         }
 
         try {
-            const res = await authenticatedFetch(`http://localhost:8080/api/sheets?id=${sheetId}`, {
+            const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
+            const res = await authenticatedFetch(`http://${host}:8080/api/sheets?id=${sheetId}${project ? `&project=${encodeURIComponent(project)}` : ''}` , {
                 method: 'DELETE',
             });
             if (res.ok) {
@@ -147,10 +153,11 @@ export default function Dashboard() {
         }
 
         try {
-            const res = await authenticatedFetch('http://localhost:8080/api/sheets', {
+            const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
+            const res = await authenticatedFetch(`http://${host}:8080/api/sheets`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ id: sheetId, name: editingSheetName }),
+                body: JSON.stringify(project ? { id: sheetId, name: editingSheetName, project_name: project } : { id: sheetId, name: editingSheetName }),
             });
             if (res.ok) {
                 setEditingSheetId(null);
@@ -167,6 +174,78 @@ export default function Dashboard() {
         } catch (error) {
             console.error('Failed to rename sheet', error);
             alert('Error renaming sheet');
+        }
+    };
+
+    const startCopying = async (sheet) => {
+        setCopyingSheetId(sheet.id);
+        setCopyName(sheet.name ? `${sheet.name} (Copy)` : 'Copy');
+        try {
+            const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
+            const res = await authenticatedFetch(`http://${host}:8080/api/projects`);
+            if (res.ok) {
+                const list = await res.json();
+                const names = Array.isArray(list) ? list.map(p => p.name) : [];
+                setProjectsList(names);
+                // Preselect different project if current project exists
+                if (project && names.length > 0) {
+                    const alt = names.find(n => n !== project) || names[0];
+                    setTargetProject(alt);
+                } else if (names.length > 0) {
+                    setTargetProject(names[0]);
+                }
+            }
+        } catch (e) {
+            // ignore fetch error
+        }
+    };
+
+    const cancelCopying = () => {
+        setCopyingSheetId(null);
+        setCopyName('');
+        setTargetProject('');
+    };
+
+    const copySheetToProject = async (sheet) => {
+        const sourceProject = project || sheet.project_name || '';
+        if (!targetProject) {
+            alert('Select target project');
+            return;
+        }
+        try {
+            const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
+            const body = {
+                source_id: sheet.id,
+                source_project: sourceProject,
+                target_project: targetProject,
+                name: copyName || sheet.name,
+            };
+            const res = await authenticatedFetch(`http://${host}:8080/api/sheet/copy`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+            if (res.ok) {
+                const newSheet = await res.json();
+                cancelCopying();
+                // If current list is filtered by project and target is same, refresh
+                fetchSheets();
+                // Navigate to new sheet in target project
+                if (newSheet?.id) {
+                    const destProject = targetProject;
+                    window.open(`/sheet/${newSheet.id}?project=${encodeURIComponent(destProject)}`);
+                }
+            } else if (res.status === 401) {
+                clearAuth();
+                alert('Your session has expired. Please log in again.');
+                navigate('/');
+            } else {
+                const text = await res.text();
+                alert(text || 'Failed to copy sheet');
+            }
+        } catch (e) {
+            console.error('copy sheet failed', e);
+            alert('Unexpected error copying sheet');
         }
     };
 
@@ -281,8 +360,9 @@ export default function Dashboard() {
                         </thead>
                         <tbody>
                             {displayedSheets.map((sheet) => (
-                                <tr key={sheet.id} style={{ cursor: 'pointer' }}>
-                                    <td onClick={() => !editingSheetId &&  window.open(`/sheet/${sheet.id}`)}>
+                                <React.Fragment key={sheet.id}>
+                                <tr style={{ cursor: 'pointer' }}>
+                                    <td onClick={() => !editingSheetId &&  window.open(project ? `/sheet/${sheet.id}?project=${encodeURIComponent(project)}` : `/sheet/${sheet.id}`)}>
                                         {editingSheetId === sheet.id ? (
                                             <input
                                                 type="text"
@@ -303,8 +383,8 @@ export default function Dashboard() {
                                             sheet.name
                                         )}
                                     </td>
-                                    <td onClick={() => !editingSheetId &&  window.open(`/sheet/${sheet.id}`)}>{sheet.owner}</td>
-                                    <td className="font-mono" onClick={() => !editingSheetId &&  window.open(`/sheet/${sheet.id}`)}>{sheet.id}</td>
+                                    <td onClick={() => !editingSheetId &&  window.open(project ? `/sheet/${sheet.id}?project=${encodeURIComponent(project)}` : `/sheet/${sheet.id}`)}>{sheet.owner}</td>
+                                    <td className="font-mono" onClick={() => !editingSheetId &&  window.open(project ? `/sheet/${sheet.id}?project=${encodeURIComponent(project)}` : `/sheet/${sheet.id}`)}>{sheet.id}</td>
                                     <td className="text-end">
                                         {editingSheetId === sheet.id ? (
                                             <>
@@ -330,6 +410,12 @@ export default function Dashboard() {
                                                     <Edit2 size={14} className="me-1" /> Rename
                                                 </button>
                                                 <button
+                                                    className="btn btn-sm btn-outline-primary me-2"
+                                                    onClick={(ev) => { ev.stopPropagation(); startCopying(sheet); }}
+                                                >
+                                                    <Plus size={14} className="me-1" /> Copy
+                                                </button>
+                                                <button
                                                     className="btn btn-sm btn-outline-danger"
                                                     onClick={(ev) => { ev.stopPropagation(); deleteSheet(sheet.id); }}
                                                 >
@@ -339,6 +425,24 @@ export default function Dashboard() {
                                         )}
                                     </td>
                                 </tr>
+                                {copyingSheetId === sheet.id && (
+                                    <tr>
+                                        <td colSpan="4">
+                                            <div className="d-flex align-items-center gap-2">
+                                                <select className="form-select form-select-sm" value={targetProject} onChange={(e)=>setTargetProject(e.target.value)} style={{ maxWidth: 220 }}>
+                                                    <option value="">Select target project</option>
+                                                    {projectsList.map((pname)=> (
+                                                        <option key={pname} value={pname}>{pname}</option>
+                                                    ))}
+                                                </select>
+                                                <input type="text" className="form-control form-control-sm" value={copyName} onChange={(e)=>setCopyName(e.target.value)} placeholder="Copy name" style={{ maxWidth: 260 }} />
+                                                <button className="btn btn-sm btn-success" onClick={(ev)=>{ ev.stopPropagation(); copySheetToProject(sheet); }}>Copy Here</button>
+                                                <button className="btn btn-sm btn-secondary" onClick={(ev)=>{ ev.stopPropagation(); cancelCopying(); }}>Cancel</button>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                )}
+                                </React.Fragment>
                             ))}
                             {displayedSheets.length === 0 && (
                                 <tr>
