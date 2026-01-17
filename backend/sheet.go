@@ -221,7 +221,7 @@ func (sm *SheetManager) CopySheetToProject(sourceID, sourceProject, targetProjec
 		ColWidths:   make(map[string]int),
 		RowHeights:  make(map[string]int),
 		Permissions: Permissions{Editors: []string{owner}},
-		AuditLog:    []AuditEntry{},
+		AuditLog:    append([]AuditEntry{}, src.AuditLog...),
 	}
 	// Deep copy data
 	src.mu.RLock()
@@ -238,13 +238,6 @@ func (sm *SheetManager) CopySheetToProject(sourceID, sourceProject, targetProjec
 		copySheet.RowHeights[k] = v
 	}
 	src.mu.RUnlock()
-	// Audit entry
-	copySheet.AuditLog = append(copySheet.AuditLog, AuditEntry{
-		Timestamp: time.Now(),
-		User:      owner,
-		Action:    "COPY_SHEET",
-		Details:   fmt.Sprintf("Copied from project '%s' sheet '%s'", sourceProject, sourceID),
-	})
 	// Register and persist
 	sm.sheets[sheetKey(targetProject, id)] = copySheet
 	sm.saveSheetLocked(copySheet)
@@ -1302,13 +1295,6 @@ func (sm *SheetManager) DuplicateProject(sourceProject, newProject string) error
 			clone.RowHeights[k] = v
 		}
 		s.mu.RUnlock()
-		// Add duplication audit
-		clone.AuditLog = append(clone.AuditLog, AuditEntry{
-			Timestamp: time.Now(),
-			User:      "system",
-			Action:    "DUPLICATE_PROJECT",
-			Details:   fmt.Sprintf("Duplicated from project '%s'", sourceProject),
-		})
 		// Register and persist
 		sm.sheets[sheetKey(newProject, clone.ID)] = clone
 		sm.saveSheetLocked(clone)

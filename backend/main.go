@@ -22,6 +22,7 @@ func main() {
 	hub := newHub()
 	go hub.run()
 
+	globalProjectAuditManager.Load()
 	// Initialize Sheet Manager (already initialized via global var in sheet.go, but good practice to be explicit if it wasn't)
 	globalSheetManager.Load()
 	globalUserManager.Load()
@@ -156,7 +157,6 @@ func main() {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-
 		token := r.Header.Get("Authorization")
 		username, err := globalUserManager.ValidateToken(token)
 		if err != nil {
@@ -188,6 +188,11 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(newSheet)
+		// Project-level audit: sheet copy (log on target and source)
+		globalProjectAuditManager.Append(req.TargetProject, username, "COPY_SHEET", "Copied from project '"+req.SourceProject+"' sheet id="+req.SourceID+" to new id="+newSheet.ID+" name='"+newSheet.Name+"'")
+		if req.SourceProject != "" {
+			globalProjectAuditManager.Append(req.SourceProject, username, "COPY_SHEET", "Copied sheet id="+req.SourceID+" to project '"+req.TargetProject+"' as id="+newSheet.ID)
+		}
 	})
 
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
@@ -208,7 +213,6 @@ func main() {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-
 		var req struct {
 			Username string `json:"username"`
 			Password string `json:"password"`
@@ -240,7 +244,6 @@ func main() {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
-
 		if r.Method != "POST" {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -369,6 +372,8 @@ func main() {
 			}
 			// Use authenticated username instead of client-provided user
 			sheet := globalSheetManager.CreateSheet(req.Name, username, req.ProjectName)
+			// Project-level audit: sheet creation
+			globalProjectAuditManager.Append(req.ProjectName, username, "CREATE_SHEET", "Created sheet '"+sheet.Name+"' id="+sheet.ID)
 			json.NewEncoder(w).Encode(sheet)
 			return
 		}
@@ -407,6 +412,8 @@ func main() {
 				return
 			}
 			project := r.URL.Query().Get("project")
+			// Fetch for audit details
+			s := globalSheetManager.GetSheetBy(id, project)
 			// Project-aware delete
 			if !globalSheetManager.DeleteSheetBy(id, project) {
 				http.Error(w, "Sheet not found", http.StatusNotFound)
@@ -415,6 +422,12 @@ func main() {
 
 			w.WriteHeader(http.StatusOK)
 			json.NewEncoder(w).Encode(map[string]string{"message": "Sheet deleted"})
+			// Project-level audit: sheet deletion
+			if s != nil {
+				globalProjectAuditManager.Append(project, username, "DELETE_SHEET", "Deleted sheet '"+s.Name+"' id="+s.ID)
+			} else {
+				globalProjectAuditManager.Append(project, username, "DELETE_SHEET", "Deleted sheet id="+id)
+			}
 			return
 		}
 	})
@@ -536,7 +549,7 @@ func main() {
 			return
 		}
 		token := r.Header.Get("Authorization")
-		_, err := globalUserManager.ValidateToken(token)
+		username, err := globalUserManager.ValidateToken(token)
 		if err != nil {
 			http.Error(w, "Unauthorized: "+err.Error(), http.StatusUnauthorized)
 			return
@@ -569,6 +582,38 @@ func main() {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"message": "Project duplicated"})
+		// Project-level audit: project duplication (on destination project)
+		globalProjectAuditManager.Append(req.New, username, "DUPLICATE_PROJECT", "Duplicated from project '"+req.Source+"'")
+	})
+
+	// Project audit API: list audit entries for a project
+	http.HandleFunc("/api/projects/audit", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		token := r.Header.Get("Authorization")
+		_, err := globalUserManager.ValidateToken(token)
+		if err != nil {
+			http.Error(w, "Unauthorized: "+err.Error(), http.StatusUnauthorized)
+			return
+		}
+		project := r.URL.Query().Get("project")
+		if project == "" {
+			http.Error(w, "project is required", http.StatusBadRequest)
+			return
+		}
+		entries := globalProjectAuditManager.List(project)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(entries)
 	})
 
 	// Get a single sheet by id
