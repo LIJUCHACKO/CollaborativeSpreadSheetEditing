@@ -17,7 +17,7 @@ import {
     Filter
 } from 'lucide-react';
 import { isSessionValid, clearAuth, getUsername, authenticatedFetch } from '../utils/auth';
-import './bootstrap/dist/css/bootstrap.min.css';
+import 'bootstrap/dist/css/bootstrap.min.css';
 
 const ROWS = 600;
 const COLS = 100;
@@ -74,6 +74,11 @@ export default function Sheet() {
     const [cutRow, setCutRow] = useState(null);
     // Column cut/paste state
     const [cutCol, setCutCol] = useState(null);
+
+    // Cell style controls
+    const [styleBg, setStyleBg] = useState('');
+    const [styleBold, setStyleBold] = useState(false);
+    const [styleItalic, setStyleItalic] = useState(false);
 
     // Multi-cell selection and clipboard state
     const [selectionStart, setSelectionStart] = useState(null); // { row, col }
@@ -553,6 +558,19 @@ export default function Sheet() {
         setCellModified(1)
     };
 
+    const updateCellStyleState = (row, col, background, bold, italic, user) => {
+        setData(prev => ({
+            ...prev,
+            [`${row}-${col}`]: {
+                ...(prev[`${row}-${col}`] || {}),
+                background,
+                bold,
+                italic,
+                user,
+            }
+        }));
+    };
+
     const handleCellChange = (r, c, value) => {
         // Optimistic update
         //updateCellState(String(r), String(c), value, username);
@@ -609,6 +627,52 @@ export default function Sheet() {
         dragRef.current = { type: null, label: null, startPos: 0, startSize: 0 };
         window.removeEventListener('mousemove', onGlobalMouseMove);
         window.removeEventListener('mouseup', onGlobalMouseUp);
+    };
+
+    // Sync toolbar style controls with currently focused cell
+    useEffect(() => {
+        if (!selectedRange) return;
+        //using first cell in selected range if present
+        const { row, col } = selectedRange ? { row: selectedRange.startRow, col: selectedRange.startCol } : {};
+        if (!row || !col) return;
+        const key = `${row}-${col}`;
+        const cell = data[key] || {};
+        setStyleBg(cell.background || '');
+        setStyleBold(!!cell.bold);
+        setStyleItalic(!!cell.italic);
+    }, [ selectedRange, data]);
+
+    const applyStyleToSelectedRange = () => {
+        if (!selectedRange || !canEdit) return;
+        const rMin = Math.min(selectedRange.startRow, selectedRange.endRow);
+        const rMax = Math.max(selectedRange.startRow, selectedRange.endRow);
+        const cStartIdx = colIndexMap[selectedRange.startCol] ?? -1;
+        const cEndIdx = colIndexMap[selectedRange.endCol] ?? -1;
+        const cMin = Math.min(cStartIdx, cEndIdx);
+        const cMax = Math.max(cStartIdx, cEndIdx);
+
+        // Apply locally and broadcast per cell
+        for (let r = rMin; r <= rMax; r++) {
+            for (let ci = cMin; ci <= cMax; ci++) {
+                const colLabel = colLabelAt(ci);
+                if (!colLabel) continue;
+                const key = `${r}-${colLabel}`;
+                const cell = data[key] || {};
+                if (cell.locked) continue; // skip locked cells
+                updateCellStyleState(r, colLabel, styleBg, styleBold, styleItalic, username);
+                if (connected && ws.current && ws.current.readyState === WebSocket.OPEN) {
+                    const payload = {
+                        row: String(r),
+                        col: String(colLabel),
+                        background: styleBg || '',
+                        bold: !!styleBold,
+                        italic: !!styleItalic,
+                        user: username,
+                    };
+                    ws.current.send(JSON.stringify({ type: 'UPDATE_CELL_STYLE', sheet_id: id, payload }));
+                }
+            }
+        }
     };
 
     const onColResizeMouseDown = (label, e) => {
@@ -955,6 +1019,7 @@ export default function Sheet() {
                             {showFilters ? 'Hide Filters' : 'Show Filters'}
                         </button>
                         
+
                             <span className="text-sm text-gray-600">Rows visible</span>
                             <input
                                 type="number"
@@ -983,6 +1048,41 @@ export default function Sheet() {
                                 }}
                                 title="Visible columns"
                             />
+                            {/* Style controls for focused cell */}
+                        <div className="flex items-center gap-2 ml-2">
+                            <span className="text-sm text-gray-600">Bg</span>
+                            <input
+                                type="color"
+                                value={styleBg || '#ffffff'}
+                                onChange={(e) => setStyleBg(e.target.value)}
+                                disabled={!canEdit}
+                                title="Background color"
+                            />
+                            <button
+                                className={`px-2 py-1 text-sm rounded border ${styleBold ? 'bg-indigo-100 border-indigo-300' : 'border-gray-300 bg-white'} hover:bg-gray-100`}
+                                onClick={() => setStyleBold(v => !v)}
+                                disabled={!canEdit}
+                                title="Bold"
+                            >
+                                B
+                            </button>
+                            <button
+                                className={`px-2 py-1 text-sm rounded border ${styleItalic ? 'bg-indigo-100 border-indigo-300' : 'border-gray-300 bg-white'} hover:bg-gray-100`}
+                                onClick={() => setStyleItalic(v => !v)}
+                                disabled={!canEdit}
+                                title="Italic"
+                            >
+                                I
+                            </button>
+                            <button
+                                className="px-2 py-1 text-sm rounded border border-gray-300 bg-white hover:bg-gray-100"
+                                onClick={applyStyleToSelectedRange}
+                                disabled={!canEdit}
+                                title="Apply to selected cells"
+                            >
+                                Apply
+                            </button>
+                        </div>
                         
                     </div>
                 </div>
@@ -1396,9 +1496,20 @@ export default function Sheet() {
                                                     onContextMenu={(e) => {  !isEditing && showContextMenu(e, rowLabel, colLabel)}}
                                                 >
                                                     <textarea
-                                                        className={`w-full h-full px-3 py-1 text-sm outline-none border-2 border-transparent focus:border-green-100 focus:ring-0 z-10 relative bg-transparent text-gray-800 resize-none`}
+                                                        className={`w-full h-full px-3 py-1 text-sm outline-none border-2 border-transparent focus:border-green-100 focus:ring-0 z-10 relative  text-gray-800 resize-none`}
                                                         rows={1}
-                                                        style={{ width: '100%', height: '100%', boxSizing: 'border-box', display: 'block', overflow: 'auto', resize: 'none', whiteSpace: 'pre-wrap' }}
+                                                        style={{
+                                                            width: '100%',
+                                                            height: '100%',
+                                                            boxSizing: 'border-box',
+                                                            display: 'block',
+                                                            overflow: 'auto',
+                                                            resize: 'none',
+                                                            whiteSpace: 'pre-wrap',
+                                                            backgroundColor: (cell.background && cell.background !== '') ? cell.background : undefined,
+                                                            fontWeight: cell.bold ? '700' : 'normal',
+                                                            fontStyle: cell.italic ? 'italic' : 'normal',
+                                                        }}
                                                         value={cell.value}
                                                         data-row={rowLabel}
                                                         data-col={colLabel}

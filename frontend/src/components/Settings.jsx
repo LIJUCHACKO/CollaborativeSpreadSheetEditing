@@ -2,7 +2,8 @@ import React, { useEffect, useState } from 'react';
 import { useNavigate, useParams, useLocation } from 'react-router-dom';
 import { isSessionValid, clearAuth, getUsername, authenticatedFetch } from '../utils/auth';
 import { ArrowLeft, Settings as SettingsIcon, User, Save } from 'lucide-react';
-import './bootstrap/dist/css/bootstrap.min.css';
+import 'bootstrap/dist/css/bootstrap.min.css';
+
 
 export default function Settings() {
   const { id } = useParams();

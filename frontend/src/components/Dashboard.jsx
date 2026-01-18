@@ -10,7 +10,7 @@ import {
     Trash2,
     Edit2
 } from 'lucide-react';
-import './bootstrap/dist/css/bootstrap.min.css';
+import 'bootstrap/dist/css/bootstrap.min.css';
 import { isSessionValid, clearAuth, authenticatedFetch, getUsername } from '../utils/auth';
 
 export default function Dashboard() {

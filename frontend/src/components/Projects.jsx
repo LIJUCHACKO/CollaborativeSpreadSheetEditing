@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { authenticatedFetch, isSessionValid, clearAuth, getUsername } from '../utils/auth';
 import { FolderPlus, Edit2, Trash2, Search, User, LogOut, Folder } from 'lucide-react';
-import './bootstrap/dist/css/bootstrap.min.css';
+import 'bootstrap/dist/css/bootstrap.min.css';
 
 export default function Projects() {
   const [projects, setProjects] = useState([]);

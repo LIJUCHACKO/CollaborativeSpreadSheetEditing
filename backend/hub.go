@@ -151,6 +151,36 @@ func (h *Hub) run() {
 				} else {
 					log.Printf("Error unmarshalling update payload: %v", err)
 				}
+			} else if message.Type == "UPDATE_CELL_STYLE" {
+				if denyIfNotEditor() {
+					continue
+				}
+				var st struct {
+					Row        string `json:"row"`
+					Col        string `json:"col"`
+					Background string `json:"background"`
+					Bold       bool   `json:"bold"`
+					Italic     bool   `json:"italic"`
+					User       string `json:"user"`
+				}
+				if err := json.Unmarshal(message.Payload, &st); err == nil {
+					sheet := globalSheetManager.GetSheetBy(message.SheetID, message.Project)
+					if sheet != nil {
+						sheet.SetCellStyle(st.Row, st.Col, st.Background, st.Bold, st.Italic, message.User)
+						// Broadcast updated sheet snapshot
+						sheet.mu.RLock()
+						payload, _ := json.Marshal(sheet)
+						sheet.mu.RUnlock()
+						toSend = &Message{
+							Type:    "ROW_COL_UPDATED",
+							SheetID: message.SheetID,
+							Payload: payload,
+							User:    message.User,
+						}
+					}
+				} else {
+					log.Printf("Error unmarshalling UPDATE_CELL_STYLE payload: %v", err)
+				}
 			} else if message.Type == "LOCK_CELL" {
 				var req struct {
 					Row  string `json:"row"`

@@ -23,10 +23,13 @@ func ensureDataDir() error {
 }
 
 type Cell struct {
-	Value    string `json:"value"`
-	User     string `json:"user,omitempty"` // Last edited by
-	Locked   bool   `json:"locked,omitempty"`
-	LockedBy string `json:"locked_by,omitempty"`
+	Value      string `json:"value"`
+	User       string `json:"user,omitempty"` // Last edited by
+	Locked     bool   `json:"locked,omitempty"`
+	LockedBy   string `json:"locked_by,omitempty"`
+	Background string `json:"background,omitempty"`
+	Bold       bool   `json:"bold,omitempty"`
+	Italic     bool   `json:"italic,omitempty"`
 }
 
 type AuditEntry struct {
@@ -274,7 +277,7 @@ func (s *Sheet) SetCell(row, col, value, user string) {
 		return
 	}
 	// Preserve existing lock metadata on write
-	s.Data[row][col] = Cell{Value: value, User: user, Locked: currentVal.Locked, LockedBy: currentVal.LockedBy}
+	s.Data[row][col] = Cell{Value: value, User: user, Locked: currentVal.Locked, LockedBy: currentVal.LockedBy, Background: currentVal.Background, Bold: currentVal.Bold, Italic: currentVal.Italic}
 	if exists {
 		s.AuditLog = append(s.AuditLog, AuditEntry{
 			Timestamp: time.Now(),
@@ -295,6 +298,51 @@ func (s *Sheet) SetCell(row, col, value, user string) {
 
 	// Persist changes
 	// Optimally we shouldn't save on every cell edit for performance, but for this task it ensures safety.
+	globalSheetManager.SaveSheet(s)
+}
+
+// SetCellStyle updates style attributes for a cell while preserving value and lock metadata.
+func (s *Sheet) SetCellStyle(row, col, background string, bold, italic bool, user string) {
+	s.mu.Lock()
+	if s.Data[row] == nil {
+		s.Data[row] = make(map[string]Cell)
+	}
+	current, exists := s.Data[row][col]
+	// Prevent edits to locked cells' style if locked
+	if exists && current.Locked {
+		s.AuditLog = append(s.AuditLog, AuditEntry{
+			Timestamp: time.Now(),
+			User:      user,
+			Action:    "STYLE_DENIED",
+			Details:   "Attempted style change on locked cell " + row + "," + col,
+		})
+		s.mu.Unlock()
+		return
+	}
+	// Apply style while preserving existing value and lock info
+	updated := current
+	updated.User = user
+	updated.Background = background
+	updated.Bold = bold
+	updated.Italic = italic
+	s.Data[row][col] = updated
+
+	if exists {
+		s.AuditLog = append(s.AuditLog, AuditEntry{
+			Timestamp: time.Now(),
+			User:      user,
+			Action:    "STYLE_CELL",
+			Details:   "Updated style for cell " + row + "," + col,
+		})
+	} else {
+		s.AuditLog = append(s.AuditLog, AuditEntry{
+			Timestamp: time.Now(),
+			User:      user,
+			Action:    "STYLE_CELL",
+			Details:   "Set style for new cell " + row + "," + col,
+		})
+	}
+	s.mu.Unlock()
 	globalSheetManager.SaveSheet(s)
 }
 
@@ -1021,13 +1069,10 @@ func (sm *SheetManager) RenameSheet(id, newName, user string) bool {
 	sheet.mu.Lock()
 	oldName := sheet.Name
 	sheet.Name = newName
-	sheet.AuditLog = append(sheet.AuditLog, AuditEntry{
-		Timestamp: time.Now(),
-		User:      user,
-		Action:    "RENAME_SHEET",
-		Details:   "Renamed sheet from '" + oldName + "' to '" + newName + "'",
-	})
 	sheet.mu.Unlock()
+
+	// Project-level audit only
+	globalProjectAuditManager.Append(sheet.ProjectName, user, "RENAME_SHEET", "Renamed sheet from '"+oldName+"' to '"+newName+"'")
 
 	// Persist with existing key
 	sm.saveSheetLocked(sheet)
@@ -1040,7 +1085,6 @@ func (sm *SheetManager) RenameSheetBy(id, project, newName, user string) bool {
 	defer sm.mu.Unlock()
 
 	var sheet *Sheet
-	//var key string
 	// Prefer composite key match
 	if s, ok := sm.sheets[sheetKey(project, id)]; ok {
 		sheet = s
@@ -1059,13 +1103,10 @@ func (sm *SheetManager) RenameSheetBy(id, project, newName, user string) bool {
 	sheet.mu.Lock()
 	oldName := sheet.Name
 	sheet.Name = newName
-	sheet.AuditLog = append(sheet.AuditLog, AuditEntry{
-		Timestamp: time.Now(),
-		User:      user,
-		Action:    "RENAME_SHEET",
-		Details:   "Renamed sheet from '" + oldName + "' to '" + newName + "'",
-	})
 	sheet.mu.Unlock()
+
+	// Project-level audit only
+	globalProjectAuditManager.Append(project, user, "RENAME_SHEET", "Renamed sheet from '"+oldName+"' to '"+newName+"'")
 
 	// Persist
 	sm.saveSheetLocked(sheet)
