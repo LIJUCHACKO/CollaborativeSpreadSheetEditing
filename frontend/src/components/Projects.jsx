@@ -7,7 +7,6 @@ import 'bootstrap/dist/css/bootstrap.min.css';
 export default function Projects() {
   const [projects, setProjects] = useState([]);
   const [search, setSearch] = useState('');
-  const [creating, setCreating] = useState(false);
   const [newProject, setNewProject] = useState('');
   const [editingName, setEditingName] = useState('');
   const [editingIdx, setEditingIdx] = useState(null);
@@ -15,10 +14,7 @@ export default function Projects() {
   const [deleteConfirm, setDeleteConfirm] = useState('');
   const [duplicateIdx, setDuplicateIdx] = useState(null);
   const [duplicateName, setDuplicateName] = useState('');
-  const [auditOpen, setAuditOpen] = useState(false);
-  const [auditProject, setAuditProject] = useState('');
-  const [auditEntries, setAuditEntries] = useState([]);
-  const [auditLoading, setAuditLoading] = useState(false);
+  // ...existing code...
   const navigate = useNavigate();
   const username = getUsername();
 
@@ -80,7 +76,6 @@ export default function Projects() {
       });
       if (res.ok) {
         setNewProject('');
-        setCreating(false);
         fetchProjects();
       } else if (res.status === 401) {
         clearAuth();
@@ -113,6 +108,10 @@ export default function Projects() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ OldName: oldName, NewName: newName }),
       });
+      if (res.status === 403) {
+        alert('Only the project owner can rename this project.');
+        return;
+      }
       if (res.ok) {
         setEditingIdx(null);
         setEditingName('');
@@ -178,40 +177,7 @@ export default function Projects() {
     }
   };
 
-  const openAudit = async (name) => {
-    if (!name) return;
-    setAuditProject(name);
-    setAuditOpen(true);
-    setAuditLoading(true);
-    try {
-      const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
-      const res = await authenticatedFetch(`http://${host}:8080/api/projects/audit?project=${encodeURIComponent(name)}`);
-      if (res.ok) {
-        const data = await res.json();
-        setAuditEntries(Array.isArray(data) ? data : []);
-      } else if (res.status === 401) {
-        clearAuth();
-        alert('Your session has expired. Please log in again.');
-        navigate('/');
-      } else {
-        const text = await res.text();
-        alert(text || 'Failed to load project audit');
-        setAuditEntries([]);
-      }
-    } catch (e) {
-      console.error('fetch project audit failed', e);
-      setAuditEntries([]);
-    } finally {
-      setAuditLoading(false);
-    }
-  };
-
-  const closeAudit = () => {
-    setAuditOpen(false);
-    setAuditProject('');
-    setAuditEntries([]);
-    setAuditLoading(false);
-  };
+  // ...existing code...
 
   const deleteProject = async (idx) => {
     const name = projects[idx]?.name;
@@ -222,6 +188,10 @@ export default function Projects() {
       const res = await authenticatedFetch(`http://${host}:8080/api/projects?name=${encodeURIComponent(name)}`, {
         method: 'DELETE',
       });
+      if (res.status === 403) {
+        alert('Only the project owner can delete this project.');
+        return;
+      }
       if (res.ok) {
         cancelDelete();
         fetchProjects();
@@ -269,22 +239,26 @@ export default function Projects() {
       </nav>
 
       <main className="flex-1 max-w-5xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        <div className={`overflow-hidden transition-all duration-300 ease-in-out ${creating ? 'max-h-40 mb-8 opacity-100' : 'max-h-0 opacity-0'}`}>
-          <div className="p-6 bg-white border border-indigo-100 rounded-2xl shadow-sm">
-            <form onSubmit={createProject} className="flex items-end gap-4">
-              <div className="flex-1">
-                <input type="text" value={newProject} onChange={(e)=>setNewProject(e.target.value)} placeholder="New Project Name" className="w-full px-4 py-2 bg-gray-50 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 transition-all" autoFocus />
-                <button type="submit" className="px-6 py-2 text-black font-medium rounded-full shadow-md transition-all hover:opacity-90 border-0 focus:outline-none" style={{ backgroundColor: 'skyblue' }}>Create</button>
-              </div>
-            </form>
-          </div>
-        </div>
+        
 
         <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-8">
           <div className="relative flex-1 md:w-64 group">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400 group-focus-within:text-indigo-500 transition-colors" />
             <input type="text" placeholder="Search projects..." value={search} onChange={(e)=>setSearch(e.target.value)} className="w-full pl-10 pr-4 py-2 bg-white border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all shadow-sm" />
           </div>
+          <div className={`overflow-hidden transition-all duration-300 ease-in-out  max-h-40 mb-8 opacity-100 }`}>
+          <div className="p-6 bg-white border border-indigo-100 rounded-2xl shadow-sm">
+            <form onSubmit={createProject} className="flex items-end gap-4">
+              <div className="flex-1">
+                <input type="text" value={newProject} onChange={(e)=>setNewProject(e.target.value)} placeholder="New Project Name" className="w-full px-4 py-2 bg-gray-50 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 transition-all" autoFocus />
+                <div className="mt-2 d-inline-flex gap-2">
+                  <button type="submit" className="px-6 py-2 text-black font-medium rounded-full shadow-md transition-all hover:opacity-90 border-0 focus:outline-none" style={{ backgroundColor: 'skyblue' }}>Create</button>
+                  <button type="button" className="btn btn-sm btn-secondary" onClick={() => { setNewProject(''); }}>Cancel</button>
+                </div>
+              </div>
+            </form>
+          </div>
+        </div>
         </div>
 
         <div className="bg-white border border-gray-200 rounded-2xl shadow-sm overflow-hidden">
@@ -292,6 +266,7 @@ export default function Projects() {
             <thead>
               <tr style={{background: 'lightgray'}}>
                 <th scope="col">Project</th>
+                <th scope="col">Owner</th>
                 <th scope="col" className="text-end">Actions</th>
               </tr>
             </thead>
@@ -302,6 +277,9 @@ export default function Projects() {
                     {editingIdx === idx ? (
                       <input type="text" className="form-control form-control-sm" value={editingName} onChange={(e)=>setEditingName(e.target.value)} onClick={(e)=>e.stopPropagation()} onKeyDown={(e)=>{ if (e.key==='Enter') renameProject(idx); if (e.key==='Escape') cancelRename(); }} autoFocus />
                     ) : p.name}
+                  </td>
+                  <td>
+                    {p.owner || ''}
                   </td>
                   <td className="text-end">
                     {editingIdx === idx ? (
@@ -323,70 +301,33 @@ export default function Projects() {
                       </div>
                     ) : (
                       <>
-                        <button className="btn btn-sm btn-outline-primary me-2" onClick={(ev)=>{ev.stopPropagation(); startRename(idx);}}>
-                          <Edit2 size={14} className="me-1"/> Rename
-                        </button>
+                        {p.owner === username && (
+                          <button className="btn btn-sm btn-outline-primary me-2" onClick={(ev)=>{ev.stopPropagation(); startRename(idx);}}>
+                            <Edit2 size={14} className="me-1"/> Rename
+                          </button>
+                        )}
                         <button className="btn btn-sm btn-outline-primary me-2" onClick={(ev)=>{ev.stopPropagation(); startDuplicate(idx);}}>
                           <FolderPlus size={14} className="me-1"/> Duplicate
                         </button>
-                        <button className="btn btn-sm btn-outline-secondary me-2" onClick={(ev)=>{ev.stopPropagation(); openAudit(p.name);} }>
-                          Audit
-                        </button>
-                        <button className="btn btn-sm btn-outline-danger" onClick={(ev)=>{ev.stopPropagation(); requestDelete(idx);}}>
-                          <Trash2 size={14} className="me-1"/> Delete
-                        </button>
+                        {/* Audit button removed */}
+                        {p.owner === username && (
+                          <button className="btn btn-sm btn-outline-danger" onClick={(ev)=>{ev.stopPropagation(); requestDelete(idx);}}>
+                            <Trash2 size={14} className="me-1"/> Delete
+                          </button>
+                        )}
                       </>
                     )}
                   </td>
                 </tr>
               ))}
               {displayed.length === 0 && (
-                <tr><td colSpan="2" className="text-center text-muted py-4">No projects found.</td></tr>
+                <tr><td colSpan="3" className="text-center text-muted py-4">No projects found.</td></tr>
               )}
             </tbody>
           </table>
         </div>
       </main>
-      {auditOpen && (
-        <div className="position-fixed top-0 start-0 w-100 h-100" style={{ backgroundColor: 'rgba(0,0,0,0.4)' }} onClick={closeAudit}>
-          <div className="container h-100 d-flex align-items-center justify-content-center" onClick={(e)=>e.stopPropagation()}>
-            <div className="bg-white rounded-2xl shadow-lg border border-gray-200" style={{ maxWidth: '800px', width: '100%' }}>
-              <div className="p-3 border-bottom d-flex justify-content-between align-items-center">
-                <h5 className="mb-0">Project Audit: {auditProject}</h5>
-                <button className="btn btn-sm btn-outline-secondary" onClick={closeAudit}>Close</button>
-              </div>
-              <div className="p-3" style={{ maxHeight: '60vh', overflowY: 'auto' }}>
-                {auditLoading ? (
-                  <div className="text-center text-muted py-4">Loading…</div>
-                ) : auditEntries.length === 0 ? (
-                  <div className="text-center text-muted py-4">No audit entries.</div>
-                ) : (
-                  <table className="table table-sm mb-0">
-                    <thead>
-                      <tr>
-                        <th style={{width:'24%'}}>Time</th>
-                        <th style={{width:'16%'}}>User</th>
-                        <th style={{width:'20%'}}>Action</th>
-                        <th>Details</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {auditEntries.map((e, i) => (
-                        <tr key={i}>
-                          <td>{formatTimestamp(e.timestamp)}</td>
-                          <td>{e.user}</td>
-                          <td>{e.action}</td>
-                          <td>{e.details}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                )}
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* Audit modal removed */}
     </div>
   );
 }

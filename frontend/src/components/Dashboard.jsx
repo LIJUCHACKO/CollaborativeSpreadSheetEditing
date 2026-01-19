@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { useNavigate, useParams, Link } from 'react-router-dom';
 import {
     FileSpreadsheet,
@@ -8,7 +8,9 @@ import {
     User,
     MoreVertical,
     Trash2,
-    Edit2
+    Edit2,
+    History,
+    ArrowLeft
 } from 'lucide-react';
 import 'bootstrap/dist/css/bootstrap.min.css';
 import { isSessionValid, clearAuth, authenticatedFetch, getUsername } from '../utils/auth';
@@ -27,6 +29,71 @@ export default function Dashboard() {
     const [projectsList, setProjectsList] = useState([]);
     const navigate = useNavigate();
     const username = getUsername();
+    // Project audit sidebar state
+    const [auditLog, setAuditLog] = useState([]);
+    const [isAuditOpen, setAuditOpen] = useState(false);
+    const [selectedAuditId, setSelectedAuditId] = useState(null);
+    const auditLogRef = useRef(null);
+    const auditLogScrollTopRef = useRef(0);
+    const fileInputRef = useRef(null);
+
+    // Download all sheets in project as XLSX
+    const handleDownloadProjectXlsx = async () => {
+        try {
+            if (!project) return;
+            const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
+            const res = await authenticatedFetch(`http://${host}:8080/api/export_project?project=${encodeURIComponent(project)}`, {
+                method: 'GET',
+            });
+            if (!res.ok) {
+                const text = await res.text();
+                alert(`Failed to export project: ${text}`);
+                return;
+            }
+            const blob = await res.blob();
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            const safeName = (project || 'project') + '.xlsx';
+            a.download = safeName;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            window.URL.revokeObjectURL(url);
+        } catch (err) {
+            console.error('Error downloading project XLSX', err);
+            alert('An unexpected error occurred while exporting the project.');
+        }
+    };
+
+    // Import XLSX into current project (creates sheets per workbook sheet)
+    const handleImportProjectXlsx = async (file) => {
+        try {
+            if (!project) return;
+            if (!file) return;
+            const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
+            const form = new FormData();
+            form.append('file', file);
+            const res = await authenticatedFetch(`http://${host}:8080/api/import_project_xlsx?project=${encodeURIComponent(project)}`, {
+                method: 'POST',
+                body: form,
+            });
+            if (!res.ok) {
+                const text = await res.text();
+                alert(text || 'Failed to import XLSX');
+                return;
+            }
+            const data = await res.json();
+            const count = Array.isArray(data?.created) ? data.created.length : 0;
+            alert(`Imported ${count} sheet(s) from XLSX`);
+            fetchSheets();
+        } catch (err) {
+            console.error('Error importing project XLSX', err);
+            alert('An unexpected error occurred while importing the XLSX.');
+        } finally {
+            if (fileInputRef.current) fileInputRef.current.value = '';
+        }
+    };
 
     useEffect(() => {
         // Check session validity on mount and periodically
@@ -35,6 +102,8 @@ export default function Dashboard() {
             navigate('/');
             return;
         }
+        // Load project audit entries
+        fetchProjectAudit();
 
         // Check session every minute
         const sessionCheckInterval = setInterval(() => {
@@ -110,6 +179,50 @@ export default function Dashboard() {
         }
     };
 
+    // Fetch project audit entries
+    const fetchProjectAudit = async () => {
+        try {
+            if (!project) { setAuditLog([]); return; }
+            const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
+            const res = await authenticatedFetch(`http://${host}:8080/api/projects/audit?project=${encodeURIComponent(project)}`);
+            if (res.ok) {
+                const entries = await res.json();
+                setAuditLog(Array.isArray(entries) ? entries : []);
+            } else if (res.status === 401) {
+                clearAuth();
+                alert('Your session has expired. Please log in again.');
+                navigate('/');
+            }
+        } catch (e) {
+            // ignore fetch errors
+        }
+    };
+
+    const toggleAuditSidebar = () => {
+        if (isAuditOpen) {
+            if (auditLogRef.current) {
+                auditLogScrollTopRef.current = auditLogRef.current.scrollTop;
+            }
+            setAuditOpen(false);
+        } else {
+            setAuditOpen(true);
+            fetchProjectAudit();
+        }
+    };
+
+    const closeAuditSidebar = () => {
+        if (auditLogRef.current) {
+            auditLogScrollTopRef.current = auditLogRef.current.scrollTop;
+        }
+        setAuditOpen(false);
+    };
+
+    useEffect(() => {
+        if (isAuditOpen && auditLogRef.current) {
+            auditLogRef.current.scrollTop = auditLogScrollTopRef.current;
+        }
+    }, [isAuditOpen]);
+
     const deleteSheet = async (sheetId) => {
         if (!window.confirm('Are you sure you want to delete this sheet?')) {
             return;
@@ -120,6 +233,10 @@ export default function Dashboard() {
             const res = await authenticatedFetch(`http://${host}:8080/api/sheets?id=${sheetId}${project ? `&project=${encodeURIComponent(project)}` : ''}` , {
                 method: 'DELETE',
             });
+            if (res.status === 403) {
+                alert('Only the sheet owner can delete this sheet.');
+                return;
+            }
             if (res.ok) {
                 fetchSheets();
             } else if (res.status === 401) {
@@ -159,6 +276,10 @@ export default function Dashboard() {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(project ? { id: sheetId, name: editingSheetName, project_name: project } : { id: sheetId, name: editingSheetName }),
             });
+            if (res.status === 403) {
+                alert('Only the sheet owner can rename this sheet.');
+                return;
+            }
             if (res.ok) {
                 setEditingSheetId(null);
                 setEditingSheetName('');
@@ -263,28 +384,52 @@ export default function Dashboard() {
             {/* Bootstrap Navbar */}
             <nav className="navbar navbar-expand-lg navbar-light" style={{ backgroundColor: 'skyblue' }}>
                 <div className="container-fluid">
+                     <button
+                        onClick={() => {
+                            
+                                navigate('/projects');
+                            
+                        }}
+                        className="btn btn-outline-primary btn-sm d-flex align-items-center"
+                    >
+                        <ArrowLeft className="me-1" />
+                    </button>
                     <a className="navbar-brand d-flex align-items-center" href="#">
                         <FileSpreadsheet className="me-2" />
                         {project ? `Project: ${project}` : 'SheetMaster'}
                     </a>
-                    <button
-                        className="navbar-toggler"
-                        type="button"
-                        data-toggle="collapse"
-                        data-target="#mainNavbar"
-                        aria-controls="mainNavbar"
-                        aria-expanded="false"
-                        aria-label="Toggle navigation"
-                    >
-                        <span className="navbar-toggler-icon"></span>
-                    </button>
-                    <div className="collapse navbar-collapse" id="mainNavbar">
-                        <ul className="navbar-nav mr-auto">
-                            <li className="nav-item">
-                                
-                            </li>
-                        </ul>
-                        <div className="d-flex align-items-center">
+                    {project && (
+                        <div className="d-flex align-items-center ms-auto">
+
+                           
+                            <button
+                                onClick={handleDownloadProjectXlsx}
+                                className="btn btn-outline-success btn-sm d-flex align-items-center me-2"
+                                title="Export all sheets as XLSX"
+                            >
+                                <FileSpreadsheet className="me-1" /> Export XLSX
+                            </button>
+                            <input
+                                ref={fileInputRef}
+                                type="file"
+                                accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                                style={{ display: 'none' }}
+                                onChange={(e) => handleImportProjectXlsx(e.target.files?.[0])}
+                            />
+                            <button
+                                onClick={() => fileInputRef.current && fileInputRef.current.click()}
+                                className="btn btn-outline-secondary btn-sm d-flex align-items-center me-2"
+                                title="Import XLSX into project"
+                            >
+                                <FileSpreadsheet className="me-1" /> Import XLSX
+                            </button>
+                            <button
+                                onClick={toggleAuditSidebar}
+                                className={`btn btn-outline-primary btn-sm d-flex align-items-center me-2 ${isAuditOpen ? 'active' : ''}`}
+                                title="Project Activity Log"
+                            >
+                                <History className="me-1" /> Activity
+                            </button>
                             <span className="navbar-text me-3 d-flex align-items-center">
                                 <User className="me-1" /> {username}
                             </span>
@@ -296,14 +441,72 @@ export default function Dashboard() {
                                 <LogOut className="me-1" /> Logout
                             </button>
                         </div>
-                    </div>
+                    )}
+                    {!project && (
+                        <div className="d-flex align-items-center ms-auto">
+                            <span className="navbar-text me-3 d-flex align-items-center">
+                                <User className="me-1" /> {username}
+                            </span>
+                            <button
+                                onClick={handleLogout}
+                                className="btn btn-outline-danger btn-sm d-flex align-items-center"
+                                title="Logout"
+                            >
+                                <LogOut className="me-1" /> Logout
+                            </button>
+                        </div>
+                    )}
+                    
                 </div>
             </nav>
 
             <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8">
                 {project && (
                     <div className="mb-3">
-                        <Link to="/projects" className="btn btn-sm btn-outline-secondary">← Back to Projects</Link>
+                        
+                    {isAuditOpen && (
+                        <div style={{ position: 'fixed', right: 16, top: 70, width: 360, height: 'calc(70% - 32px)', zIndex: 1100 }}>
+                            <div className="d-flex justify-content-between align-items-center p-3 border-bottom bg-light">
+                                <h5 className="mb-0 d-flex align-items-center">
+                                    <History className="me-2" size={18} /> Project Activity
+                                </h5>
+                                <button 
+                                    onClick={closeAuditSidebar} 
+                                    className="btn btn-sm btn-light"
+                                    aria-label="Close sidebar"
+                                >
+                                    ←
+                                </button>
+                            </div>
+                            <div ref={auditLogRef} className="overflow-auto p-3" style={{ height: 'calc(70% - 56px)', overflowY: 'scroll' }}>
+                                {auditLog.slice().reverse().map((entry, i) => {
+                                    const ts = entry.timestamp ? new Date(entry.timestamp).toLocaleString() : '';
+                                    const entryId = `${entry.timestamp || i}|${entry.user || ''}|${entry.action || ''}|${entry.details || ''}`;
+                                    const isSelected = selectedAuditId === entryId;
+                                    return (
+                                        <div
+                                            key={entryId}
+                                            className={`p-2 mb-2 rounded ${isSelected ? 'bg-indigo-50' : 'bg-white'} border`}
+                                            onClick={() => setSelectedAuditId(entryId)}
+                                            title={ts}
+                                        >
+                                            <div className="d-flex justify-content-between">
+                                                <span className="fw-semibold small">{entry.user}</span>
+                                                <span className="text-muted small">{ts}</span>
+                                            </div>
+                                            <div className="small"><span className="badge bg-light text-dark me-2">{entry.action}</span>{entry.details}</div>
+                                        </div>
+                                    );
+                                })}
+                                {auditLog.length === 0 && (
+                                    <div className="text-center text-muted py-5">
+                                        <History className="mb-2" size={48} opacity={0.3} />
+                                        <p className="mb-0">No project activity yet.</p>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    )}
                     </div>
                 )}
                 
@@ -403,24 +606,28 @@ export default function Dashboard() {
                                             </>
                                         ) : (
                                             <>
-                                                <button
-                                                    className="btn btn-sm btn-outline-primary me-2"
-                                                    onClick={(ev) => { ev.stopPropagation(); startRenaming(sheet); }}
-                                                >
-                                                    <Edit2 size={14} className="me-1" /> Rename
-                                                </button>
+                                                {sheet.owner === username && (
+                                                    <button
+                                                        className="btn btn-sm btn-outline-primary me-2"
+                                                        onClick={(ev) => { ev.stopPropagation(); startRenaming(sheet); }}
+                                                    >
+                                                        <Edit2 size={14} className="me-1" /> Rename
+                                                    </button>
+                                                )}
                                                 <button
                                                     className="btn btn-sm btn-outline-primary me-2"
                                                     onClick={(ev) => { ev.stopPropagation(); startCopying(sheet); }}
                                                 >
                                                     <Plus size={14} className="me-1" /> Copy
                                                 </button>
-                                                <button
-                                                    className="btn btn-sm btn-outline-danger"
-                                                    onClick={(ev) => { ev.stopPropagation(); deleteSheet(sheet.id); }}
-                                                >
-                                                    <Trash2 size={14} className="me-1" /> Delete
-                                                </button>
+                                                {sheet.owner === username && (
+                                                    <button
+                                                        className="btn btn-sm btn-outline-danger"
+                                                        onClick={(ev) => { ev.stopPropagation(); deleteSheet(sheet.id); }}
+                                                    >
+                                                        <Trash2 size={14} className="me-1" /> Delete
+                                                    </button>
+                                                )}
                                             </>
                                         )}
                                     </td>

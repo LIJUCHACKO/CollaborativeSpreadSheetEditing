@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -23,6 +24,7 @@ func main() {
 	go hub.run()
 
 	globalProjectAuditManager.Load()
+	globalProjectMeta.Load()
 	// Initialize Sheet Manager (already initialized via global var in sheet.go, but good practice to be explicit if it wasn't)
 	globalSheetManager.Load()
 	globalUserManager.Load()
@@ -141,6 +143,232 @@ func main() {
 		}
 
 		log.Printf("User %s exported sheet %s to XLSX", username, sheetID)
+	})
+
+	// Export all sheets in a project as XLSX
+	http.HandleFunc("/api/export_project", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		token := r.Header.Get("Authorization")
+		username, err := globalUserManager.ValidateToken(token)
+		if err != nil {
+			http.Error(w, "Unauthorized: "+err.Error(), http.StatusUnauthorized)
+			return
+		}
+		project := r.URL.Query().Get("project")
+		if project == "" {
+			http.Error(w, "project is required", http.StatusBadRequest)
+			return
+		}
+		// Filter sheets by project (no ListSheetsByProject helper available)
+		allSheets := globalSheetManager.ListSheets()
+		sheets := make([]*Sheet, 0)
+		for _, s := range allSheets {
+			if s != nil && s.ProjectName == project {
+				sheets = append(sheets, s)
+			}
+		}
+		if len(sheets) == 0 {
+			http.Error(w, "No sheets found for project", http.StatusNotFound)
+			return
+		}
+		f := excelize.NewFile()
+		for _, sheet := range sheets {
+			sheetName := sheet.Name
+			// Create sheet in workbook (ignore return values to avoid mismatch)
+			f.NewSheet(sheetName)
+
+			// Build column labels and max row based on data
+			colSet := make(map[string]struct{})
+			rowSet := make(map[int]struct{})
+
+			sheet.mu.RLock()
+			for rowKey, cols := range sheet.Data {
+				rowNum, _ := strconv.Atoi(rowKey)
+				rowSet[rowNum] = struct{}{}
+				for colKey := range cols {
+					colSet[colKey] = struct{}{}
+				}
+			}
+
+			// Compute max row
+			maxRow := 0
+			for r := range rowSet {
+				if r > maxRow {
+					maxRow = r
+				}
+			}
+
+			// Columns lexicographically sorted (A, B, ..., Z, AA, AB, ...)
+			colLabels := make([]string, 0, len(colSet))
+			for c := range colSet {
+				colLabels = append(colLabels, c)
+			}
+			for i := 0; i < len(colLabels); i++ {
+				for j := i + 1; j < len(colLabels); j++ {
+					if colLabels[j] < colLabels[i] {
+						colLabels[i], colLabels[j] = colLabels[j], colLabels[i]
+					}
+				}
+			}
+
+			// Write data rows
+			for row := 1; row <= maxRow; row++ {
+				rowKey := strconv.Itoa(row)
+				cols, ok := sheet.Data[rowKey]
+				if !ok {
+					continue
+				}
+				for i, colLabel := range colLabels {
+					cell, ok := cols[colLabel]
+					if !ok {
+						continue
+					}
+					cellRef, _ := excelize.CoordinatesToCellName(i+1, row)
+					_ = f.SetCellValue(sheetName, cellRef, cell.Value)
+				}
+			}
+			sheet.mu.RUnlock()
+		}
+		// Remove default sheet if present and unused
+		_ = f.DeleteSheet("Sheet1")
+		// Set active sheet to the first
+		f.SetActiveSheet(1)
+		w.Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+		filename := project + "_" + time.Now().Format("20060102150405") + ".xlsx"
+		w.Header().Set("Content-Disposition", "attachment; filename=\""+filename+"\"")
+		if err := f.Write(w); err != nil {
+			log.Printf("error writing project xlsx: %v", err)
+			http.Error(w, "Failed to generate file", http.StatusInternalServerError)
+			return
+		}
+		log.Printf("User %s exported project %s to XLSX", username, project)
+	})
+
+	// Import XLSX workbook into a project, creating sheets per workbook sheet
+	http.HandleFunc("/api/import_project_xlsx", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		token := r.Header.Get("Authorization")
+		username, err := globalUserManager.ValidateToken(token)
+		if err != nil {
+			http.Error(w, "Unauthorized: "+err.Error(), http.StatusUnauthorized)
+			return
+		}
+
+		project := r.URL.Query().Get("project")
+		if project == "" {
+			http.Error(w, "project is required", http.StatusBadRequest)
+			return
+		}
+
+		// Parse multipart form to get the uploaded file
+		if err := r.ParseMultipartForm(50 << 20); err != nil { // 50MB
+			http.Error(w, "failed to parse form: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		file, _, err := r.FormFile("file")
+		if err != nil {
+			http.Error(w, "file is required: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		defer file.Close()
+
+		// Open the workbook from the uploaded file stream
+		f, err := excelize.OpenReader(file)
+		if err != nil {
+			http.Error(w, "failed to read xlsx: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		defer func() { _ = f.Close() }()
+
+		// Helpers to convert numeric column index to Excel label (A, B, ..., AA)
+		toColLabel := func(idx int) string {
+			label := ""
+			for idx > 0 {
+				idx--
+				b := byte(int('A') + (idx % 26))
+				label = string([]byte{b}) + label
+				idx /= 26
+			}
+			return label
+		}
+
+		created := make([]map[string]string, 0)
+		sheetNames := f.GetSheetList()
+		if len(sheetNames) == 0 {
+			http.Error(w, "workbook has no sheets", http.StatusBadRequest)
+			return
+		}
+
+		for _, wbSheetName := range sheetNames {
+			rows, err := f.GetRows(wbSheetName)
+			if err != nil {
+				// Skip sheets that can't be read
+				log.Printf("import: failed to get rows for sheet %s: %v", wbSheetName, err)
+				continue
+			}
+			// Create a new sheet in project with same name
+			newSheet := globalSheetManager.CreateSheet(wbSheetName, username, project)
+			// Populate data
+			newSheet.mu.Lock()
+			if newSheet.Data == nil {
+				newSheet.Data = make(map[string]map[string]Cell)
+			}
+			for rIdx, row := range rows {
+				rowKey := strconv.Itoa(rIdx + 1) // 1-based
+				if _, ok := newSheet.Data[rowKey]; !ok {
+					newSheet.Data[rowKey] = make(map[string]Cell)
+				}
+				for cIdx, val := range row {
+					if val == "" {
+						continue
+					}
+					colLabel := toColLabel(cIdx + 1)
+					newSheet.Data[rowKey][colLabel] = Cell{Value: val, User: username}
+				}
+			}
+			newSheet.mu.Unlock()
+			// Persist once
+			globalSheetManager.SaveSheet(newSheet)
+			fmt.Printf("Saving Sheet %s %s\n", newSheet.ID, newSheet.Name)
+			time.Sleep(1000 * time.Millisecond) // slight delay to ensure filesystem consistency
+			created = append(created, map[string]string{"id": newSheet.ID, "name": newSheet.Name})
+			// Project-level audit per sheet
+			globalProjectAuditManager.Append(project, username, "IMPORT_SHEET", "Imported sheet '"+newSheet.Name+"' from XLSX")
+		}
+
+		if len(created) == 0 {
+			http.Error(w, "no sheets imported", http.StatusBadRequest)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]interface{}{"created": created})
+		// Project-level audit summary
+		globalProjectAuditManager.Append(project, username, "IMPORT_PROJECT_XLSX", "Imported "+strconv.Itoa(len(created))+" sheet(s) from uploaded XLSX")
 	})
 
 	// Copy a sheet from one project to another
@@ -394,6 +622,17 @@ func main() {
 				return
 			}
 
+			// Enforce owner-only rename
+			s := globalSheetManager.GetSheetBy(req.ID, req.ProjectName)
+			if s == nil {
+				http.Error(w, "Sheet not found", http.StatusNotFound)
+				return
+			}
+			if s.Owner != username {
+				http.Error(w, "Forbidden: owner only", http.StatusForbidden)
+				return
+			}
+
 			if !globalSheetManager.RenameSheetBy(req.ID, req.ProjectName, req.Name, username) {
 				http.Error(w, "Sheet not found", http.StatusNotFound)
 				return
@@ -414,6 +653,11 @@ func main() {
 			project := r.URL.Query().Get("project")
 			// Fetch for audit details
 			s := globalSheetManager.GetSheetBy(id, project)
+			// Only owner may delete the sheet
+			if s != nil && s.Owner != username {
+				http.Error(w, "Forbidden: owner only", http.StatusForbidden)
+				return
+			}
 			// Project-aware delete
 			if !globalSheetManager.DeleteSheetBy(id, project) {
 				http.Error(w, "Sheet not found", http.StatusNotFound)
@@ -444,7 +688,7 @@ func main() {
 		}
 
 		token := r.Header.Get("Authorization")
-		_, err := globalUserManager.ValidateToken(token)
+		username, err := globalUserManager.ValidateToken(token)
 		if err != nil {
 			http.Error(w, "Unauthorized: "+err.Error(), http.StatusUnauthorized)
 			return
@@ -458,12 +702,14 @@ func main() {
 				return
 			}
 			type Project struct {
-				Name string `json:"name"`
+				Name  string `json:"name"`
+				Owner string `json:"owner,omitempty"`
 			}
 			projects := make([]Project, 0)
 			for _, e := range entries {
 				if e.IsDir() {
-					projects = append(projects, Project{Name: e.Name()})
+					owner := globalProjectMeta.GetOwner(e.Name())
+					projects = append(projects, Project{Name: e.Name(), Owner: owner})
 				}
 			}
 			w.Header().Set("Content-Type", "application/json")
@@ -482,8 +728,10 @@ func main() {
 				http.Error(w, "Failed to create project", http.StatusInternalServerError)
 				return
 			}
+			// Set project owner to the authenticated user
+			globalProjectMeta.SetOwner(req.Name, username)
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]string{"name": req.Name})
+			json.NewEncoder(w).Encode(map[string]string{"name": req.Name, "owner": username})
 			return
 
 		case http.MethodPut:
@@ -492,12 +740,19 @@ func main() {
 				http.Error(w, "OldName and NewName required", http.StatusBadRequest)
 				return
 			}
+			// Enforce owner-only rename
+			if globalProjectMeta.GetOwner(req.OldName) != username {
+				http.Error(w, "Forbidden: owner only", http.StatusForbidden)
+				return
+			}
 			oldPath := filepath.Join(dataDir, req.OldName)
 			newPath := filepath.Join(dataDir, req.NewName)
 			if err := os.Rename(oldPath, newPath); err != nil {
 				http.Error(w, "Failed to rename project", http.StatusInternalServerError)
 				return
 			}
+			// Preserve project owner mapping on rename
+			globalProjectMeta.Rename(req.OldName, req.NewName)
 			// Update in-memory sheets' ProjectName
 			for _, s := range globalSheetManager.ListSheets() {
 				if s.ProjectName == req.OldName {
@@ -517,6 +772,12 @@ func main() {
 				http.Error(w, "Project name required", http.StatusBadRequest)
 				return
 			}
+			// Only project owner may delete the project
+			owner := globalProjectMeta.GetOwner(name)
+			if owner == "" || owner != username {
+				http.Error(w, "Forbidden: owner only", http.StatusForbidden)
+				return
+			}
 			// Delete sheets in memory and files
 			globalSheetManager.DeleteSheetsByProject(name)
 			// Remove directory
@@ -524,6 +785,8 @@ func main() {
 				http.Error(w, "Failed to delete project", http.StatusInternalServerError)
 				return
 			}
+			// Remove project ownership meta
+			globalProjectMeta.Delete(name)
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]string{"message": "Project deleted"})
 			return
@@ -575,7 +838,10 @@ func main() {
 			return
 		}
 
-		if err := globalSheetManager.DuplicateProject(req.Source, req.New); err != nil {
+		// Set new project's owner to the duplicating user
+		globalProjectMeta.SetOwner(req.New, username)
+
+		if err := globalSheetManager.DuplicateProject(req.Source, req.New, username); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -678,6 +944,53 @@ func main() {
 		users := globalUserManager.ListUsernames()
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(users)
+	})
+
+	// User preferences: visible rows/cols (common across sheets/projects)
+	http.HandleFunc("/api/user/preferences", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, PUT, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		token := r.Header.Get("Authorization")
+		username, err := globalUserManager.ValidateToken(token)
+		if err != nil {
+			http.Error(w, "Unauthorized: "+err.Error(), http.StatusUnauthorized)
+			return
+		}
+
+		switch r.Method {
+		case http.MethodGet:
+			prefs, err := globalUserManager.GetPreferences(username)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(prefs)
+		case http.MethodPut:
+			var req struct {
+				VisibleRows int `json:"visible_rows"`
+				VisibleCols int `json:"visible_cols"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if err := globalUserManager.UpdatePreferences(username, Preferences{VisibleRows: req.VisibleRows, VisibleCols: req.VisibleCols}); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{"message": "preferences updated"})
+		default:
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
 	})
 
 	// Get/Update permissions for a sheet

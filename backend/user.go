@@ -7,24 +7,33 @@ import (
 	"errors"
 	"log"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
 )
 
-const userPersistenceFile = "users.json"
+var userPersistenceFile = filepath.Join(dataDir, "users.json")
+
 const sessionTimeout = 1 * time.Hour
 
 type User struct {
-	Username     string `json:"username"`
-	PasswordHash string `json:"password_hash"`
+	Username     string      `json:"username"`
+	PasswordHash string      `json:"password_hash"`
+	Prefs        Preferences `json:"prefs,omitempty"`
 }
 
 type Session struct {
 	Token     string
 	Username  string
 	ExpiresAt time.Time
+}
+
+// Preferences holds user-level settings common across sheets/projects
+type Preferences struct {
+	VisibleRows int `json:"visible_rows,omitempty"`
+	VisibleCols int `json:"visible_cols,omitempty"`
 }
 
 type UserManager struct {
@@ -54,6 +63,7 @@ func (um *UserManager) Register(username, password string) error {
 	user := &User{
 		Username:     username,
 		PasswordHash: string(hashedPassword),
+		Prefs:        Preferences{VisibleRows: 15, VisibleCols: 7},
 	}
 
 	um.users[username] = user
@@ -201,4 +211,35 @@ func (um *UserManager) saveUsersLocked() {
 	if err := encoder.Encode(um.users); err != nil {
 		log.Printf("Error encoding users: %v", err)
 	}
+}
+
+// GetPreferences returns the stored preferences for a user
+func (um *UserManager) GetPreferences(username string) (Preferences, error) {
+	um.mu.RLock()
+	defer um.mu.RUnlock()
+	u, ok := um.users[username]
+	if !ok {
+		return Preferences{}, errors.New("user not found")
+	}
+	return u.Prefs, nil
+}
+
+// UpdatePreferences updates and persists the preferences for a user
+func (um *UserManager) UpdatePreferences(username string, prefs Preferences) error {
+	um.mu.Lock()
+	defer um.mu.Unlock()
+	u, ok := um.users[username]
+	if !ok {
+		return errors.New("user not found")
+	}
+	// sanitize values (reasonable bounds)
+	if prefs.VisibleRows <= 0 {
+		prefs.VisibleRows = 15
+	}
+	if prefs.VisibleCols <= 0 {
+		prefs.VisibleCols = 7
+	}
+	u.Prefs = prefs
+	um.saveUsersLocked()
+	return nil
 }

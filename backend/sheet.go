@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-const dataDir = "DATA"
+const dataDir = "../DATA"
 
 // getSheetFilePath returns the file path for a sheet
 func getSheetFilePath(sheetID string) string {
@@ -78,6 +78,17 @@ type SheetManager struct {
 	// Keyed by composite key of project+id
 	sheets map[string]*Sheet
 	mu     sync.RWMutex
+
+	// Async save queue (debounced per sheet)
+	pending      map[string]*pendingSave // key -> pending info
+	saveInterval time.Duration           // debounce duration
+	started      bool
+	stopCh       chan struct{}
+}
+
+type pendingSave struct {
+	sheet        *Sheet
+	lastModified time.Time
 }
 
 // Helper to save a single sheet without locking the manager (caller must hold lock)
@@ -127,7 +138,60 @@ func (s *Sheet) MarshalJSON() ([]byte, error) {
 }
 
 var globalSheetManager = &SheetManager{
-	sheets: make(map[string]*Sheet),
+	sheets:  make(map[string]*Sheet),
+	pending: make(map[string]*pendingSave),
+	stopCh:  make(chan struct{}),
+	started: false,
+	// saveInterval will be set in initAsyncSaver
+}
+
+// Initialize async saver once during startup
+func init() {
+	globalSheetManager.initAsyncSaver()
+}
+
+func (sm *SheetManager) initAsyncSaver() {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if sm.started {
+		return
+	}
+	if sm.saveInterval == 0 {
+		sm.saveInterval = 1 * time.Second // default debounce window
+	}
+	sm.started = true
+	go sm.flusher()
+}
+
+func (sm *SheetManager) flusher() {
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			now := time.Now()
+			// collect due items without holding lock during disk IO
+			var toFlush []*Sheet
+			sm.mu.Lock()
+			for k, ps := range sm.pending {
+				if now.Sub(ps.lastModified) >= sm.saveInterval {
+					toFlush = append(toFlush, ps.sheet)
+					delete(sm.pending, k)
+				}
+			}
+			sm.mu.Unlock()
+			// flush outside of lock
+			if len(toFlush) > 0 {
+				sm.mu.RLock()
+				for _, s := range toFlush {
+					sm.saveSheetLocked(s)
+				}
+				sm.mu.RUnlock()
+			}
+		case <-sm.stopCh:
+			return
+		}
+	}
 }
 
 // sheetKey builds a unique key combining project and sheet id.
@@ -1199,9 +1263,26 @@ func (sm *SheetManager) DeleteSheetsByProject(projectName string) {
 }
 
 func (sm *SheetManager) SaveSheet(sheet *Sheet) {
-	sm.mu.RLock()
-	defer sm.mu.RUnlock()
-	sm.saveSheetLocked(sheet)
+	// Schedule a debounced save instead of writing immediately
+	if sheet == nil {
+		return
+	}
+	// Build key from sheet fields safely
+	sheet.mu.RLock()
+	proj := sheet.ProjectName
+	id := sheet.ID
+	sheet.mu.RUnlock()
+
+	key := sheetKey(proj, id)
+	now := time.Now()
+	sm.mu.Lock()
+	if ps, ok := sm.pending[key]; ok {
+		ps.lastModified = now
+		// keep existing sheet pointer; it always refers to same instance
+	} else {
+		sm.pending[key] = &pendingSave{sheet: sheet, lastModified: now}
+	}
+	sm.mu.Unlock()
 }
 
 func (sm *SheetManager) Save() {
@@ -1226,31 +1307,32 @@ func (sm *SheetManager) Load() {
 	loadedCount := 0
 
 	// Load sheets from root (backward compatibility)
-	rootFiles, err := filepath.Glob(filepath.Join(dataDir, "*.json"))
-	if err == nil {
-		for _, filePath := range rootFiles {
-			base := filepath.Base(filePath)
-			// Skip non-sheet files like chat.json, projects.json, users.json
-			if base == "chat.json" || base == "projects.json" || base == "users.json" {
-				continue
-			}
-			file, err := os.Open(filePath)
-			if err != nil {
-				log.Printf("Error opening sheet file %s: %v", filePath, err)
-				continue
-			}
-			var sheet Sheet
-			if err := json.NewDecoder(file).Decode(&sheet); err != nil {
-				log.Printf("Error decoding sheet file %s: %v", filePath, err)
+	/*
+		rootFiles, err := filepath.Glob(filepath.Join(dataDir, "*.json"))
+		if err == nil {
+			for _, filePath := range rootFiles {
+				base := filepath.Base(filePath)
+				// Skip non-sheet files like chat.json, projects.json, users.json
+				if base == "chat.json" || base == "projects.json" || base == "users.json" || base == "project_audit.log" {
+					continue
+				}
+				file, err := os.Open(filePath)
+				if err != nil {
+					log.Printf("Error opening sheet file %s: %v", filePath, err)
+					continue
+				}
+				var sheet Sheet
+				if err := json.NewDecoder(file).Decode(&sheet); err != nil {
+					log.Printf("Error decoding sheet file %s: %v", filePath, err)
+					file.Close()
+					continue
+				}
 				file.Close()
-				continue
+				sm.sheets[sheetKey(sheet.ProjectName, sheet.ID)] = &sheet
+				loadedCount++
 			}
-			file.Close()
-			sm.sheets[sheetKey(sheet.ProjectName, sheet.ID)] = &sheet
-			loadedCount++
 		}
-	}
-
+	*/
 	// Load sheets from project subdirectories
 	entries, err := os.ReadDir(dataDir)
 	if err != nil {
@@ -1293,7 +1375,8 @@ func (sm *SheetManager) Load() {
 }
 
 // DuplicateProject duplicates all sheets in source project into a new project name.
-func (sm *SheetManager) DuplicateProject(sourceProject, newProject string) error {
+// The newOwner will be set as the owner for all duplicated sheets (and ensured in editors).
+func (sm *SheetManager) DuplicateProject(sourceProject, newProject, newOwner string) error {
 	if sourceProject == "" || newProject == "" {
 		return fmt.Errorf("source and new project names required")
 	}
@@ -1310,15 +1393,28 @@ func (sm *SheetManager) DuplicateProject(sourceProject, newProject string) error
 			continue
 		}
 		// Clone maintaining same ID and owner/permissions
+		// Ensure new owner is present in editors
+		perms := s.Permissions
+		hasOwner := false
+		for _, e := range perms.Editors {
+			if e == newOwner {
+				hasOwner = true
+				break
+			}
+		}
+		if !hasOwner && newOwner != "" {
+			perms.Editors = append(perms.Editors, newOwner)
+		}
+
 		clone := &Sheet{
 			ID:          s.ID,
 			Name:        s.Name,
-			Owner:       s.Owner,
+			Owner:       newOwner,
 			ProjectName: newProject,
 			Data:        make(map[string]map[string]Cell),
 			ColWidths:   make(map[string]int),
 			RowHeights:  make(map[string]int),
-			Permissions: s.Permissions,
+			Permissions: perms,
 			AuditLog:    append([]AuditEntry{}, s.AuditLog...),
 		}
 		// Deep copy state

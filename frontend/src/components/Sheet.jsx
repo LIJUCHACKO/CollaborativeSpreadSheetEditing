@@ -18,58 +18,48 @@ import {
 } from 'lucide-react';
 import { isSessionValid, clearAuth, getUsername, authenticatedFetch } from '../utils/auth';
 import 'bootstrap/dist/css/bootstrap.min.css';
-
-const ROWS = 600;
-const COLS = 100;
-function toExcelCol(n) {
-    let label = '';
-    let num = n;
-    while (num > 0) {
-        num--;
-        label = String.fromCharCode(65 + (num % 26)) + label;
-        num = Math.floor(num / 26);
-    }
-    return label;
-}
-const COL_HEADERS = Array.from({ length: COLS }, (_, i) => toExcelCol(i + 1));
-const ROW_HEADERS = Array.from({ length: ROWS }, (_, i) => i + 1);
-
 export default function Sheet() {
-    const { id } = useParams();
     const navigate = useNavigate();
     const location = useLocation();
+    const params = useParams();
+    const id = params.id || params.sheetId || '';
     const username = getUsername();
 
-    // Grid State: map of "row-col" -> Cell
+    // Core sheet state
     const [data, setData] = useState({});
-    // Audit Log
     const [auditLog, setAuditLog] = useState([]);
-    // Connection Status
-    const [connected, setConnected] = useState(false);
-    const [isSidebarOpen, setSidebarOpen] = useState(false);
-    // Add sheetName state
     const [sheetName, setSheetName] = useState('');
-    // Project name for this sheet (used for back navigation)
-    const [projectName, setProjectName] = useState(() => {
-        try {
-            const params = new URLSearchParams(location.search);
-            return params.get('project') || '';
-        } catch {
-            return '';
-        }
-    });
-    // Column filters state
-    const [filters, setFilters] = useState({});
-    const [showFilters, setShowFilters] = useState(false);
-    const [focusedCell, setFocusedCell] = useState({ row: 1, col: COL_HEADERS[0] });
+    const [projectName, setProjectName] = useState(new URLSearchParams(location.search).get('project') || '');
+    const [owner, setOwner] = useState('');
+    const [editors, setEditors] = useState([]);
+
+    // UI and editing state
+    const [connected, setConnected] = useState(false);
     const [isEditing, setIsEditing] = useState(false);
-        // Sheet owner state
-        const [owner, setOwner] = useState('');
-        const [editors, setEditors] = useState([]);
-        const isOwner = owner && username && owner === username;
-        const canEdit = isOwner || (username && editors.includes(username));
-    // Sort configuration: { col: 'A'|'B'|..., direction: 'asc'|'desc' }
+    const [isSidebarOpen, setSidebarOpen] = useState(false);
+    const [showFilters, setShowFilters] = useState(false);
+    const [filters, setFilters] = useState({});
     const [sortConfig, setSortConfig] = useState({ col: null, direction: null });
+    const [focusedCell, setFocusedCell] = useState({ row: 1, col: 'A' });
+
+    // Grid dimensions and labels
+    const ROW_HEADERS = useMemo(() => Array.from({ length: 100 }, (_, i) => i + 1), []);
+    const ROWS = ROW_HEADERS.length;
+    const COL_HEADERS = useMemo(() => {
+        const letters = [];
+        for (let i = 0; i < 26; i++) letters.push(String.fromCharCode(65 + i));
+        return letters;
+    }, []);
+    const COLS = COL_HEADERS.length;
+
+    const isOwner = username && owner && username === owner;
+    const canEdit = !!username && (isOwner || (Array.isArray(editors) && editors.includes(username)));
+
+    const handleUnauthorized = () => {
+        clearAuth();
+        alert('Your session has expired. Please log in again.');
+        navigate('/');
+    };
     // Row cut/paste state
     const [cutRow, setCutRow] = useState(null);
     // Column cut/paste state
@@ -129,16 +119,8 @@ export default function Sheet() {
         setContextMenu(prev => ({ ...prev, visible: false }));
     };
 
-    const extendSelection = (rowLabel, colLabel) => {
-        if (!isSelecting || !selectionStart) return;
-        setSelectedRange(prev => ({ ...prev, endRow: rowLabel, endCol: colLabel }));
-    };
-
-    const endSelection = () => {
-        if(!connected) return
-        if (!isSelecting) return;
-        setIsSelecting(false);
-        if (!selectedRange) return;
+    const sendSelection = () => {
+         if (!selectedRange) return;
 
         // Build copied block values from current selected range
         const rMin = Math.min(selectedRange.startRow, selectedRange.endRow);
@@ -170,6 +152,57 @@ export default function Sheet() {
             ws.current.send(JSON.stringify({ type: 'SELECTION_COPIED', sheet_id: id, payload }));
             //console.log("Send selection:",values);
         }
+
+
+    }
+
+    const scrollBeyond = (rowLabel, colLabel) => {
+        setTimeout(() => {
+            // If extending hits the last visible cell at bottom/right, shift view
+            const rowIdx = filteredRowHeaders.indexOf(rowLabel);
+            if (rowIdx !== -1) {
+                const currentRowEnd = Math.min(rowStart + visibleRowsCount , filteredRowHeaders.length );
+                if (rowIdx + 1 >= currentRowEnd) {
+                    setRowStart(prev => Math.min(
+                        (filteredRowHeaders.length - visibleRowsCount + 1) > 1 ? (filteredRowHeaders.length - visibleRowsCount + 1) : 1,
+                        rowStart + 1
+                    ));
+                }
+            }
+
+            const colIdx = COL_HEADERS.indexOf(colLabel);
+            if (colIdx !== -1) {
+                const currentColNum = colIdx + 1; // 1-based column number
+                if (currentColNum >= colEnd) {
+                    setColStart(prev => Math.min(COLS - visibleColsCount + 1, prev + 1));
+                }
+            }
+        }, 1000);
+    }
+    const extendSelection = (rowLabel, colLabel) => {
+        
+        if (!isSelecting || !selectionStart) return;
+        setSelectedRange(prev => ({ ...prev, endRow: rowLabel, endCol: colLabel }));
+        if (!selectedRange) return;
+
+        scrollBeyond(rowLabel, colLabel);
+
+        // Build copied block values from current selected range
+        const rMin = Math.min(selectedRange.startRow, selectedRange.endRow);
+        const rMax = Math.max(selectedRange.startRow, selectedRange.endRow);
+        const cStartIdx = colIndexMap[selectedRange.startCol] ?? -1;
+        const cEndIdx = colIndexMap[selectedRange.endCol] ?? -1;
+        const cMin = Math.min(cStartIdx, cEndIdx);
+        const cMax = Math.max(cStartIdx, cEndIdx);
+        setSharedSelection({ startRow: rMin, startCol: colLabelAt(cMin), endRow: rMax, endCol: colLabelAt(cMax), sheet_id: id });
+        
+    };
+
+    const endSelection = () => {
+            if(!connected) return
+            if (!isSelecting) return;
+            setIsSelecting(false);
+            sendSelection();
     };
 
     const closeContextMenu = () => setContextMenu({ visible: false, x: 0, y: 0, cell: null });
@@ -180,27 +213,7 @@ export default function Sheet() {
         setContextMenu({ visible: true, x: e.clientX, y: e.clientY, cell: { row: rowLabel, col: colLabel } });
     };
 
-    const handleCopySelection = () => {
-        if (!selectedRange) return;
-        const rMin = Math.min(selectedRange.startRow, selectedRange.endRow);
-        const rMax = Math.max(selectedRange.startRow, selectedRange.endRow);
-        const cStartIdx = colIndexMap[selectedRange.startCol] ?? -1;
-        const cEndIdx = colIndexMap[selectedRange.endCol] ?? -1;
-        const cMin = Math.min(cStartIdx, cEndIdx);
-        const cMax = Math.max(cStartIdx, cEndIdx);
-        const values = [];
-        for (let r = rMin; r <= rMax; r++) {
-            const rowArr = [];
-            for (let ci = cMin; ci <= cMax; ci++) {
-                const colLabel = colLabelAt(ci);
-                const key = `${r}-${colLabel}`;
-                rowArr.push((data[key]?.value ?? '').toString());
-            }
-            values.push(rowArr);
-        }
-        //setCopiedBlock({ rows: rMax - rMin + 1, cols: cMax - cMin + 1, values });
-        closeContextMenu();
-    };
+    
 
     const handlePasteAt = (anchorRow, anchorColLabel) => {
         if (!copiedBlock || !anchorColLabel) return;
@@ -309,6 +322,10 @@ export default function Sheet() {
                 method: 'GET',
             });
 
+            if (res.status === 401) {
+                handleUnauthorized();
+                return;
+            }
             if (!res.ok) {
                 const text = await res.text();
                 alert(`Failed to export sheet: ${text}`);
@@ -340,11 +357,36 @@ export default function Sheet() {
     useEffect(() => {
         // Check session validity
         if (!username || !isSessionValid()) {
-            clearAuth();
-            alert('Your session has expired. Please log in again.');
-            navigate('/');
+            handleUnauthorized();
             return;
         }
+
+        // Validate with server token immediately and fetch user preferences
+        (async () => {
+            try {
+                const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
+                const res = await authenticatedFetch(`http://${host}:8080/api/validate`);
+                if (!res.ok) {
+                    handleUnauthorized();
+                    return;
+                }
+                // Load user preferences for visible rows/cols
+                const prefsRes = await authenticatedFetch(`http://${host}:8080/api/user/preferences`);
+                if (prefsRes.ok) {
+                    const prefs = await prefsRes.json();
+                    if (typeof prefs.visible_rows === 'number' && prefs.visible_rows > 0) {
+                        setVisibleRowsCount(Math.min(ROWS, Math.max(1, prefs.visible_rows)));
+                        setRowStart((prev) => Math.min(prev, Math.max(2, ROWS - prefs.visible_rows + 1)));
+                    }
+                    if (typeof prefs.visible_cols === 'number' && prefs.visible_cols > 0) {
+                        setVisibleColsCount(Math.min(COLS, Math.max(1, prefs.visible_cols)));
+                        setColStart((prev) => Math.min(prev, Math.max(1, COLS - prefs.visible_cols + 1)));
+                    }
+                }
+            } catch (e) {
+                // ignore fetch errors here; interval time-based check will still run
+            }
+        })();
 
         // Check session every minute
         const sessionCheckInterval = setInterval(() => {
@@ -494,6 +536,10 @@ export default function Sheet() {
             try {
                 const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
                 const res = await authenticatedFetch(`http://${host}:8080/api/users`);
+                if (res.status === 401) {
+                    handleUnauthorized();
+                    return;
+                }
                 if (res.ok) {
                     const list = await res.json();
                     if (Array.isArray(list)) setAllUsers(list);
@@ -978,20 +1024,20 @@ export default function Sheet() {
                             onClick={handleDownloadXlsx}
                             title="Download as XLSX"
                         >
-                            <Download className="me-1" />
+                            <Download className="me-1" />Export
                         </button>
                         <button
                             onClick={() => navigate(projectName ? `/settings/${id}?project=${encodeURIComponent(projectName)}` : `/settings/${id}`)}
                             className="btn btn-outline-primary btn-sm d-flex align-items-center ms-2"
                             title="Settings"
                         >
-                            <Settings className="me-1" />
+                            <Settings className="me-1" />Settings
                         </button>
                         <button
                             onClick={toggleSidebar}
                             className={`btn btn-outline-primary btn-sm d-flex align-items-center ${isSidebarOpen ? 'active' : ''}`}
                         >
-                            <History className="me-1" />
+                            <History className="me-1" />Activity
                         </button>
                     </span>
                     <div className="d-flex align-items-center ms-auto">
@@ -1031,6 +1077,17 @@ export default function Sheet() {
                                     const val = Math.max(1, Math.min(ROWS, parseInt(e.target.value, 10) || 1));
                                     setVisibleRowsCount(val);
                                     setRowStart((prev) => Math.min(prev, Math.max(2, ROWS - val + 1)));
+                                    // persist preference
+                                    (async () => {
+                                        try {
+                                            const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
+                                            await authenticatedFetch(`http://${host}:8080/api/user/preferences`, {
+                                                method: 'PUT',
+                                                headers: { 'Content-Type': 'application/json' },
+                                                body: JSON.stringify({ visible_rows: val, visible_cols: visibleColsCount })
+                                            });
+                                        } catch {}
+                                    })();
                                 }}
                                 title="Visible rows"
                             />
@@ -1045,6 +1102,17 @@ export default function Sheet() {
                                     const val = Math.max(1, Math.min(COLS, parseInt(e.target.value, 10) || 1));
                                     setVisibleColsCount(val);
                                     setColStart((prev) => Math.min(prev, Math.max(1, COLS - val + 1)));
+                                    // persist preference
+                                    (async () => {
+                                        try {
+                                            const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
+                                            await authenticatedFetch(`http://${host}:8080/api/user/preferences`, {
+                                                method: 'PUT',
+                                                headers: { 'Content-Type': 'application/json' },
+                                                body: JSON.stringify({ visible_rows: visibleRowsCount, visible_cols: val })
+                                            });
+                                        } catch {}
+                                    })();
                                 }}
                                 title="Visible columns"
                             />
@@ -1091,51 +1159,37 @@ export default function Sheet() {
             <div style={{ display: 'inline' ,float: 'left'}} className="flex flex-1 overflow-hidden relative">
                 {/* Sidebar / Audit Log */}
                 {isSidebarOpen && (
-                     <div style={{ position: 'fixed', right: 16, top: 70, width: 360, height: 'calc(70% - 32px)', zIndex: 1100 }}>
-                   
+                    <div style={{ position: 'fixed', right: 16, top: 70, width: 360, height: 'calc(70% - 32px)', zIndex: 1100 }}>
                         <div className="d-flex justify-content-between align-items-center p-3 border-bottom bg-light">
                             <h5 className="mb-0 d-flex align-items-center">
                                 <History className="me-2" size={18} /> Activity Log
                             </h5>
-                            <button 
-                                onClick={closeSidebar} 
+                            <button
+                                onClick={closeSidebar}
                                 className="btn btn-sm btn-light"
                                 aria-label="Close sidebar"
                             >
-                                <ArrowLeft size={18} />
+                                ←
                             </button>
                         </div>
-                        <div ref={auditLogRef} className="overflow-auto p-3" style={{ height: 'calc(70% - 56px)' ,overflowY:'scroll'}}>
+                        <div ref={auditLogRef} className="overflow-auto p-3" style={{ height: 'calc(70% - 56px)', overflowY: 'scroll' }}>
                             {auditLog.slice().reverse().map((entry, i) => {
+                                const ts = entry.timestamp ? new Date(entry.timestamp).toLocaleString() : '';
                                 const entryId = `${entry.timestamp || i}|${entry.user || ''}|${entry.action || ''}|${entry.details || ''}`;
                                 const isSelected = selectedAuditId === entryId;
                                 return (
-                                <div key={entryId} className={`d-flex gap-2 mb-3 p-2 rounded hover-bg-light ${isSelected ? 'bg-green-500 border border-green-200' : ''}`} style={{ cursor: 'pointer' }} onClick={() => { setSelectedAuditId(entryId); navigateToCellFromDetails(entry.details || entry.action); }}>
-                                    <div className="flex-shrink-0">
-                                        <div 
-                                            className="rounded-circle bg-gradient d-flex align-items-center justify-content-center text-white fw-bold"
-                                            style={{ 
-                                                width: '32px', 
-                                                height: '32px', 
-                                                fontSize: '12px',
-                                                background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)'
-                                            }}
-                                        >
-                                            {entry.user?.charAt(0).toUpperCase()}
-                                        </div>
-                                    </div>
-                                    <div className="flex-grow-1">
-                                        <div className="d-flex align-items-center gap-2 mb-1">
+                                    <div
+                                        key={entryId}
+                                        className={`p-2 mb-2 rounded ${isSelected ? 'bg-indigo-50' : 'bg-white'} border`}
+                                        onClick={() => { setSelectedAuditId(entryId); navigateToCellFromDetails(entry.details || entry.action); }}
+                                        title={ts}
+                                    >
+                                        <div className="d-flex justify-content-between">
                                             <span className="fw-semibold small">{entry.user}</span>
-                                            <span className="text-muted" style={{ fontSize: '0.75rem' }}>
-                                                {new Date(entry.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                                            </span>
+                                            <span className="text-muted small">{ts}</span>
                                         </div>
-                                        <p className="mb-0 text-muted small">
-                                            {entry.details || entry.action}
-                                        </p>
+                                        <div className="small"><span className="badge bg-light text-dark me-2">{entry.action}</span>{entry.details}</div>
                                     </div>
-                                </div>
                                 );
                             })}
                             {auditLog.length === 0 && (
@@ -1215,14 +1269,15 @@ export default function Sheet() {
                                     }
                                     
                                     setRowStart(Math.max(1, Math.min(ROWS - visibleRowsCount + 1, parseInt(e.target.value, 10) || 1)))}}
-                                style={{ writingMode: 'vertical-rl', height: '100%', width: '100%' }}
+                                style={{ writingMode: 'vertical-lr', height:  '100%', width: '100%' }}
                                 aria-label="Rows scrollbar"
                             />
                         </div>
 
                         {/* Grid content */}
-                        <div style={{ gridColumn: '2 / span 1', gridRow: '2 / span 1', overflow: 'auto' }}
-                        onWheel={(e) => {
+                        <div
+                            style={{ gridColumn: '2 / span 1', gridRow: '2 / span 1', overflow: 'auto' }}
+                            onWheel={(e) => {
                                  e.preventDefault();
                                  setIsEditing(false);
                                  const { row, col } = focusedCell;
@@ -1234,6 +1289,9 @@ export default function Sheet() {
                                  const maxStart = Math.max(1, ROWS - visibleRowsCount + 1);
                                  setRowStart(prev => Math.max(1, Math.min(maxStart, prev + step)));
                              }}
+                            tabIndex={0}
+                            id="grid-container"
+                            
                         >
                             <div className="inline-block bg-blue-500 rounded-lg shadow-lg border border-gray-200 overflow-hidden">
                         <table className="border-collapse" >
@@ -1250,6 +1308,8 @@ export default function Sheet() {
                                             key={h}
                                             className="bg-gray-50 border-b border-r border-gray-200 p-2 text-xs font-semibold text-gray-500 uppercase tracking-wider text-center select-none relative"
                                             style={{position: 'relative', width: `${colWidths[h] || DEFAULT_COL_WIDTH}px`, height: `${colHeaderHeight}px` ,padding :`0`}}
+                                            onMouseOver={()=> endSelection()}
+                                            
                                         >
                                             <div className="flex items-center justify-center gap-1">
                                                 <span>{h}</span>
@@ -1321,7 +1381,7 @@ export default function Sheet() {
                                     <tr>
                                         <th
                                             className="bg-gray-50 border-b border-r border-gray-200 p-1 text-xs text-gray-500 text-center select-none"
-                                            style={{ width: `${rowLabelWidth}px` }}
+                                            style={{ width: `${rowLabelWidth}px` , position: 'relative', padding: '0' }}
                                         >
                                             #
                                         </th>
@@ -1387,6 +1447,7 @@ export default function Sheet() {
                                         <td
                                             className="bg-gray-50 border-b border-r border-gray-200 p-2 text-right text-xs font-semibold text-gray-500 select-none relative"
                                             style={{ position: 'relative',height: `${rowHeights[rowLabel] || DEFAULT_ROW_HEIGHT}px`, width: `${rowLabelWidth}px`,padding :`0` }}
+                                            onMouseOver={()=> endSelection()}
                                         >
                                             
                                             {/* Row actions: Insert / Cut / Paste */}
@@ -1627,60 +1688,145 @@ export default function Sheet() {
                                                         {contextMenu.visible && (
                                                             <div
                                                                 style={{ position: 'fixed', top: contextMenu.y, left: contextMenu.x, zIndex: 2000 }}
-                                                                className="bg-white border shadow rounded-md p-2 text-sm"
+                                                                className="bg-white border p-2 text-sm"
                                                                 onClick={(e) => e.stopPropagation()}
                                                             >
-                                                                <button
-                                                                    className="block w-full text-left px-2 py-1 hover:bg-gray-100 rounded"
-                                                                    disabled={!selectedRange}
-                                                                    onClick={handleCopySelection}
-                                                                >
-                                                                    Copy
-                                                                </button>
-                                                                <button
-                                                                    className="block w-full text-left px-2 py-1 hover:bg-gray-100 rounded"
-                                                                    disabled={!copiedBlock || !contextMenu.cell}
-                                                                    onClick={() => handlePasteAt(contextMenu.cell.row, contextMenu.cell.col)}
-                                                                >
-                                                                    Paste
-                                                                </button>
+                                                                
+                                                                {(() => {
+                                                                    // Only show Paste if focused cell is not in sharedSelection
+                                                                    let showPaste = true;
+                                                                    if (sharedSelection && contextMenu.cell) {
+                                                                        const rMin = Math.min(sharedSelection.startRow, sharedSelection.endRow);
+                                                                        const rMax = Math.max(sharedSelection.startRow, sharedSelection.endRow);
+                                                                        const cStartIdx = colIndexMap[sharedSelection.startCol] ?? -1;
+                                                                        const cEndIdx = colIndexMap[sharedSelection.endCol] ?? -1;
+                                                                        const cMin = Math.min(cStartIdx, cEndIdx);
+                                                                        const cMax = Math.max(cStartIdx, cEndIdx);
+                                                                        const cIdx = colIndexMap[contextMenu.cell.col] ?? -1;
+                                                                        if (
+                                                                            contextMenu.cell.row >= rMin &&
+                                                                            contextMenu.cell.row <= rMax &&
+                                                                            cIdx >= cMin &&
+                                                                            cIdx <= cMax
+                                                                        ) {
+                                                                            showPaste = false;
+                                                                        }
+                                                                    }
+                                                                    return showPaste ? (
+                                                                        <button
+                                                                            className="block w-full text-left px-2 py-1 hover:bg-gray-100 rounded"
+                                                                            disabled={!copiedBlock || !contextMenu.cell}
+                                                                            onClick={() => handlePasteAt(contextMenu.cell.row, contextMenu.cell.col)}
+                                                                        >
+                                                                            Paste
+                                                                        </button>
+                                                                    ) : null;
+                                                                })()}
                                                                 {isOwner && contextMenu.cell && (
                                                                     <>
-                                                                        {!data[`${contextMenu.cell.row}-${contextMenu.cell.col}`]?.locked && (
-                                                                            <button
-                                                                                className="block w-full text-left px-2 py-1 hover:bg-gray-100 rounded"
-                                                                                onClick={() => {
-                                                                                    if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-                                                                                        const payload = { row: String(contextMenu.cell.row), col: String(contextMenu.cell.col), user: username };
-                                                                                        ws.current.send(JSON.stringify({ type: 'LOCK_CELL', sheet_id: id, payload }));
-                                                                                    }
-                                                                                    closeContextMenu();
-                                                                                }}
-                                                                            >
-                                                                                Lock Cell
-                                                                            </button>
-                                                                        )}
-                                                                        {data[`${contextMenu.cell.row}-${contextMenu.cell.col}`]?.locked && (
-                                                                            <button
-                                                                                className="block w-full text-left px-2 py-1 hover:bg-gray-100 rounded"
-                                                                                onClick={() => {
-                                                                                    if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-                                                                                        const payload = { row: String(contextMenu.cell.row), col: String(contextMenu.cell.col), user: username };
-                                                                                        ws.current.send(JSON.stringify({ type: 'UNLOCK_CELL', sheet_id: id, payload }));
-                                                                                    }
-                                                                                    closeContextMenu();
-                                                                                }}
-                                                                            >
-                                                                                Unlock Cell
-                                                                            </button>
-                                                                        )}
+                                                                        {(() => {
+                                                                            // Only show Lock Cell if contextMenu.cell is inside sharedSelection
+                                                                            let showLock = false;
+                                                                            if (sharedSelection && contextMenu.cell) {
+                                                                                const rMin = Math.min(sharedSelection.startRow, sharedSelection.endRow);
+                                                                                const rMax = Math.max(sharedSelection.startRow, sharedSelection.endRow);
+                                                                                const cStartIdx = colIndexMap[sharedSelection.startCol] ?? -1;
+                                                                                const cEndIdx = colIndexMap[sharedSelection.endCol] ?? -1;
+                                                                                const cMin = Math.min(cStartIdx, cEndIdx);
+                                                                                const cMax = Math.max(cStartIdx, cEndIdx);
+                                                                                const cIdx = colIndexMap[contextMenu.cell.col] ?? -1;
+                                                                                if (
+                                                                                    contextMenu.cell.row >= rMin &&
+                                                                                    contextMenu.cell.row <= rMax &&
+                                                                                    cIdx >= cMin &&
+                                                                                    cIdx <= cMax
+                                                                                ) {
+                                                                                    showLock = true;
+                                                                                }
+                                                                            }
+                                                                            return showLock && !data[`${contextMenu.cell.row}-${contextMenu.cell.col}`]?.locked ? (
+                                                                                <button
+                                                                                    className="block w-full text-left px-2 py-1 hover:bg-gray-100 rounded"
+                                                                                    onClick={() => {
+                                                                                        if (ws.current && ws.current.readyState === WebSocket.OPEN && sharedSelection) {
+                                                                                            const rMin = Math.min(sharedSelection.startRow, sharedSelection.endRow);
+                                                                                            const rMax = Math.max(sharedSelection.startRow, sharedSelection.endRow);
+                                                                                            const cStartIdx = colIndexMap[sharedSelection.startCol] ?? -1;
+                                                                                            const cEndIdx = colIndexMap[sharedSelection.endCol] ?? -1;
+                                                                                            const cMin = Math.min(cStartIdx, cEndIdx);
+                                                                                            const cMax = Math.max(cStartIdx, cEndIdx);
+                                                                                            for (let r = rMin; r <= rMax; r++) {
+                                                                                                for (let ci = cMin; ci <= cMax; ci++) {
+                                                                                                    const colLabel = colLabelAt(ci);
+                                                                                                    const key = `${r}-${colLabel}`;
+                                                                                                    if (!data[key]?.locked) {
+                                                                                                        const payload = { row: String(r), col: String(colLabel), user: username };
+                                                                                                        ws.current.send(JSON.stringify({ type: 'LOCK_CELL', sheet_id: id, payload }));
+                                                                                                    }
+                                                                                                }
+                                                                                            }
+                                                                                        }
+                                                                                        closeContextMenu();
+                                                                                    }}
+                                                                                >
+                                                                                    Lock Cell
+                                                                                </button>
+                                                                            ) : null;
+                                                                        })()}
+                                                                        {(() => {
+                                                                            // Only show Unlock Cell if contextMenu.cell is inside sharedSelection
+                                                                            let showUnlock = false;
+                                                                            if (sharedSelection && contextMenu.cell) {
+                                                                                const rMin = Math.min(sharedSelection.startRow, sharedSelection.endRow);
+                                                                                const rMax = Math.max(sharedSelection.startRow, sharedSelection.endRow);
+                                                                                const cStartIdx = colIndexMap[sharedSelection.startCol] ?? -1;
+                                                                                const cEndIdx = colIndexMap[sharedSelection.endCol] ?? -1;
+                                                                                const cMin = Math.min(cStartIdx, cEndIdx);
+                                                                                const cMax = Math.max(cStartIdx, cEndIdx);
+                                                                                const cIdx = colIndexMap[contextMenu.cell.col] ?? -1;
+                                                                                if (
+                                                                                    contextMenu.cell.row >= rMin &&
+                                                                                    contextMenu.cell.row <= rMax &&
+                                                                                    cIdx >= cMin &&
+                                                                                    cIdx <= cMax
+                                                                                ) {
+                                                                                    showUnlock = true;
+                                                                                }
+                                                                            }
+                                                                            return showUnlock && data[`${contextMenu.cell.row}-${contextMenu.cell.col}`]?.locked ? (
+                                                                                <button
+                                                                                    className="block w-full text-left px-2 py-1 hover:bg-gray-100 rounded"
+                                                                                    onClick={() => {
+                                                                                        if (ws.current && ws.current.readyState === WebSocket.OPEN && sharedSelection) {
+                                                                                            const rMin = Math.min(sharedSelection.startRow, sharedSelection.endRow);
+                                                                                            const rMax = Math.max(sharedSelection.startRow, sharedSelection.endRow);
+                                                                                            const cStartIdx = colIndexMap[sharedSelection.startCol] ?? -1;
+                                                                                            const cEndIdx = colIndexMap[sharedSelection.endCol] ?? -1;
+                                                                                            const cMin = Math.min(cStartIdx, cEndIdx);
+                                                                                            const cMax = Math.max(cStartIdx, cEndIdx);
+                                                                                            for (let r = rMin; r <= rMax; r++) {
+                                                                                                for (let ci = cMin; ci <= cMax; ci++) {
+                                                                                                    const colLabel = colLabelAt(ci);
+                                                                                                    const key = `${r}-${colLabel}`;
+                                                                                                    if (data[key]?.locked) {
+                                                                                                        const payload = { row: String(r), col: String(colLabel), user: username };
+                                                                                                        ws.current.send(JSON.stringify({ type: 'UNLOCK_CELL', sheet_id: id, payload }));
+                                                                                                    }
+                                                                                                }
+                                                                                            }
+                                                                                        }
+                                                                                        closeContextMenu();
+                                                                                    }}
+                                                                                >
+                                                                                    Unlock Cell
+                                                                                </button>
+                                                                            ) : null;
+                                                                        })()}
                                                                     </>
                                                                 )}
                                                             </div>
                                                         )}
-                                                    {cell.user && cell.user !== username && (
-                                                        <div className="absolute top-0 right-0 w-0 h-0 border-t-[8px] border-r-[8px] border-t-purple-500 border-r-transparent transform rotate-90" title={`Edited by ${cell.user}`}></div>
-                                                    )}
+                                                    
                                                 </td>
                                             );
                                         })}
