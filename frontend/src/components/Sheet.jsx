@@ -72,7 +72,7 @@ export default function Sheet() {
 
     // Multi-cell selection and clipboard state
     const [selectionStart, setSelectionStart] = useState(null); // { row, col }
-    const [selectedRange, setSelectedRange] = useState(null); // { startRow, startCol, endRow, endCol }
+    const [selectedRange, setSelectedRange] = useState(null); // Array of { row, col }
     const [isSelecting, setIsSelecting] = useState(false);
     const [copiedBlock, setCopiedBlock] = useState(null); // { rows, cols, values: string[][] }
     const [contextMenu, setContextMenu] = useState({ visible: false, x: 0, y: 0, cell: null });
@@ -97,22 +97,15 @@ export default function Sheet() {
 
     const colLabelAt = (index) => COL_HEADERS[index] || null;
     const isCellSelected = (rowLabel, colLabel) => {
-        if (!selectedRange) return false;
-        const rMin = Math.min(selectedRange.startRow, selectedRange.endRow);
-        const rMax = Math.max(selectedRange.startRow, selectedRange.endRow);
-        const cStartIdx = colIndexMap[selectedRange.startCol] ?? -1;
-        const cEndIdx = colIndexMap[selectedRange.endCol] ?? -1;
-        const cMin = Math.min(cStartIdx, cEndIdx);
-        const cMax = Math.max(cStartIdx, cEndIdx);
-        const cIdx = colIndexMap[colLabel] ?? -1;
-        return rowLabel >= rMin && rowLabel <= rMax && cIdx >= cMin && cIdx <= cMax;
+        if (!selectedRange || selectedRange.length === 0) return false;
+        return selectedRange.some((cell) => cell.row === rowLabel && cell.col === colLabel);
     };
 
     const startSelection = (rowLabel, colLabel) => {
         //console.log(rowLabel, colLabel);
         setIsSelecting(true);
         setSelectionStart({ row: rowLabel, col: colLabel });
-        setSelectedRange({ startRow: rowLabel, startCol: colLabel, endRow: rowLabel, endCol: colLabel });
+        setSelectedRange([{ row: rowLabel, col: colLabel }]);
         setIsEditing(false);
         setCutRow(null);
         setCutCol(null);
@@ -120,40 +113,40 @@ export default function Sheet() {
     };
 
     const sendSelection = () => {
-         if (!selectedRange) return;
+         if (!selectedRange || selectedRange.length === 0) return;
 
-        // Build copied block values from current selected range
-        const rMin = Math.min(selectedRange.startRow, selectedRange.endRow);
-        const rMax = Math.max(selectedRange.startRow, selectedRange.endRow);
-        const cStartIdx = colIndexMap[selectedRange.startCol] ?? -1;
-        const cEndIdx = colIndexMap[selectedRange.endCol] ?? -1;
-        const cMin = Math.min(cStartIdx, cEndIdx);
-        const cMax = Math.max(cStartIdx, cEndIdx);
+        // Derive unique rows in the order they appear in filteredRowHeaders
+        const rowIndexMap = new Map(filteredRowHeaders.map((r, i) => [r, i]));
+        const uniqueRows = Array.from(new Set(selectedRange.map(c => c.row)))
+            .filter(r => rowIndexMap.has(r))
+            .sort((a, b) => (rowIndexMap.get(a) ?? 0) - (rowIndexMap.get(b) ?? 0));
+        // Columns keep sheet order using colIndexMap
+        const uniqueCols = Array.from(new Set(selectedRange.map(c => c.col)))
+            .sort((a, b) => (colIndexMap[a] ?? -1) - (colIndexMap[b] ?? -1));
+
         const values = [];
-        for (let r = rMin; r <= rMax; r++) {
+        for (const r of uniqueRows) {
             const rowArr = [];
-            for (let ci = cMin; ci <= cMax; ci++) {
-                const colLabel = colLabelAt(ci);
-                const key = `${r}-${colLabel}`;
+            for (const c of uniqueCols) {
+                const key = `${r}-${c}`;
                 rowArr.push((data[key]?.value ?? '').toString());
             }
             values.push(rowArr);
         }
-        // Send selection range and values to backend so other instances of the same user can paste
+
+        const noOfRows = uniqueRows.length;
+        const noOfCols = uniqueCols.length;
+
+        // Send selection values to backend so other instances of the same user can paste
         if (ws.current && ws.current.readyState === WebSocket.OPEN) {
             const payload = {
-                startRow: rMin,
-                startCol: colLabelAt(cMin),
-                endRow: rMax,
-                endCol: colLabelAt(cMax),
+                Rows: noOfRows,
+                Cols: noOfCols,
                 sheet_id: id,
                 values,
             };
             ws.current.send(JSON.stringify({ type: 'SELECTION_COPIED', sheet_id: id, payload }));
-            //console.log("Send selection:",values);
         }
-
-
     }
 
     const scrollBeyond = (rowLabel, colLabel) => {
@@ -180,22 +173,39 @@ export default function Sheet() {
         }, 1000);
     }
     const extendSelection = (rowLabel, colLabel) => {
-        
         if (!isSelecting || !selectionStart) return;
-        setSelectedRange(prev => ({ ...prev, endRow: rowLabel, endCol: colLabel }));
-        if (!selectedRange) return;
 
         scrollBeyond(rowLabel, colLabel);
 
-        // Build copied block values from current selected range
-        const rMin = Math.min(selectedRange.startRow, selectedRange.endRow);
-        const rMax = Math.max(selectedRange.startRow, selectedRange.endRow);
-        const cStartIdx = colIndexMap[selectedRange.startCol] ?? -1;
-        const cEndIdx = colIndexMap[selectedRange.endCol] ?? -1;
+        // Determine row span based on visual order in filteredRowHeaders
+        const startIdx = filteredRowHeaders.indexOf(selectionStart.row);
+        const endIdx = filteredRowHeaders.indexOf(rowLabel);
+        if (startIdx === -1 || endIdx === -1) return;
+        const from = Math.min(startIdx, endIdx);
+        const to = Math.max(startIdx, endIdx);
+        const rowsInOrder = filteredRowHeaders.slice(from, to + 1);
+
+        // Compute columns span as before (sheet order)
+        const cStartIdx = colIndexMap[selectionStart.col] ?? -1;
+        const cEndIdx = colIndexMap[colLabel] ?? -1;
         const cMin = Math.min(cStartIdx, cEndIdx);
         const cMax = Math.max(cStartIdx, cEndIdx);
+
+        // Build list of selected cells following the current filtered row order
+        const cells = [];
+        for (const r of rowsInOrder) {
+            for (let ci = cMin; ci <= cMax; ci++) {
+                const cLbl = colLabelAt(ci);
+                if (!cLbl) continue;
+                cells.push({ row: r, col: cLbl });
+            }
+        }
+        setSelectedRange(cells);
+
+        // Keep sharedSelection rectangle for peer border rendering (approximation)
+        const rMin = Math.min(selectionStart.row, rowLabel);
+        const rMax = Math.max(selectionStart.row, rowLabel);
         setSharedSelection({ startRow: rMin, startCol: colLabelAt(cMin), endRow: rMax, endCol: colLabelAt(cMax), sheet_id: id });
-        
     };
 
     const endSelection = () => {
@@ -222,10 +232,11 @@ export default function Sheet() {
         const updates = {};
         let hasConflict = false;
         // Prevent pasting into any locked destination cells
-        for (let rOff = 0; rOff < copiedBlock.rows; rOff++) {
+        for (let rOff = 0; rOff < copiedBlock.Rows; rOff++) {
             const r = anchorRow + rOff;
+            if (!filteredRowHeaders.includes(r)) continue;
             if (r < 1 || r > ROWS) continue;
-            for (let cOff = 0; cOff < copiedBlock.cols; cOff++) {
+            for (let cOff = 0; cOff < copiedBlock.Cols; cOff++) {
                 const cIdx = anchorIdx + cOff;
                 if (cIdx < 0 || cIdx >= COLS) continue;
                 const cLabel = colLabelAt(cIdx);
@@ -238,10 +249,11 @@ export default function Sheet() {
                 }
             }
         }
-        for (let rOff = 0; rOff < copiedBlock.rows; rOff++) {
+        for (let rOff = 0; rOff < copiedBlock.Rows; rOff++) {
             const r = anchorRow + rOff;
+            if (!filteredRowHeaders.includes(r)) continue;
             if (r < 1 || r > ROWS) continue;
-            for (let cOff = 0; cOff < copiedBlock.cols; cOff++) {
+            for (let cOff = 0; cOff < copiedBlock.Cols; cOff++) {
                 const cIdx = anchorIdx + cOff;
                 if (cIdx < 0 || cIdx >= COLS) continue;
                 const cLabel = colLabelAt(cIdx);
@@ -257,10 +269,11 @@ export default function Sheet() {
             if (!ok) { closeContextMenu(); return; }
         }
 
-        for (let rOff = 0; rOff < copiedBlock.rows; rOff++) {
+        for (let rOff = 0; rOff < copiedBlock.Rows; rOff++) {
             const r = anchorRow + rOff;
+            if (!filteredRowHeaders.includes(r)) continue;
             if (r < 1 || r > ROWS) continue;
-            for (let cOff = 0; cOff < copiedBlock.cols; cOff++) {
+            for (let cOff = 0; cOff < copiedBlock.Cols; cOff++) {
                 const cIdx = anchorIdx + cOff;
                 if (cIdx < 0 || cIdx >= COLS) continue;
                 const cLabel = colLabelAt(cIdx);
@@ -482,15 +495,11 @@ export default function Sheet() {
                             setChatMessages(prev => [...prev, appended]);
                         }
                     } else if (msg.type === 'SELECTION_SHARED') {
-                        const { startRow, startCol, endRow, endCol, sheet_id,   values } = msg.payload || {};
-                        if (startRow && startCol && endRow && endCol) {
-                            setSharedSelection({ startRow, startCol, endRow, endCol, sheet_id });
+                        const { Rows, Cols, sheet_id,   values } = msg.payload || {};
+                        if (Rows && Cols) {
+                            //setSharedSelection({ startRow, startCol, endRow, endCol, sheet_id });
                             if (Array.isArray(values)) {
-                                const rows = Math.max(0, endRow - startRow + 1);
-                                const cStartIdx = colIndexMap[startCol] ?? -1;
-                                const cEndIdx = colIndexMap[endCol] ?? -1;
-                                const cols = Math.max(0, Math.abs(cEndIdx - cStartIdx) + 1);
-                                setCopiedBlock({ rows, cols, values });
+                                setCopiedBlock({ Rows, Cols, values });
                             }
                         }
                     }else if (msg.type === 'PONG') {
@@ -677,11 +686,11 @@ export default function Sheet() {
 
     // Sync toolbar style controls with currently focused cell
     useEffect(() => {
-        if (!selectedRange) return;
-        //using first cell in selected range if present
-        const { row, col } = selectedRange ? { row: selectedRange.startRow, col: selectedRange.startCol } : {};
-        if (!row || !col) return;
-        const key = `${row}-${col}`;
+        if (!selectedRange || selectedRange.length === 0) return;
+        // use the first cell in selected list
+        const first = selectedRange[0];
+        if (!first || !first.row || !first.col) return;
+        const key = `${first.row}-${first.col}`;
         const cell = data[key] || {};
         setStyleBg(cell.background || '');
         setStyleBold(!!cell.bold);
@@ -689,34 +698,26 @@ export default function Sheet() {
     }, [ selectedRange, data]);
 
     const applyStyleToSelectedRange = () => {
-        if (!selectedRange || !canEdit) return;
-        const rMin = Math.min(selectedRange.startRow, selectedRange.endRow);
-        const rMax = Math.max(selectedRange.startRow, selectedRange.endRow);
-        const cStartIdx = colIndexMap[selectedRange.startCol] ?? -1;
-        const cEndIdx = colIndexMap[selectedRange.endCol] ?? -1;
-        const cMin = Math.min(cStartIdx, cEndIdx);
-        const cMax = Math.max(cStartIdx, cEndIdx);
+        if (!selectedRange || selectedRange.length === 0 || !canEdit) return;
 
-        // Apply locally and broadcast per cell
-        for (let r = rMin; r <= rMax; r++) {
-            for (let ci = cMin; ci <= cMax; ci++) {
-                const colLabel = colLabelAt(ci);
-                if (!colLabel) continue;
-                const key = `${r}-${colLabel}`;
-                const cell = data[key] || {};
-                if (cell.locked) continue; // skip locked cells
-                updateCellStyleState(r, colLabel, styleBg, styleBold, styleItalic, username);
-                if (connected && ws.current && ws.current.readyState === WebSocket.OPEN) {
-                    const payload = {
-                        row: String(r),
-                        col: String(colLabel),
-                        background: styleBg || '',
-                        bold: !!styleBold,
-                        italic: !!styleItalic,
-                        user: username,
-                    };
-                    ws.current.send(JSON.stringify({ type: 'UPDATE_CELL_STYLE', sheet_id: id, payload }));
-                }
+        for (const sel of selectedRange) {
+            const r = sel.row;
+            const colLabel = sel.col;
+            if (!filteredRowHeaders.includes(r)) continue;
+            const key = `${r}-${colLabel}`;
+            const cell = data[key] || {};
+            if (cell.locked) continue; // skip locked cells
+            updateCellStyleState(r, colLabel, styleBg, styleBold, styleItalic, username);
+            if (connected && ws.current && ws.current.readyState === WebSocket.OPEN) {
+                const payload = {
+                    row: String(r),
+                    col: String(colLabel),
+                    background: styleBg || '',
+                    bold: !!styleBold,
+                    italic: !!styleItalic,
+                    user: username,
+                };
+                ws.current.send(JSON.stringify({ type: 'UPDATE_CELL_STYLE', sheet_id: id, payload }));
             }
         }
     };
@@ -1756,6 +1757,7 @@ export default function Sheet() {
                                                                                             const cMin = Math.min(cStartIdx, cEndIdx);
                                                                                             const cMax = Math.max(cStartIdx, cEndIdx);
                                                                                             for (let r = rMin; r <= rMax; r++) {
+                                                                                                if (!filteredRowHeaders.includes(r)) continue;
                                                                                                 for (let ci = cMin; ci <= cMax; ci++) {
                                                                                                     const colLabel = colLabelAt(ci);
                                                                                                     const key = `${r}-${colLabel}`;
@@ -1805,6 +1807,7 @@ export default function Sheet() {
                                                                                             const cMin = Math.min(cStartIdx, cEndIdx);
                                                                                             const cMax = Math.max(cStartIdx, cEndIdx);
                                                                                             for (let r = rMin; r <= rMax; r++) {
+                                                                                                if (!filteredRowHeaders.includes(r)) continue;
                                                                                                 for (let ci = cMin; ci <= cMax; ci++) {
                                                                                                     const colLabel = colLabelAt(ci);
                                                                                                     const key = `${r}-${colLabel}`;
