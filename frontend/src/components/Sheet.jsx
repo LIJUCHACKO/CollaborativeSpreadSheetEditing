@@ -76,8 +76,6 @@ export default function Sheet() {
     const [isSelecting, setIsSelecting] = useState(false);
     const [copiedBlock, setCopiedBlock] = useState(null); // { rows, cols, values: string[][] }
     const [contextMenu, setContextMenu] = useState({ visible: false, x: 0, y: 0, cell: null });
-    // Shared selection from other instances of the same user
-    const [sharedSelection, setSharedSelection] = useState(null); // { startRow, startCol, endRow, endCol }
     // Chat state
     const [chatMessages, setChatMessages] = useState([]); // [{timestamp, user, text, to}]
     const [chatInput, setChatInput] = useState('');
@@ -136,7 +134,7 @@ export default function Sheet() {
 
         const noOfRows = uniqueRows.length;
         const noOfCols = uniqueCols.length;
-
+        //console.log('Copied selection:',  values);
         // Send selection values to backend so other instances of the same user can paste
         if (ws.current && ws.current.readyState === WebSocket.OPEN) {
             const payload = {
@@ -201,18 +199,13 @@ export default function Sheet() {
             }
         }
         setSelectedRange(cells);
-
-        // Keep sharedSelection rectangle for peer border rendering (approximation)
-        const rMin = Math.min(selectionStart.row, rowLabel);
-        const rMax = Math.max(selectionStart.row, rowLabel);
-        setSharedSelection({ startRow: rMin, startCol: colLabelAt(cMin), endRow: rMax, endCol: colLabelAt(cMax), sheet_id: id });
     };
 
     const endSelection = () => {
             if(!connected) return
             if (!isSelecting) return;
             setIsSelecting(false);
-            sendSelection();
+            //sendSelection();
     };
 
     const closeContextMenu = () => setContextMenu({ visible: false, x: 0, y: 0, cell: null });
@@ -229,13 +222,15 @@ export default function Sheet() {
         if (!copiedBlock || !anchorColLabel) return;
         const anchorIdx = colIndexMap[anchorColLabel] ?? -1;
         if (anchorIdx < 0) return;
+        const anchorRowIndex = filteredRowHeaders.indexOf(anchorRow);
+        if (anchorRowIndex < 0) return;
         const updates = {};
         let hasConflict = false;
-        // Prevent pasting into any locked destination cells
+        // Prevent pasting into any locked destination cells using filtered row order
         for (let rOff = 0; rOff < copiedBlock.Rows; rOff++) {
-            const r = anchorRow + rOff;
-            if (!filteredRowHeaders.includes(r)) continue;
-            if (r < 1 || r > ROWS) continue;
+            const rIdx = anchorRowIndex + rOff;
+            const r = filteredRowHeaders[rIdx];
+            if (r == null) break; // stop if we run out of visible filtered rows
             for (let cOff = 0; cOff < copiedBlock.Cols; cOff++) {
                 const cIdx = anchorIdx + cOff;
                 if (cIdx < 0 || cIdx >= COLS) continue;
@@ -249,10 +244,11 @@ export default function Sheet() {
                 }
             }
         }
+        // Detect conflicts in destination cells using filtered row order
         for (let rOff = 0; rOff < copiedBlock.Rows; rOff++) {
-            const r = anchorRow + rOff;
-            if (!filteredRowHeaders.includes(r)) continue;
-            if (r < 1 || r > ROWS) continue;
+            const rIdx = anchorRowIndex + rOff;
+            const r = filteredRowHeaders[rIdx];
+            if (r == null) break;
             for (let cOff = 0; cOff < copiedBlock.Cols; cOff++) {
                 const cIdx = anchorIdx + cOff;
                 if (cIdx < 0 || cIdx >= COLS) continue;
@@ -270,9 +266,9 @@ export default function Sheet() {
         }
 
         for (let rOff = 0; rOff < copiedBlock.Rows; rOff++) {
-            const r = anchorRow + rOff;
-            if (!filteredRowHeaders.includes(r)) continue;
-            if (r < 1 || r > ROWS) continue;
+            const rIdx = anchorRowIndex + rOff;
+            const r = filteredRowHeaders[rIdx];
+            if (r == null) break;
             for (let cOff = 0; cOff < copiedBlock.Cols; cOff++) {
                 const cIdx = anchorIdx + cOff;
                 if (cIdx < 0 || cIdx >= COLS) continue;
@@ -495,14 +491,11 @@ export default function Sheet() {
                             setChatMessages(prev => [...prev, appended]);
                         }
                     } else if (msg.type === 'SELECTION_SHARED') {
-                        const { Rows, Cols, sheet_id,   values } = msg.payload || {};
-                        if (Rows && Cols) {
-                            //setSharedSelection({ startRow, startCol, endRow, endCol, sheet_id });
-                            if (Array.isArray(values)) {
-                                setCopiedBlock({ Rows, Cols, values });
-                            }
+                        const { Rows, Cols, sheet_id, values } = msg.payload || {};
+                        if (Rows && Cols && Array.isArray(values)) {
+                            setCopiedBlock({ Rows, Cols, values });
                         }
-                    }else if (msg.type === 'PONG') {
+                    } else if (msg.type === 'PONG') {
                         console.log("Received PONG from server");
                         setConnected(true);setIsEditing(true);
                     } else if (msg.type === 'EDIT_DENIED') {
@@ -1519,34 +1512,38 @@ export default function Sheet() {
                                             const key = `${rowLabel}-${colLabel}`;
                                             const cell = data[key] || { value: '' };
                                             //const selected = isCellSelected(rowLabel, colLabel);
-                                            const inShared = sharedSelection ? (function(){
-                                                const rMin = Math.min(sharedSelection.startRow, sharedSelection.endRow);
-                                                const rMax = Math.max(sharedSelection.startRow, sharedSelection.endRow);
-                                                const cStartIdx = colIndexMap[sharedSelection.startCol] ?? -1;
-                                                const cEndIdx = colIndexMap[sharedSelection.endCol] ?? -1;
-                                                const cMin = Math.min(cStartIdx, cEndIdx);
-                                                const cMax = Math.max(cStartIdx, cEndIdx);
+                                            const inShared = (selectedRange && selectedRange.length > 0) ? (function(){
+                                                const rows = selectedRange.map(c => c.row);
+                                                const rMin = Math.min(...rows);
+                                                const rMax = Math.max(...rows);
+                                                const colIdxs = selectedRange.map(c => colIndexMap[c.col] ?? -1);
+                                                const cMin = Math.min(...colIdxs);
+                                                const cMax = Math.max(...colIdxs);
                                                 const cIdx = colIndexMap[colLabel] ?? -1;
                                                 return rowLabel >= rMin && rowLabel <= rMax && cIdx >= cMin && cIdx <= cMax;
                                             })() : false;
                                             const boundaryStyles = (function(){
-                                                if (!sharedSelection) return {};
-                                                // Disable shared selection borders if it belongs to a different sheet
-                                                //console.log('sharedSelection.sheet_id', sharedSelection.sheet_id, 'current id', id);
-                                                if (sharedSelection.sheet_id && sharedSelection.sheet_id !== id) return {};
-                                                const rMin = Math.min(sharedSelection.startRow, sharedSelection.endRow);
-                                                const rMax = Math.max(sharedSelection.startRow, sharedSelection.endRow);
-                                                const cStartIdx = colIndexMap[sharedSelection.startCol] ?? -1;
-                                                const cEndIdx = colIndexMap[sharedSelection.endCol] ?? -1;
-                                                const cMin = Math.min(cStartIdx, cEndIdx);
-                                                const cMax = Math.max(cStartIdx, cEndIdx);
+                                                if (!selectedRange || selectedRange.length === 0) return {};
+                                                // Use filteredRowHeaders order for row boundaries
+                                                const rowIdxs = selectedRange
+                                                    .map(c => filteredRowHeaders.indexOf(c.row))
+                                                    .filter(i => i !== -1);
+                                                if (rowIdxs.length === 0) return {};
+                                                const rIdxMin = Math.min(...rowIdxs);
+                                                const rIdxMax = Math.max(...rowIdxs);
+                                                const curRowIdx = filteredRowHeaders.indexOf(rowLabel);
+                                                if (curRowIdx === -1) return {};
+                                                // Columns continue to use sheet order via colIndexMap
+                                                const colIdxs = selectedRange.map(c => colIndexMap[c.col] ?? -1);
+                                                const cMin = Math.min(...colIdxs);
+                                                const cMax = Math.max(...colIdxs);
                                                 const cIdx = colIndexMap[colLabel] ?? -1;
                                                 const color = '#6366f1';
                                                 const style = {};
-                                                if (rowLabel === rMin && cIdx >= cMin && cIdx <= cMax) style.borderTop = `2px solid ${color}`;
-                                                if (rowLabel === rMax && cIdx >= cMin && cIdx <= cMax) style.borderBottom = `2px solid ${color}`;
-                                                if (cIdx === cMin && rowLabel >= rMin && rowLabel <= rMax) style.borderLeft = `2px solid ${color}`;
-                                                if (cIdx === cMax && rowLabel >= rMin && rowLabel <= rMax) style.borderRight = `2px solid ${color}`;
+                                                if (curRowIdx === rIdxMin && cIdx >= cMin && cIdx <= cMax) style.borderTop = `2px solid ${color}`;
+                                                if (curRowIdx === rIdxMax && cIdx >= cMin && cIdx <= cMax) style.borderBottom = `2px solid ${color}`;
+                                                if (cIdx === cMin && curRowIdx >= rIdxMin && curRowIdx <= rIdxMax) style.borderLeft = `2px solid ${color}`;
+                                                if (cIdx === cMax && curRowIdx >= rIdxMin && curRowIdx <= rIdxMax) style.borderRight = `2px solid ${color}`;
                                                 return style;
                                             })();
 
@@ -1694,15 +1691,15 @@ export default function Sheet() {
                                                             >
                                                                 
                                                                 {(() => {
-                                                                    // Only show Paste if focused cell is not in sharedSelection
+                                                                    // Only show Paste if focused cell is not within current selectedRange rectangle
                                                                     let showPaste = true;
-                                                                    if (sharedSelection && contextMenu.cell) {
-                                                                        const rMin = Math.min(sharedSelection.startRow, sharedSelection.endRow);
-                                                                        const rMax = Math.max(sharedSelection.startRow, sharedSelection.endRow);
-                                                                        const cStartIdx = colIndexMap[sharedSelection.startCol] ?? -1;
-                                                                        const cEndIdx = colIndexMap[sharedSelection.endCol] ?? -1;
-                                                                        const cMin = Math.min(cStartIdx, cEndIdx);
-                                                                        const cMax = Math.max(cStartIdx, cEndIdx);
+                                                                    if (selectedRange && selectedRange.length > 0 && contextMenu.cell) {
+                                                                        const rows = selectedRange.map(c => c.row);
+                                                                        const rMin = Math.min(...rows);
+                                                                        const rMax = Math.max(...rows);
+                                                                        const colIdxs = selectedRange.map(c => colIndexMap[c.col] ?? -1);
+                                                                        const cMin = Math.min(...colIdxs);
+                                                                        const cMax = Math.max(...colIdxs);
                                                                         const cIdx = colIndexMap[contextMenu.cell.col] ?? -1;
                                                                         if (
                                                                             contextMenu.cell.row >= rMin &&
@@ -1726,45 +1723,24 @@ export default function Sheet() {
                                                                 {isOwner && contextMenu.cell && (
                                                                     <>
                                                                         {(() => {
-                                                                            // Only show Lock Cell if contextMenu.cell is inside sharedSelection
+                                                                            // Only show Lock Cell if contextMenu.cell is inside selectedRange
                                                                             let showLock = false;
-                                                                            if (sharedSelection && contextMenu.cell) {
-                                                                                const rMin = Math.min(sharedSelection.startRow, sharedSelection.endRow);
-                                                                                const rMax = Math.max(sharedSelection.startRow, sharedSelection.endRow);
-                                                                                const cStartIdx = colIndexMap[sharedSelection.startCol] ?? -1;
-                                                                                const cEndIdx = colIndexMap[sharedSelection.endCol] ?? -1;
-                                                                                const cMin = Math.min(cStartIdx, cEndIdx);
-                                                                                const cMax = Math.max(cStartIdx, cEndIdx);
-                                                                                const cIdx = colIndexMap[contextMenu.cell.col] ?? -1;
-                                                                                if (
-                                                                                    contextMenu.cell.row >= rMin &&
-                                                                                    contextMenu.cell.row <= rMax &&
-                                                                                    cIdx >= cMin &&
-                                                                                    cIdx <= cMax
-                                                                                ) {
-                                                                                    showLock = true;
-                                                                                }
+                                                                            if (selectedRange && contextMenu.cell) {
+                                                                                showLock = selectedRange.some(c => c.row === contextMenu.cell.row && c.col === contextMenu.cell.col);
                                                                             }
                                                                             return showLock && !data[`${contextMenu.cell.row}-${contextMenu.cell.col}`]?.locked ? (
                                                                                 <button
                                                                                     className="block w-full text-left px-2 py-1 hover:bg-gray-100 rounded"
                                                                                     onClick={() => {
-                                                                                        if (ws.current && ws.current.readyState === WebSocket.OPEN && sharedSelection) {
-                                                                                            const rMin = Math.min(sharedSelection.startRow, sharedSelection.endRow);
-                                                                                            const rMax = Math.max(sharedSelection.startRow, sharedSelection.endRow);
-                                                                                            const cStartIdx = colIndexMap[sharedSelection.startCol] ?? -1;
-                                                                                            const cEndIdx = colIndexMap[sharedSelection.endCol] ?? -1;
-                                                                                            const cMin = Math.min(cStartIdx, cEndIdx);
-                                                                                            const cMax = Math.max(cStartIdx, cEndIdx);
-                                                                                            for (let r = rMin; r <= rMax; r++) {
+                                                                                        if (ws.current && ws.current.readyState === WebSocket.OPEN && selectedRange && canEdit) {
+                                                                                            for (const sel of selectedRange) {
+                                                                                                const r = sel.row;
+                                                                                                const colLabel = sel.col;
                                                                                                 if (!filteredRowHeaders.includes(r)) continue;
-                                                                                                for (let ci = cMin; ci <= cMax; ci++) {
-                                                                                                    const colLabel = colLabelAt(ci);
-                                                                                                    const key = `${r}-${colLabel}`;
-                                                                                                    if (!data[key]?.locked) {
-                                                                                                        const payload = { row: String(r), col: String(colLabel), user: username };
-                                                                                                        ws.current.send(JSON.stringify({ type: 'LOCK_CELL', sheet_id: id, payload }));
-                                                                                                    }
+                                                                                                const key = `${r}-${colLabel}`;
+                                                                                                if (!data[key]?.locked) {
+                                                                                                    const payload = { row: String(r), col: String(colLabel), user: username };
+                                                                                                    ws.current.send(JSON.stringify({ type: 'LOCK_CELL', sheet_id: id, payload }));
                                                                                                 }
                                                                                             }
                                                                                         }
@@ -1773,48 +1749,47 @@ export default function Sheet() {
                                                                                 >
                                                                                     Lock Cell
                                                                                 </button>
+                                                                                
                                                                             ) : null;
                                                                         })()}
                                                                         {(() => {
-                                                                            // Only show Unlock Cell if contextMenu.cell is inside sharedSelection
+                                                                            // Only show Copy if contextMenu.cell is inside selectedRange
+                                                                            let copy = false;
+                                                                            if (selectedRange && contextMenu.cell) {
+                                                                                copy = selectedRange.some(c => c.row === contextMenu.cell.row && c.col === contextMenu.cell.col);
+                                                                            }
+                                                                            return copy ? (
+                                                                                <button
+                                                                                    className="block w-full text-left px-2 py-1 hover:bg-gray-100 rounded"
+                                                                                    onClick={() => {
+                                                                                        sendSelection();
+                                                                                        closeContextMenu();
+                                                                                    }}
+                                                                                >
+                                                                                    Copy
+                                                                                </button>
+                                                                                
+                                                                            ) : null;
+                                                                        })()}
+                                                                        {(() => {
+                                                                            // Only show Unlock Cell if contextMenu.cell is inside selectedRange
                                                                             let showUnlock = false;
-                                                                            if (sharedSelection && contextMenu.cell) {
-                                                                                const rMin = Math.min(sharedSelection.startRow, sharedSelection.endRow);
-                                                                                const rMax = Math.max(sharedSelection.startRow, sharedSelection.endRow);
-                                                                                const cStartIdx = colIndexMap[sharedSelection.startCol] ?? -1;
-                                                                                const cEndIdx = colIndexMap[sharedSelection.endCol] ?? -1;
-                                                                                const cMin = Math.min(cStartIdx, cEndIdx);
-                                                                                const cMax = Math.max(cStartIdx, cEndIdx);
-                                                                                const cIdx = colIndexMap[contextMenu.cell.col] ?? -1;
-                                                                                if (
-                                                                                    contextMenu.cell.row >= rMin &&
-                                                                                    contextMenu.cell.row <= rMax &&
-                                                                                    cIdx >= cMin &&
-                                                                                    cIdx <= cMax
-                                                                                ) {
-                                                                                    showUnlock = true;
-                                                                                }
+                                                                            if (selectedRange && contextMenu.cell) {
+                                                                                showUnlock = selectedRange.some(c => c.row === contextMenu.cell.row && c.col === contextMenu.cell.col);
                                                                             }
                                                                             return showUnlock && data[`${contextMenu.cell.row}-${contextMenu.cell.col}`]?.locked ? (
                                                                                 <button
                                                                                     className="block w-full text-left px-2 py-1 hover:bg-gray-100 rounded"
                                                                                     onClick={() => {
-                                                                                        if (ws.current && ws.current.readyState === WebSocket.OPEN && sharedSelection) {
-                                                                                            const rMin = Math.min(sharedSelection.startRow, sharedSelection.endRow);
-                                                                                            const rMax = Math.max(sharedSelection.startRow, sharedSelection.endRow);
-                                                                                            const cStartIdx = colIndexMap[sharedSelection.startCol] ?? -1;
-                                                                                            const cEndIdx = colIndexMap[sharedSelection.endCol] ?? -1;
-                                                                                            const cMin = Math.min(cStartIdx, cEndIdx);
-                                                                                            const cMax = Math.max(cStartIdx, cEndIdx);
-                                                                                            for (let r = rMin; r <= rMax; r++) {
+                                                                                        if (ws.current && ws.current.readyState === WebSocket.OPEN && selectedRange && canEdit) {
+                                                                                            for (const sel of selectedRange) {
+                                                                                                const r = sel.row;
+                                                                                                const colLabel = sel.col;
                                                                                                 if (!filteredRowHeaders.includes(r)) continue;
-                                                                                                for (let ci = cMin; ci <= cMax; ci++) {
-                                                                                                    const colLabel = colLabelAt(ci);
-                                                                                                    const key = `${r}-${colLabel}`;
-                                                                                                    if (data[key]?.locked) {
-                                                                                                        const payload = { row: String(r), col: String(colLabel), user: username };
-                                                                                                        ws.current.send(JSON.stringify({ type: 'UNLOCK_CELL', sheet_id: id, payload }));
-                                                                                                    }
+                                                                                                const key = `${r}-${colLabel}`;
+                                                                                                if (data[key]?.locked) {
+                                                                                                    const payload = { row: String(r), col: String(colLabel), user: username };
+                                                                                                    ws.current.send(JSON.stringify({ type: 'UNLOCK_CELL', sheet_id: id, payload }));
                                                                                                 }
                                                                                             }
                                                                                         }
