@@ -74,6 +74,7 @@ export default function Sheet() {
     const [selectionStart, setSelectionStart] = useState(null); // { row, col }
     const [selectedRange, setSelectedRange] = useState(null); // Array of { row, col }
     const [isSelecting, setIsSelecting] = useState(false);
+    const [isSelectingWithShift, setIsSelectingWithShift] = useState(false);
     const [copiedBlock, setCopiedBlock] = useState(null); // { rows, cols, values: string[][] }
     const [contextMenu, setContextMenu] = useState({ visible: false, x: 0, y: 0, cell: null });
     // Chat state
@@ -145,6 +146,7 @@ export default function Sheet() {
             };
             ws.current.send(JSON.stringify({ type: 'SELECTION_COPIED', sheet_id: id, payload }));
         }
+        setIsSelectingWithShift(false);
     }
 
     const scrollBeyond = (rowLabel, colLabel) => {
@@ -170,13 +172,27 @@ export default function Sheet() {
             }
         }, 1000);
     }
+    const extendSelectionWithMouse = (rowLabel, colLabel) => {
+        if (!isSelecting ) return;
+          extendSelection(rowLabel, colLabel);
+    };
+     const extendSelectionWithShift = (rowLabel, colLabel) => {
+        if (!isSelectingWithShift ) return;
+          extendSelection(rowLabel, colLabel);
+    };
+
     const extendSelection = (rowLabel, colLabel) => {
-        if (!isSelecting || !selectionStart) return;
+        // Allow Shift+Arrow keyboard extension even if not dragging.
+        const anchor = selectionStart || (focusedCell && focusedCell.row && focusedCell.col ? focusedCell : null);
+        if (!anchor) return;
+
+        // Ensure selection mode remains active while extending
+        //if (!isSelecting) setIsSelecting(true);
 
         scrollBeyond(rowLabel, colLabel);
 
         // Determine row span based on visual order in filteredRowHeaders
-        const startIdx = filteredRowHeaders.indexOf(selectionStart.row);
+        const startIdx = filteredRowHeaders.indexOf(anchor.row);
         const endIdx = filteredRowHeaders.indexOf(rowLabel);
         if (startIdx === -1 || endIdx === -1) return;
         const from = Math.min(startIdx, endIdx);
@@ -184,7 +200,7 @@ export default function Sheet() {
         const rowsInOrder = filteredRowHeaders.slice(from, to + 1);
 
         // Compute columns span as before (sheet order)
-        const cStartIdx = colIndexMap[selectionStart.col] ?? -1;
+        const cStartIdx = colIndexMap[anchor.col] ?? -1;
         const cEndIdx = colIndexMap[colLabel] ?? -1;
         const cMin = Math.min(cStartIdx, cEndIdx);
         const cMax = Math.max(cStartIdx, cEndIdx);
@@ -213,6 +229,7 @@ export default function Sheet() {
     const showContextMenu = (e, rowLabel, colLabel) => {
         e.preventDefault();
         setIsEditing(false);
+        setIsSelectingWithShift(false);
         setContextMenu({ visible: true, x: e.clientX, y: e.clientY, cell: { row: rowLabel, col: colLabel } });
     };
 
@@ -1604,16 +1621,16 @@ export default function Sheet() {
                                                                 startSelection(rowLabel, colLabel);
                                                             }
                                                         }}
-                                                        onMouseEnter={() => { if(!isEditing) extendSelection(rowLabel, colLabel);}   } 
+                                                        onMouseEnter={() => { if(!isEditing) extendSelectionWithMouse(rowLabel, colLabel);}   } 
                                                         onMouseUp={(e) => {
                                                                     if(!isEditing) {
-                                                                        extendSelection(rowLabel, colLabel);
+                                                                        extendSelectionWithMouse(rowLabel, colLabel);
                                                                         endSelection(); 
                                                                     }
                                                         }}
                                                       
                                                         onKeyDown={(e) => {
-                                                            const keys = ['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'];
+                                                            const keys = ['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Shift'];
                                                             // Enter edit mode when typing any non-arrow key (including Enter)
                                                             if (!keys.includes(e.key)) { if(cell.locked) return; if(connected) setIsEditing(true); return; }
                                                             // In edit mode, allow default arrow behavior inside textarea and disable cell navigation
@@ -1656,6 +1673,17 @@ export default function Sheet() {
                                                                         setColStart(prev => Math.max(1, prev - 1));
                                                                     }
                                                                 }
+                                                            }
+                                                            // If Shift is held, extend the selection from the current cell to the next
+                                                            if (e.shiftKey) {
+                                                                if (!selectionStart) {
+                                                                    // Initialize anchor at current focused cell
+                                                                    setSelectionStart({ row: rowLabel, col: colLabel });
+                                                                    setSelectedRange([{ row: rowLabel, col: colLabel }]);
+                                                                }
+                                                                setIsSelectingWithShift(true);
+                                                                // Extend using computed next target BEFORE moving focus
+                                                                extendSelectionWithShift(nextRow, nextCol);
                                                             }
                                                             setFocusedCell({ row: nextRow, col: nextCol });
                                                             setTimeout(() => {

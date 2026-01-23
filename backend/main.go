@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/xuri/excelize/v2"
@@ -789,6 +790,78 @@ func main() {
 			globalProjectMeta.Delete(name)
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]string{"message": "Project deleted"})
+			return
+
+		default:
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+	})
+
+	// Folders API: list/create subfolders under a project path
+	http.HandleFunc("/api/folders", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+		token := r.Header.Get("Authorization")
+		username, err := globalUserManager.ValidateToken(token)
+		if err != nil {
+			http.Error(w, "Unauthorized: "+err.Error(), http.StatusUnauthorized)
+			return
+		}
+
+		switch r.Method {
+		case http.MethodGet:
+			// Query immediate subfolders of the given project path
+			projectPath := r.URL.Query().Get("project")
+			if projectPath == "" {
+				http.Error(w, "project is required", http.StatusBadRequest)
+				return
+			}
+			abs := filepath.Join(dataDir, projectPath)
+			entries, err := os.ReadDir(abs)
+			if err != nil {
+				http.Error(w, "Failed to read folders", http.StatusInternalServerError)
+				return
+			}
+			type Folder struct {
+				Name string `json:"name"`
+			}
+			folders := make([]Folder, 0)
+			for _, e := range entries {
+				if e.IsDir() {
+					folders = append(folders, Folder{Name: e.Name()})
+				}
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(folders)
+			return
+
+		case http.MethodPost:
+			// Create a subfolder under the given parent project path
+			var req struct {
+				Parent string `json:"parent"`
+				Name   string `json:"name"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Parent == "" || req.Name == "" {
+				http.Error(w, "parent and name required", http.StatusBadRequest)
+				return
+			}
+			// Only allow creation under an existing top-level project owned by user, if owner metadata exists
+			top := strings.Split(req.Parent, string(os.PathSeparator))[0]
+			owner := globalProjectMeta.GetOwner(top)
+			if owner != "" && owner != username {
+				http.Error(w, "Forbidden: owner only", http.StatusForbidden)
+				return
+			}
+			abs := filepath.Join(dataDir, req.Parent, req.Name)
+			if err := os.MkdirAll(abs, 0755); err != nil {
+				http.Error(w, "Failed to create folder", http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{"name": req.Name})
 			return
 
 		default:

@@ -1333,7 +1333,7 @@ func (sm *SheetManager) Load() {
 			}
 		}
 	*/
-	// Load sheets from project subdirectories
+	// Load sheets from project subdirectories (recursive)
 	entries, err := os.ReadDir(dataDir)
 	if err != nil {
 		log.Printf("Error reading DATA directory: %v", err)
@@ -1342,32 +1342,49 @@ func (sm *SheetManager) Load() {
 			if !entry.IsDir() {
 				continue
 			}
-			project := entry.Name()
-			files, err := filepath.Glob(filepath.Join(dataDir, project, "*.json"))
-			if err != nil {
-				log.Printf("Error listing files for project %s: %v", project, err)
-				continue
-			}
-			for _, filePath := range files {
-				file, err := os.Open(filePath)
+			topProject := entry.Name()
+			baseDir := filepath.Join(dataDir, topProject)
+			// Walk recursively and read any *.json sheet file
+			filepath.WalkDir(baseDir, func(path string, d os.DirEntry, err error) error {
 				if err != nil {
-					log.Printf("Error opening sheet file %s: %v", filePath, err)
-					continue
+					return nil
+				}
+				if d.IsDir() {
+					return nil
+				}
+				if filepath.Ext(path) != ".json" {
+					return nil
+				}
+				// Skip non-sheet meta files
+				base := filepath.Base(path)
+				if base == "chat.json" || base == "projects.json" || base == "users.json" || base == "project_audit.log" {
+					return nil
+				}
+				file, err := os.Open(path)
+				if err != nil {
+					log.Printf("Error opening sheet file %s: %v", path, err)
+					return nil
 				}
 				var sheet Sheet
 				if err := json.NewDecoder(file).Decode(&sheet); err != nil {
-					log.Printf("Error decoding sheet file %s: %v", filePath, err)
+					log.Printf("Error decoding sheet file %s: %v", path, err)
 					file.Close()
-					continue
+					return nil
 				}
 				file.Close()
-				// If project name missing in file, infer from folder
+				// If project name missing in file, infer relative project path from DATA dir
 				if sheet.ProjectName == "" {
-					sheet.ProjectName = project
+					rel, relErr := filepath.Rel(dataDir, filepath.Dir(path))
+					if relErr == nil {
+						sheet.ProjectName = rel
+					} else {
+						sheet.ProjectName = topProject
+					}
 				}
 				sm.sheets[sheetKey(sheet.ProjectName, sheet.ID)] = &sheet
 				loadedCount++
-			}
+				return nil
+			})
 		}
 	}
 

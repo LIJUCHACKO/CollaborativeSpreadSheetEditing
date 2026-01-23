@@ -17,6 +17,10 @@ import { isSessionValid, clearAuth, authenticatedFetch, getUsername } from '../u
 
 export default function Dashboard() {
     const { project } = useParams();
+    const navigate = useNavigate();
+    const username = getUsername();
+
+    // Sheets and UI state
     const [sheets, setSheets] = useState([]);
     const [newSheetName, setNewSheetName] = useState('');
     const [isCreating, setIsCreating] = useState(true);
@@ -27,9 +31,8 @@ export default function Dashboard() {
     const [copyName, setCopyName] = useState('');
     const [targetProject, setTargetProject] = useState('');
     const [projectsList, setProjectsList] = useState([]);
-    const navigate = useNavigate();
-    const username = getUsername();
-    // Project audit sidebar state
+
+    // Audit sidebar state
     const [auditLog, setAuditLog] = useState([]);
     const [isAuditOpen, setAuditOpen] = useState(false);
     const [selectedAuditId, setSelectedAuditId] = useState(null);
@@ -37,14 +40,150 @@ export default function Dashboard() {
     const auditLogScrollTopRef = useRef(0);
     const fileInputRef = useRef(null);
 
-    // Download all sheets in project as XLSX
+    // Folder navigation state
+    const [currentPath, setCurrentPath] = useState(project || '');
+    const [folders, setFolders] = useState([]);
+    const [newFolderName, setNewFolderName] = useState('');
+
+    // Effects
+    useEffect(() => {
+        if (!username || !isSessionValid()) {
+            clearAuth();
+            navigate('/');
+            return;
+        }
+        setCurrentPath(project || '');
+        fetchSheets(project || '');
+        if (project) fetchFolders(project);
+
+        const sessionCheckInterval = setInterval(() => {
+            if (!isSessionValid()) {
+                clearAuth();
+                alert('Your session has expired. Please log in again.');
+                navigate('/');
+            }
+        }, 60000);
+        return () => clearInterval(sessionCheckInterval);
+    }, [project, username, navigate]);
+
+    useEffect(() => {
+        if (isAuditOpen && auditLogRef.current) {
+            auditLogRef.current.scrollTop = auditLogScrollTopRef.current;
+        }
+    }, [isAuditOpen]);
+
+    // Data fetchers
+    const fetchSheets = async (pathOverride) => {
+        try {
+            const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
+            const path = typeof pathOverride === 'string' ? pathOverride : currentPath;
+            const query = path ? `?project=${encodeURIComponent(path)}` : '';
+            const res = await authenticatedFetch(`http://${host}:8080/api/sheets${query}`);
+            if (res.ok) {
+                const data = await res.json();
+                setSheets(data || []);
+            } else if (res.status === 401) {
+                clearAuth();
+                alert('Your session has expired. Please log in again.');
+                navigate('/');
+            }
+        } catch (error) {
+            console.error('Failed to fetch sheets', error);
+        }
+    };
+
+    const fetchFolders = async (pathOverride) => {
+        try {
+            const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
+            const path = typeof pathOverride === 'string' ? pathOverride : currentPath;
+            if (!path) { setFolders([]); return; }
+            const res = await authenticatedFetch(`http://${host}:8080/api/folders?project=${encodeURIComponent(path)}`);
+            if (res.ok) {
+                const data = await res.json();
+                const names = Array.isArray(data) ? data.map(f => f.name) : [];
+                setFolders(names);
+            } else if (res.status === 401) {
+                clearAuth();
+                alert('Your session has expired. Please log in again.');
+                navigate('/');
+            } else {
+                setFolders([]);
+            }
+        } catch (error) {
+            console.error('Failed to fetch folders', error);
+            setFolders([]);
+        }
+    };
+
+    const fetchProjectAudit = async () => {
+        try {
+            const topProject = (project || '').split('/')[0];
+            if (!topProject) { setAuditLog([]); return; }
+            const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
+            const res = await authenticatedFetch(`http://${host}:8080/api/projects/audit?project=${encodeURIComponent(topProject)}`);
+            if (res.ok) {
+                const entries = await res.json();
+                setAuditLog(Array.isArray(entries) ? entries : []);
+            } else if (res.status === 401) {
+                clearAuth();
+                alert('Your session has expired. Please log in again.');
+                navigate('/');
+            }
+        } catch (e) {
+            // ignore fetch errors
+        }
+    };
+
+    // Actions
+    const createSheet = async (e) => {
+        e.preventDefault();
+        if (!newSheetName.trim()) return;
+        try {
+            const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
+            const body = currentPath ? { name: newSheetName, user: username, project_name: currentPath } : { name: newSheetName, user: username };
+            const res = await authenticatedFetch(`http://${host}:8080/api/sheets`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+            if (res.ok) {
+                const sheet = await res.json();
+                setNewSheetName('');
+                setIsCreating(false);
+                fetchSheets();
+                const path = currentPath;
+                navigate(path ? `/sheet/${sheet.id}?project=${encodeURIComponent(path)}` : `/sheet/${sheet.id}`);
+            } else if (res.status === 401) {
+                clearAuth();
+                alert('Your session has expired. Please log in again.');
+                navigate('/');
+            } else {
+                const text = await res.text();
+                alert(text || 'Failed to create sheet');
+            }
+        } catch (error) {
+            console.error('Failed to create sheet', error);
+        }
+    };
+
+    const handleLogout = async () => {
+        try {
+            const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
+            await authenticatedFetch(`http://${host}:8080/api/logout`, { method: 'POST' });
+        } catch (error) {
+            console.error('Logout error', error);
+        } finally {
+            clearAuth();
+            navigate('/');
+        }
+    };
+
     const handleDownloadProjectXlsx = async () => {
         try {
-            if (!project) return;
+            const path = currentPath || project;
+            if (!path) return;
             const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
-            const res = await authenticatedFetch(`http://${host}:8080/api/export_project?project=${encodeURIComponent(project)}`, {
-                method: 'GET',
-            });
+            const res = await authenticatedFetch(`http://${host}:8080/api/export_project?project=${encodeURIComponent(path)}`, { method: 'GET' });
             if (!res.ok) {
                 const text = await res.text();
                 alert(`Failed to export project: ${text}`);
@@ -54,8 +193,7 @@ export default function Dashboard() {
             const url = window.URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
-            const safeName = (project || 'project') + '.xlsx';
-            a.download = safeName;
+            a.download = `${path}.xlsx`;
             document.body.appendChild(a);
             a.click();
             a.remove();
@@ -66,15 +204,14 @@ export default function Dashboard() {
         }
     };
 
-    // Import XLSX into current project (creates sheets per workbook sheet)
     const handleImportProjectXlsx = async (file) => {
         try {
-            if (!project) return;
-            if (!file) return;
+            const path = currentPath || project;
+            if (!path || !file) return;
             const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
             const form = new FormData();
             form.append('file', file);
-            const res = await authenticatedFetch(`http://${host}:8080/api/import_project_xlsx?project=${encodeURIComponent(project)}`, {
+            const res = await authenticatedFetch(`http://${host}:8080/api/import_project_xlsx?project=${encodeURIComponent(path)}`, {
                 method: 'POST',
                 body: form,
             });
@@ -95,106 +232,58 @@ export default function Dashboard() {
         }
     };
 
-    useEffect(() => {
-        // Check session validity on mount and periodically
-        if (!username || !isSessionValid()) {
-            clearAuth();
-            navigate('/');
-            return;
-        }
-        // Load project audit entries
-        fetchProjectAudit();
-
-        // Check session every minute
-        const sessionCheckInterval = setInterval(() => {
-            if (!isSessionValid()) {
-                clearAuth();
-                alert('Your session has expired. Please log in again.');
-                navigate('/');
-            }
-        }, 60000); // Check every minute
-
-        fetchSheets();
-
-        return () => clearInterval(sessionCheckInterval);
-    }, [username, navigate]);
-
-    const fetchSheets = async () => {
-        try {
-            const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
-            const query = project ? `?project=${encodeURIComponent(project)}` : '';
-            const res = await authenticatedFetch(`http://${host}:8080/api/sheets${query}`);
-            if (res.ok) {
-                const data = await res.json();
-                setSheets(data || []);
-            } else if (res.status === 401) {
-                clearAuth();
-                alert('Your session has expired. Please log in again.');
-                navigate('/');
-            }
-        } catch (error) {
-            console.error("Failed to fetch sheets", error);
-        }
+    // Folder helpers
+    const goToFolder = (name) => {
+        const base = currentPath || '';
+        const next = base ? `${base}/${name}` : name;
+        setCurrentPath(next);
+        navigate(`/project/${encodeURIComponent(next)}`);
+        fetchSheets(next);
+        fetchFolders(next);
     };
 
-    const createSheet = async (e) => {
-        e.preventDefault();
-        if (!newSheetName.trim()) return;
+    const goUpOne = () => {
+        const parts = (currentPath || '').split('/').filter(Boolean);
+        if (parts.length <= 1) {
+            const top = parts[0] || '';
+            navigate('/projects');
+            setCurrentPath(top);
+            fetchSheets(top);
+            fetchFolders(top);
+            return;
+        }
+        const next = parts.slice(0, -1).join('/');
+        setCurrentPath(next);
+        navigate(`/project/${encodeURIComponent(next)}`);
+        fetchSheets(next);
+        fetchFolders(next);
+    };
 
+    const createFolder = async (e) => {
+        e.preventDefault();
+        const name = newFolderName.trim();
+        if (!name) return;
         try {
             const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
-            const body = project ? { name: newSheetName, user: username, project_name: project } : { name: newSheetName, user: username };
-            const res = await authenticatedFetch(`http://${host}:8080/api/sheets`, {
+            const body = { parent: currentPath || project || '', name };
+            const res = await authenticatedFetch(`http://${host}:8080/api/folders`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body),
             });
             if (res.ok) {
-                const sheet = await res.json();
-                setNewSheetName('');
-                setIsCreating(false);
-                fetchSheets();
-                navigate(project ? `/sheet/${sheet.id}?project=${encodeURIComponent(project)}` : `/sheet/${sheet.id}`);
+                setNewFolderName('');
+                fetchFolders();
             } else if (res.status === 401) {
                 clearAuth();
                 alert('Your session has expired. Please log in again.');
                 navigate('/');
+            } else {
+                const text = await res.text();
+                alert(text || 'Failed to create folder');
             }
         } catch (error) {
-            console.error("Failed to create sheet", error);
-        }
-    };
-
-    const handleLogout = async () => {
-        try {
-            const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
-            await authenticatedFetch(`http://${host}:8080/api/logout`, {
-                method: 'POST',
-            });
-        } catch (error) {
-            console.error("Logout error", error);
-        } finally {
-            clearAuth();
-            navigate('/');
-        }
-    };
-
-    // Fetch project audit entries
-    const fetchProjectAudit = async () => {
-        try {
-            if (!project) { setAuditLog([]); return; }
-            const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
-            const res = await authenticatedFetch(`http://${host}:8080/api/projects/audit?project=${encodeURIComponent(project)}`);
-            if (res.ok) {
-                const entries = await res.json();
-                setAuditLog(Array.isArray(entries) ? entries : []);
-            } else if (res.status === 401) {
-                clearAuth();
-                alert('Your session has expired. Please log in again.');
-                navigate('/');
-            }
-        } catch (e) {
-            // ignore fetch errors
+            console.error('Failed to create folder', error);
         }
     };
 
@@ -385,11 +474,7 @@ export default function Dashboard() {
             <nav className="navbar navbar-expand-lg navbar-light" style={{ backgroundColor: 'skyblue' }}>
                 <div className="container-fluid">
                      <button
-                        onClick={() => {
-                            
-                                navigate('/projects');
-                            
-                        }}
+                        onClick={goUpOne}
                         className="btn btn-outline-primary btn-sm d-flex align-items-center"
                     >
                         <ArrowLeft className="me-1" />
@@ -510,7 +595,7 @@ export default function Dashboard() {
                     </div>
                 )}
                 
-
+                 <div><h2>Sheets</h2></div>
                 {/* Create Sheet Modal/Collapse */}
                 <div className={`overflow-hidden transition-all duration-300 ease-in-out ${isCreating ? 'max-h-40 mb-8 opacity-100' : 'max-h-0 opacity-0'}`}>
                     <div className="p-6 bg-white border border-indigo-100 rounded-2xl shadow-sm">
@@ -549,6 +634,7 @@ export default function Dashboard() {
                         />
                     </div>
                 </div>
+                
                 {/* List View Only - Table */}
                 <div className="bg-white border border-gray-200 rounded-2xl shadow-sm overflow-hidden">
                     <table className="table mb-0">
@@ -659,6 +745,36 @@ export default function Dashboard() {
                         </tbody>
                     </table>
                 </div>
+                {/* Folders */}
+                {currentPath && (
+                    <div className="mb-6">
+                        <div><h2>SubFolders</h2></div>
+                        <div className="p-3 bg-white border rounded-2xl shadow-sm">
+                            <div className="d-flex align-items-end gap-2 mb-3">
+                                <input
+                                    type="text"
+                                    className="form-control form-control-sm"
+                                    value={newFolderName}
+                                    onChange={(e)=>setNewFolderName(e.target.value)}
+                                    placeholder="New subfolder name"
+                                    style={{ maxWidth: 280 }}
+                                />
+                                <button className="btn btn-sm btn-primary" onClick={createFolder}>Create Folder</button>
+                            </div>
+                            {folders.length > 0 ? (
+                                <div className="d-flex flex-wrap gap-2">
+                                    {folders.map((name) => (
+                                        <button key={name} className="btn btn-sm btn-outline-primary" onClick={()=>goToFolder(name)}>
+                                            {name}
+                                        </button>
+                                    ))}
+                                </div>
+                            ) : (
+                                <div className="text-muted small">No subfolders</div>
+                            )}
+                        </div>
+                    </div>
+                )}
             </main>
         </div>
     );
