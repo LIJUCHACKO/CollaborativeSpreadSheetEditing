@@ -36,6 +36,7 @@ export default function Sheet() {
     // UI and editing state
     const [connected, setConnected] = useState(false);
     const [isEditing, setIsEditing] = useState(false);
+    const [isDoubleClicked, setIsDoubleClicked] = useState(false);
     const [isSidebarOpen, setSidebarOpen] = useState(false);
     const [showFilters, setShowFilters] = useState(false);
     const [filters, setFilters] = useState({});
@@ -106,6 +107,7 @@ export default function Sheet() {
         setSelectionStart({ row: rowLabel, col: colLabel });
         setSelectedRange([{ row: rowLabel, col: colLabel }]);
         setIsEditing(false);
+        setIsDoubleClicked(false);
         setCutRow(null);
         setCutCol(null);
         setContextMenu(prev => ({ ...prev, visible: false }));
@@ -229,6 +231,7 @@ export default function Sheet() {
     const showContextMenu = (e, rowLabel, colLabel) => {
         e.preventDefault();
         setIsEditing(false);
+        setIsDoubleClicked(false);
         setIsSelectingWithShift(false);
         setContextMenu({ visible: true, x: e.clientX, y: e.clientY, cell: { row: rowLabel, col: colLabel } });
     };
@@ -528,7 +531,7 @@ export default function Sheet() {
             };
 
             socket.onclose = () => {
-                setConnected(false); setIsEditing(false);
+                setConnected(false); setIsEditing(false); setIsDoubleClicked(false);
                 console.log('Disconnected from WS');
                 if (shouldReconnect) {
                     // Try to reconnect after 2 seconds
@@ -946,6 +949,7 @@ export default function Sheet() {
         // Set focus state and focus the element after re-render
         setFocusedCell({ row: targetRow, col: targetColLabel });
         setIsEditing(false);
+        setIsDoubleClicked(false);
         setTimeout(() => {
             const el = document.querySelector(`textarea[data-row="${targetRow}"][data-col="${targetColLabel}"]`);
             if (el) {
@@ -1223,6 +1227,7 @@ export default function Sheet() {
                                  e.preventDefault();
                                  // Commit edit and exit editing mode on scroll
                                  setIsEditing(false);
+                                 setIsDoubleClicked(false);
                                  const { row, col } = focusedCell;
                                  const key = `${row}-${col}`;
                                  if (data[key]) {
@@ -1240,6 +1245,7 @@ export default function Sheet() {
                                 onChange={(e) =>{ 
                                     // Commit edit and exit editing mode on scroll
                                     setIsEditing(false);
+                                    setIsDoubleClicked(false);
                                     const { row, col } = focusedCell;
                                     const key = `${row}-${col}`;
                                     if (data[key]) {
@@ -1273,6 +1279,7 @@ export default function Sheet() {
                                 value={rowStart}
                                 onChange={(e) => {
                                     setIsEditing(false);
+                                    setIsDoubleClicked(false);
                                     const { row, col } = focusedCell;
                                     const key = `${row}-${col}`;
                                     if (data[key]) {
@@ -1291,6 +1298,7 @@ export default function Sheet() {
                             onWheel={(e) => {
                                  e.preventDefault();
                                  setIsEditing(false);
+                                 setIsDoubleClicked(false);
                                  const { row, col } = focusedCell;
                                  const key = `${row}-${col}`;
                                  if (data[key]) {
@@ -1590,7 +1598,7 @@ export default function Sheet() {
                                                         data-row={rowLabel}
                                                         data-col={colLabel}
                                                         readOnly={!!cell.locked || !canEdit}
-                                                        onFocus={() => { setFocusedCell({ row: rowLabel, col: colLabel }); setIsEditing(false); }}
+                                                        onFocus={() => { setFocusedCell({ row: rowLabel, col: colLabel }); setIsEditing(false); setIsDoubleClicked(false); }}
                                                         onMouseOver={e => { e.target.focus(); }}
                                                         onDoubleClick={(e) => {
                                                             if (isEditing) return;
@@ -1600,6 +1608,7 @@ export default function Sheet() {
                                                             e.target.focus();
                                                             if (connected) {
                                                                 setIsEditing(true);
+                                                                setIsDoubleClicked(true);
                                                                 setCutRow(null);
                                                                 setCutCol(null);
                                                             }
@@ -1630,18 +1639,19 @@ export default function Sheet() {
                                                         }}
                                                       
                                                         onKeyDown={(e) => {
-                                                            const keys = ['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Shift'];
+                                                            const isMultiline = typeof cell.value === 'string' && cell.value.includes('\n');
+                                                            const keys = ['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Enter'];
                                                             // Enter edit mode when typing any non-arrow key (including Enter)
-                                                            if (!keys.includes(e.key)) { if(cell.locked) return; if(connected) setIsEditing(true); return; }
-                                                            // In edit mode, allow default arrow behavior inside textarea and disable cell navigation
-                                                            if (isEditing && keys.includes(e.key)) { return; }
+                                                            if (!keys.includes(e.key)) { if(cell.locked) return; if(connected) setIsEditing(true); console.log('Entering edit mode for non-arrow key'); return; }
+                                                            // In edit mode, allow default arrow behavior inside textarea and disable cell navigation if multiline without Shift
+                                                            if (isEditing && (isMultiline || (!isMultiline && e.shiftKey)|| isDoubleClicked ) && keys.includes(e.key) ) { return; }
                                                             e.preventDefault();
                                                             let nextRow = rowLabel;
                                                             let nextCol = colLabel;
                                                             const rowIdx = filteredRowHeaders.indexOf(rowLabel);
                                                             const colIdx = COL_HEADERS.indexOf(colLabel);
                                                             
-                                                            if (e.key === 'ArrowDown') {
+                                                            if (e.key === 'ArrowDown' || e.key === 'Enter') {
                                                                 if (rowIdx !== -1 && rowIdx + 1 < filteredRowHeaders.length) {
                                                                     nextRow = filteredRowHeaders[rowIdx + 1];
                                                                     const currentRowEnd = Math.min(rowStart + visibleRowsCount , filteredRowHeaders.length );
@@ -1704,6 +1714,7 @@ export default function Sheet() {
                                                         }}
                                                         onBlur={(e) => {
                                                             setIsEditing(false);
+                                                            setIsDoubleClicked(false);
                                                             // Commit value to backend only on blur
                                                             if (!cell.locked && canEdit) handleCellChange(rowLabel, colLabel, e.target.value);
                                                         }}
@@ -1849,6 +1860,7 @@ export default function Sheet() {
                                  e.preventDefault();
                                  // Commit edit and exit editing mode on scroll
                                  setIsEditing(false);
+                                 setIsDoubleClicked(false);
                                  const { row, col } = focusedCell;
                                  const key = `${row}-${col}`;
                                  if (data[key]) {
@@ -1866,6 +1878,7 @@ export default function Sheet() {
                                 onChange={(e) =>{
                                     // Commit edit and exit editing mode on scroll
                                     setIsEditing(false);
+                                    setIsDoubleClicked(false);
                                     const { row, col } = focusedCell;
                                     const key = `${row}-${col}`;
                                     if (data[key]) {
