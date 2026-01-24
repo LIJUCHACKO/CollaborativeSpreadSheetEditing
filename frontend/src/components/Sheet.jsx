@@ -85,6 +85,8 @@ export default function Sheet() {
     const [allUsers, setAllUsers] = useState([]);
     // Highlight selected audit log entry
     const [selectedAuditId, setSelectedAuditId] = useState(null);
+    // Floating diff panel for audit value changes
+    const [diffPanel, setDiffPanel] = useState({ visible: false, entry: null, parts: [] });
     // Preserve audit log scroll position across open/close
     const auditLogRef = useRef(null);
     const auditLogScrollTopRef = useRef(0);
@@ -960,32 +962,40 @@ export default function Sheet() {
         }, 50);
     };
 
-    // Extract row/col from audit log details and navigate
-    const navigateToCellFromDetails = (details) => {
-        //closeSidebar();
+    // Navigate from an audit log entry using structured row/col if present, else fallback to details parsing
+    const navigateToCellFromDetails = (entryOrDetails) => {
+        const entry = (entryOrDetails && typeof entryOrDetails === 'object') ? entryOrDetails : { details: entryOrDetails };
+        // Prefer structured coordinates if provided by backend
+        if (entry && Number.isInteger(entry.row) && entry.row > 0 && typeof entry.col === 'string' && entry.col) {
+            const colLabel = entry.col.toUpperCase();
+            if (COL_HEADERS.includes(colLabel)) {
+                navigateToCell(entry.row, colLabel);
+                return;
+            }
+        }
+        const details = entry.details || '';
         if (!details || typeof details !== 'string') return;
         // Patterns: "Set cell 28,C to ..." or "Changed cell 4,B from ..."
-        const match = details.match(/(?:Set|Changed)\s+cell\s+(\d+),([A-Z]+)\s+/);
+        const match = details.match(/(?:Set|Changed)\s+cell\s+(\d+),([A-Z]+)\s+/i);
         if (match) {
             const row = parseInt(match[1], 10);
-            const colLabel = match[2];
+            const colLabel = match[2].toUpperCase();
             if (!Number.isNaN(row) && COL_HEADERS.includes(colLabel)) {
                 navigateToCell(row, colLabel);
             }
             return;
         }
         // Optional: focus column for resize events like "Set width of column C to 93"
-        const colMatch = details.match(/column\s+([A-Z]+)\s+/);
+        const colMatch = details.match(/column\s+([A-Z]+)\s+/i);
         if (colMatch) {
-            const colLabel = colMatch[1];
+            const colLabel = colMatch[1].toUpperCase();
             if (COL_HEADERS.includes(colLabel)) {
-                // Focus header row at current first displayed row (use row 1)
                 navigateToCell(1, colLabel);
             }
             return;
         }
         // Optional: focus row for resize like "Set height of row 12 to ..."
-        const rowMatch = details.match(/row\s+(\d+)\s+/);
+        const rowMatch = details.match(/row\s+(\d+)\s+/i);
         if (rowMatch) {
             const row = parseInt(rowMatch[1], 10);
             if (!Number.isNaN(row)) {
@@ -993,6 +1003,49 @@ export default function Sheet() {
             }
         }
     };
+
+    // Compute character-level diff parts between old/new text
+    const computeDiffParts = (oldText = '', newText = '') => {
+        const a = Array.from(oldText);
+        const b = Array.from(newText);
+        const n = a.length;
+        const m = b.length;
+        const dp = Array.from({ length: n + 1 }, () => Array(m + 1).fill(0));
+        for (let i = n - 1; i >= 0; i--) {
+            for (let j = m - 1; j >= 0; j--) {
+                dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+            }
+        }
+        const parts = [];
+        let i = 0, j = 0;
+        while (i < n && j < m) {
+            if (a[i] === b[j]) {
+                let s = '';
+                while (i < n && j < m && a[i] === b[j]) { s += a[i]; i++; j++; }
+                if (s) parts.push({ type: 'equal', text: s });
+            } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+                parts.push({ type: 'del', text: a[i] });
+                i++;
+            } else {
+                parts.push({ type: 'add', text: b[j] });
+                j++;
+            }
+        }
+        if (i < n) parts.push({ type: 'del', text: a.slice(i).join('') });
+        if (j < m) parts.push({ type: 'add', text: b.slice(j).join('') });
+        return parts;
+    };
+
+    // Open/close diff panel for an audit entry if it has value changes
+    const openDiffForEntry = (entry) => {
+        if (!entry) { setDiffPanel({ visible: false, entry: null, parts: [] }); return; }
+        const oldVal = (entry.old_value ?? '').toString();
+        const newVal = (entry.new_value ?? '').toString();
+        if (!oldVal  ) { setDiffPanel({ visible: false, entry: null, parts: [] }); return; }
+        const parts = computeDiffParts(oldVal, newVal);
+        setDiffPanel({ visible: true, entry, parts });
+    };
+    const closeDiffPanel = () => setDiffPanel({ visible: false, entry: null, parts: [] });
 
     const displayedRowHeaders = [
         1,
@@ -1187,7 +1240,7 @@ export default function Sheet() {
                                 ←
                             </button>
                         </div>
-                        <div ref={auditLogRef} className="overflow-auto p-3" style={{ height: 'calc(70% - 56px)', overflowY: 'scroll' }}>
+                        <div ref={auditLogRef} className="overflow-auto p-3" style={{ height: 'calc(70% - 56px)', overflowY: 'scroll' , opacity: 0.95}}>
                             {auditLog.slice().reverse().map((entry, i) => {
                                 const ts = entry.timestamp ? new Date(entry.timestamp).toLocaleString() : '';
                                 const entryId = `${entry.timestamp || i}|${entry.user || ''}|${entry.action || ''}|${entry.details || ''}`;
@@ -1196,10 +1249,11 @@ export default function Sheet() {
                                     <div
                                         key={entryId}
                                         className={`p-2 mb-2 rounded ${isSelected ? 'bg-indigo-50' : 'bg-white'} border`}
-                                        onClick={() => { setSelectedAuditId(entryId); navigateToCellFromDetails(entry.details || entry.action); }}
+                                        onClick={() => { setSelectedAuditId(entryId); navigateToCellFromDetails(entry); openDiffForEntry(entry); }}
                                         title={ts}
+                                        style={{ opacity: 1 }}
                                     >
-                                        <div className="d-flex justify-content-between">
+                                        <div className="d-flex justify-content-between" style={{ opacity: 1}} >
                                             <span className="fw-semibold small">{entry.user}</span>
                                             <span className="text-muted small">{ts}</span>
                                         </div>
@@ -1213,6 +1267,28 @@ export default function Sheet() {
                                     <p className="mb-0">No activity yet.</p>
                                 </div>
                             )}
+                        </div>
+                    </div>
+                )}
+                {diffPanel.visible && (
+                    <div style={{ position: 'fixed', right: 392, top: 70, width: 320, zIndex: 1100 }}>
+                        <div className="card shadow-sm">
+                            <div className="card-header py-2 d-flex align-items-center justify-content-between">
+                                <span className="fw-semibold small">Change Preview</span>
+                                <button className="btn btn-sm btn-light" onClick={closeDiffPanel} aria-label="Close preview">×</button>
+                            </div>
+                            <div className="card-body p-2" style={{ maxHeight: 240, overflowY: 'auto' }}>
+                                {diffPanel.entry && (
+                                    <div className="small mb-2 text-muted">Cell {diffPanel.entry.row ?? ''},{diffPanel.entry.col ?? ''}</div>
+                                )}
+                                <div className="small" style={{ lineHeight: 1.6 }}>
+                                    {diffPanel.parts.map((p, idx) => {
+                                        if (p.type === 'add') return <span key={idx} style={{ color: '#16a34a' }}>{p.text}</span>;
+                                        if (p.type === 'del') return <span key={idx} style={{ color: '#dc2626', textDecoration: 'line-through' }}>{p.text}</span>;
+                                        return <span key={idx}>{p.text}</span>;
+                                    })}
+                                </div>
+                            </div>
                         </div>
                     </div>
                 )}
