@@ -14,7 +14,9 @@ import {
     MessageSquare,
     Download,
     Settings,
-    Filter
+    Filter,
+    Undo2,
+    Redo2
 } from 'lucide-react';
 import { isSessionValid, clearAuth, getUsername, authenticatedFetch } from '../utils/auth';
 import 'bootstrap/dist/css/bootstrap.min.css';
@@ -87,9 +89,13 @@ export default function Sheet() {
     const [selectedAuditId, setSelectedAuditId] = useState(null);
     // Floating diff panel for audit value changes
     const [diffPanel, setDiffPanel] = useState({ visible: false, entry: null, parts: [] });
+    // Undo/Redo stacks for committed cell value edits
+    const [undoStack, setUndoStack] = useState([]); // [{type:'cell_edit', row, col, oldValue, newValue}]
+    const [redoStack, setRedoStack] = useState([]);
     // Preserve audit log scroll position across open/close
     const auditLogRef = useRef(null);
     const auditLogScrollTopRef = useRef(0);
+    const editingOriginalValueRef = useRef(null);
 
     const colIndexMap = useMemo(() => {
         const map = {};
@@ -646,6 +652,13 @@ export default function Sheet() {
         //updateCellState(String(r), String(c), value, username);
         //send update to server only if changed
         if (cellModified === 0) { return; }
+        // Capture undo action if the value changed
+        const oldValue = (editingOriginalValueRef.current ?? '').toString();
+        const newValue = (value ?? '').toString();
+        if (oldValue !== newValue) {
+            setUndoStack(prev => [...prev, { type: 'cell_edit', row: String(r), col: String(c), oldValue, newValue }]);
+            setRedoStack([]);
+        }
         // Send to WB
         if (canEdit && ws.current && ws.current.readyState === WebSocket.OPEN) {
             const msg = {
@@ -656,7 +669,130 @@ export default function Sheet() {
             ws.current.send(JSON.stringify(msg));
         }
         setCellModified(0);
+        editingOriginalValueRef.current = null;
     };
+
+    const doUndo = () => {
+        if (undoStack.length === 0 || !canEdit) return;
+        const last = undoStack[undoStack.length - 1];
+        if (last.type === 'cell_edit') {
+            const { row, col, oldValue, newValue } = last;
+            // Apply local state
+            updateCellState(row, col, oldValue, username);
+            // Send to server
+            if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+                ws.current.send(JSON.stringify({ type: 'UPDATE_CELL', sheet_id: id, payload: { row, col, value: oldValue, user: username } }));
+            }
+            // Move to redo stack
+            setRedoStack(prev => [...prev, last]);
+            setUndoStack(prev => prev.slice(0, -1));
+        } else if (last.type === 'insert_row') {
+            const { insertedRow } = last;
+            if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+                ws.current.send(JSON.stringify({ type: 'DELETE_ROW', sheet_id: id, payload: { row: String(insertedRow), user: username } }));
+            }
+            setRedoStack(prev => [...prev, last]);
+            setUndoStack(prev => prev.slice(0, -1));
+        } else if (last.type === 'move_row') {
+            const { fromRow, targetRow, destIndex } = last;
+            // Inverse move: move the row currently at destIndex back to original fromRow
+            const inverseTarget = (fromRow < destIndex) ? (fromRow - 1) : fromRow;
+            if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+                ws.current.send(JSON.stringify({ type: 'MOVE_ROW', sheet_id: id, payload: { fromRow: String(destIndex), targetRow: String(inverseTarget), user: username } }));
+            }
+            setRedoStack(prev => [...prev, last]);
+            setUndoStack(prev => prev.slice(0, -1));
+        } else if (last.type === 'insert_col') {
+            const { newCol } = last;
+            if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+                ws.current.send(JSON.stringify({ type: 'DELETE_COL', sheet_id: id, payload: { col: String(newCol), user: username } }));
+            }
+            setRedoStack(prev => [...prev, last]);
+            setUndoStack(prev => prev.slice(0, -1));
+        } else if (last.type === 'move_col') {
+            const { fromCol, targetCol, destIndex } = last;
+            const destLabel = colLabelAt(destIndex);
+            const origIdx = colIndexMap[String(fromCol)] ?? -1;
+            if (destLabel && origIdx >= 0 && ws.current && ws.current.readyState === WebSocket.OPEN) {
+                // Compute inverse targetIdx' per MOVE_COL insertion semantics
+                const fromIdx2 = destIndex;
+                let targetIdxPrime;
+                if (fromIdx2 >= origIdx) {
+                    targetIdxPrime = origIdx - 1;
+                } else {
+                    targetIdxPrime = origIdx;
+                }
+                const targetLabelPrime = colLabelAt(targetIdxPrime);
+                if (targetLabelPrime) {
+                    ws.current.send(JSON.stringify({ type: 'MOVE_COL', sheet_id: id, payload: { fromCol: String(destLabel), targetCol: String(targetLabelPrime), user: username } }));
+                }
+            }
+            setRedoStack(prev => [...prev, last]);
+            setUndoStack(prev => prev.slice(0, -1));
+        }
+    };
+
+    const doRedo = () => {
+        if (redoStack.length === 0 || !canEdit) return;
+        const last = redoStack[redoStack.length - 1];
+        if (last.type === 'cell_edit') {
+            const { row, col, oldValue, newValue } = last;
+            updateCellState(row, col, newValue, username);
+            if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+                ws.current.send(JSON.stringify({ type: 'UPDATE_CELL', sheet_id: id, payload: { row, col, value: newValue, user: username } }));
+            }
+            setUndoStack(prev => [...prev, last]);
+            setRedoStack(prev => prev.slice(0, -1));
+        } else if (last.type === 'insert_row') {
+            const { insertedRow } = last;
+            // Re-insert the row at the same position (target = insertedRow - 1)
+            if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+                ws.current.send(JSON.stringify({ type: 'INSERT_ROW', sheet_id: id, payload: { targetRow: String(Number(insertedRow) - 1), user: username } }));
+            }
+            setUndoStack(prev => [...prev, last]);
+            setRedoStack(prev => prev.slice(0, -1));
+        } else if (last.type === 'move_row') {
+            const { fromRow, targetRow, destIndex } = last;
+            // Reapply original move
+            if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+                ws.current.send(JSON.stringify({ type: 'MOVE_ROW', sheet_id: id, payload: { fromRow: String(fromRow), targetRow: String(targetRow), user: username } }));
+            }
+            setUndoStack(prev => [...prev, last]);
+            setRedoStack(prev => prev.slice(0, -1));
+        } else if (last.type === 'insert_col') {
+            const { targetCol } = last;
+            if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+                ws.current.send(JSON.stringify({ type: 'INSERT_COL', sheet_id: id, payload: { targetCol: String(targetCol), user: username } }));
+            }
+            setUndoStack(prev => [...prev, last]);
+            setRedoStack(prev => prev.slice(0, -1));
+        } else if (last.type === 'move_col') {
+            const { fromCol, targetCol } = last;
+            if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+                ws.current.send(JSON.stringify({ type: 'MOVE_COL', sheet_id: id, payload: { fromCol: String(fromCol), targetCol: String(targetCol), user: username } }));
+            }
+            setUndoStack(prev => [...prev, last]);
+            setRedoStack(prev => prev.slice(0, -1));
+        }
+    };
+
+    // Global keyboard shortcuts for undo/redo (when not editing within a cell)
+    useEffect(() => {
+        const onKeyDown = (e) => {
+            const isCtrl = e.ctrlKey || e.metaKey;
+            if (!isCtrl) return;
+            if (isEditing) return; // avoid interfering with textarea editing
+            if (e.key.toLowerCase() === 'z' && !e.shiftKey) {
+                e.preventDefault();
+                doUndo();
+            } else if ((e.key.toLowerCase() === 'y') || (e.key.toLowerCase() === 'z' && e.shiftKey)) {
+                e.preventDefault();
+                doRedo();
+            }
+        };
+        window.addEventListener('keydown', onKeyDown);
+        return () => window.removeEventListener('keydown', onKeyDown);
+    }, [isEditing, undoStack, redoStack, canEdit]);
 
     const onGlobalMouseMove = (e) => {
         const { type, label, startPos, startSize } = dragRef.current || {};
@@ -879,6 +1015,12 @@ export default function Sheet() {
         // Delegate row move to backend; it will broadcast updated sheet
         if (canEdit && ws.current && ws.current.readyState === WebSocket.OPEN) {
             const payload = { fromRow: String(cutRow), targetRow: String(targetRow), user: username };
+            // Compute final destination index consistent with backend logic
+            let destIndex = Number(targetRow) + 1;
+            if (Number(cutRow) < destIndex) destIndex -= 1;
+            // Push undo entry for structural move
+            setUndoStack(prev => [...prev, { type: 'move_row', fromRow: Number(cutRow), targetRow: Number(targetRow), destIndex }]);
+            setRedoStack([]);
             ws.current.send(JSON.stringify({ type: 'MOVE_ROW', sheet_id: id, payload }));
         }
 
@@ -890,6 +1032,15 @@ export default function Sheet() {
         if (isFilterActive) return; // keep parity with row behavior
         if (canEdit && ws.current && ws.current.readyState === WebSocket.OPEN) {
             const payload = { fromCol: String(cutCol), targetCol: String(targetCol), user: username };
+            // Compute final destination index (0-based) and push undo
+            const fromIdx = colIndexMap[String(cutCol)] ?? -1;
+            const targetIdx = colIndexMap[String(targetCol)] ?? -1;
+            if (fromIdx >= 0 && targetIdx >= 0) {
+                let destIdx = targetIdx + 1;
+                if (fromIdx < destIdx) destIdx -= 1;
+                setUndoStack(prev => [...prev, { type: 'move_col', fromCol: String(cutCol), targetCol: String(targetCol), destIndex: destIdx }]);
+                setRedoStack([]);
+            }
             ws.current.send(JSON.stringify({ type: 'MOVE_COL', sheet_id: id, payload }));
         }
         setCutCol(null);
@@ -899,6 +1050,10 @@ export default function Sheet() {
         if (isFilterActive) return;
         if (canEdit && ws.current && ws.current.readyState === WebSocket.OPEN) {
             const payload = { targetRow: String(targetRow), user: username };
+            // Record undo as deletion of the newly inserted row
+            const insertedRow = Number(targetRow) + 1;
+            setUndoStack(prev => [...prev, { type: 'insert_row', insertedRow }]);
+            setRedoStack([]);
             ws.current.send(JSON.stringify({ type: 'INSERT_ROW', sheet_id: id, payload }));
         }
     };
@@ -907,6 +1062,16 @@ export default function Sheet() {
         if (isFilterActive) return;
         if (canEdit && ws.current && ws.current.readyState === WebSocket.OPEN) {
             const payload = { targetCol: String(targetCol), user: username };
+            // Compute newly inserted column label (based on current headers)
+            const targetIdx = colIndexMap[String(targetCol)] ?? -1;
+            if (targetIdx >= 0) {
+                const newIdx = targetIdx + 1;
+                const newCol = colLabelAt(newIdx);
+                if (newCol) {
+                    setUndoStack(prev => [...prev, { type: 'insert_col', newCol: String(newCol), targetCol: String(targetCol) }]);
+                    setRedoStack([]);
+                }
+            }
             ws.current.send(JSON.stringify({ type: 'INSERT_COL', sheet_id: id, payload }));
         }
     };
@@ -1132,6 +1297,22 @@ export default function Sheet() {
                             <Filter size={16} />
                             {showFilters ? 'Hide Filters' : 'Show Filters'}
                         </button>
+                        <button
+                            className="px-2 py-1.5 text-sm rounded border border-gray-300 bg-white hover:bg-gray-100 flex items-center gap-1"
+                            onClick={doUndo}
+                            disabled={!canEdit || undoStack.length === 0}
+                            title="Undo (Ctrl+Z)"
+                        >
+                            <Undo2 size={16} /> Undo
+                        </button>
+                        <button
+                            className="px-2 py-1.5 text-sm rounded border border-gray-300 bg-white hover:bg-gray-100 flex items-center gap-1"
+                            onClick={doRedo}
+                            disabled={!canEdit || redoStack.length === 0}
+                            title="Redo (Ctrl+Y / Ctrl+Shift+Z)"
+                        >
+                            <Redo2 size={16} /> Redo
+                        </button>
                         
 
                             <span className="text-sm text-gray-600">Rows visible</span>
@@ -1248,7 +1429,7 @@ export default function Sheet() {
                                 return (
                                     <div
                                         key={entryId}
-                                        className={`p-2 mb-2 rounded ${isSelected ? 'bg-indigo-50' : 'bg-white'} border`}
+                                        className={`p-2 mb-2 rounded ${isSelected ? 'bg-indigo-100' : 'bg-white'} border opacity-100 `}
                                         onClick={() => { setSelectedAuditId(entryId); navigateToCellFromDetails(entry); openDiffForEntry(entry); }}
                                         title={ts}
                                         style={{ opacity: 1 }}
@@ -1688,6 +1869,7 @@ export default function Sheet() {
                                                                 setCutRow(null);
                                                                 setCutCol(null);
                                                             }
+                                                            editingOriginalValueRef.current = (cell.value ?? '').toString();
                                                             // Clear any selection by collapsing caret
                                                             if (typeof e.target.setSelectionRange === 'function') {
                                                                 const len = e.target.value.length;
@@ -1702,6 +1884,7 @@ export default function Sheet() {
                                                             }
                                                             e.preventDefault();
                                                             e.target.focus();
+                                                            editingOriginalValueRef.current = (cell.value ?? '').toString();
                                                             if (e.button === 0 ) {
                                                                 startSelection(rowLabel, colLabel);
                                                             }

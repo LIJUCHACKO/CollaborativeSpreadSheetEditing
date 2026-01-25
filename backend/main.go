@@ -991,7 +991,7 @@ func main() {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(sheet)
+		json.NewEncoder(w).Encode(sheet.SnapshotForClient())
 	})
 
 	// List all usernames (for selection)

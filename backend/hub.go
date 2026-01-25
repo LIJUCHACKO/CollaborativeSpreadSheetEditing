@@ -54,9 +54,7 @@ func (h *Hub) run() {
 			// In a real app, this should be handled safely with a mutex on the sheet
 			sheet := globalSheetManager.GetSheetBy(client.sheetID, client.projectName)
 			if sheet != nil {
-				sheet.mu.RLock()
-				payload, _ := json.Marshal(sheet)
-				sheet.mu.RUnlock()
+				payload, _ := json.Marshal(sheet.SnapshotForClient())
 
 				msg := &Message{
 					Type:    "INIT",
@@ -137,10 +135,8 @@ func (h *Hub) run() {
 					sheet := globalSheetManager.GetSheetBy(message.SheetID, message.Project)
 					if sheet != nil {
 						sheet.SetCell(update.Row, update.Col, update.Value, message.User)
-						// Broadcast updated sheet snapshot
-						sheet.mu.RLock()
-						payload, _ := json.Marshal(sheet)
-						sheet.mu.RUnlock()
+						// Broadcast updated sheet snapshot with constructed details
+						payload, _ := json.Marshal(sheet.SnapshotForClient())
 						toSend = &Message{
 							Type:    "ROW_COL_UPDATED",
 							SheetID: message.SheetID,
@@ -167,10 +163,8 @@ func (h *Hub) run() {
 					sheet := globalSheetManager.GetSheetBy(message.SheetID, message.Project)
 					if sheet != nil {
 						sheet.SetCellStyle(st.Row, st.Col, st.Background, st.Bold, st.Italic, message.User)
-						// Broadcast updated sheet snapshot
-						sheet.mu.RLock()
-						payload, _ := json.Marshal(sheet)
-						sheet.mu.RUnlock()
+						// Broadcast updated sheet snapshot with constructed details
+						payload, _ := json.Marshal(sheet.SnapshotForClient())
 						toSend = &Message{
 							Type:    "ROW_COL_UPDATED",
 							SheetID: message.SheetID,
@@ -191,10 +185,8 @@ func (h *Hub) run() {
 					sheet := globalSheetManager.GetSheetBy(message.SheetID, message.Project)
 					if sheet != nil {
 						if sheet.LockCell(req.Row, req.Col, message.User) {
-							// Broadcast full sheet state
-							sheet.mu.RLock()
-							payload, _ := json.Marshal(sheet)
-							sheet.mu.RUnlock()
+							// Broadcast full sheet state with constructed details
+							payload, _ := json.Marshal(sheet.SnapshotForClient())
 							toSend = &Message{
 								Type:    "ROW_COL_UPDATED",
 								SheetID: message.SheetID,
@@ -228,9 +220,7 @@ func (h *Hub) run() {
 					sheet := globalSheetManager.GetSheetBy(message.SheetID, message.Project)
 					if sheet != nil {
 						if sheet.UnlockCell(req.Row, req.Col, message.User) {
-							sheet.mu.RLock()
-							payload, _ := json.Marshal(sheet)
-							sheet.mu.RUnlock()
+							payload, _ := json.Marshal(sheet.SnapshotForClient())
 							toSend = &Message{
 								Type:    "ROW_COL_UPDATED",
 								SheetID: message.SheetID,
@@ -267,10 +257,8 @@ func (h *Hub) run() {
 					sheet := globalSheetManager.GetSheetBy(message.SheetID, message.Project)
 					if sheet != nil {
 						sheet.SetColWidth(update.Col, update.Width, message.User)
-						// Broadcast updated sheet snapshot
-						sheet.mu.RLock()
-						payload, _ := json.Marshal(sheet)
-						sheet.mu.RUnlock()
+						// Broadcast updated sheet snapshot with constructed details
+						payload, _ := json.Marshal(sheet.SnapshotForClient())
 						toSend = &Message{
 							Type:    "ROW_COL_UPDATED",
 							SheetID: message.SheetID,
@@ -294,10 +282,8 @@ func (h *Hub) run() {
 					sheet := globalSheetManager.GetSheetBy(message.SheetID, message.Project)
 					if sheet != nil {
 						sheet.SetRowHeight(update.Row, update.Height, message.User)
-						// Broadcast updated sheet snapshot
-						sheet.mu.RLock()
-						payload, _ := json.Marshal(sheet)
-						sheet.mu.RUnlock()
+						// Broadcast updated sheet snapshot with constructed details
+						payload, _ := json.Marshal(sheet.SnapshotForClient())
 						toSend = &Message{
 							Type:    "ROW_COL_UPDATED",
 							SheetID: message.SheetID,
@@ -322,10 +308,8 @@ func (h *Hub) run() {
 					if sheet != nil {
 						moved := sheet.MoveRowBelow(mv.FromRow, mv.TargetRow, message.User)
 						if moved {
-							// Broadcast updated sheet snapshot
-							sheet.mu.RLock()
-							payload, _ := json.Marshal(sheet)
-							sheet.mu.RUnlock()
+							// Broadcast updated sheet snapshot with constructed details
+							payload, _ := json.Marshal(sheet.SnapshotForClient())
 							toSend = &Message{
 								Type:    "ROW_MOVED",
 								SheetID: message.SheetID,
@@ -351,9 +335,7 @@ func (h *Hub) run() {
 					if sheet != nil {
 						moved := sheet.MoveColumnRight(mv.FromCol, mv.TargetCol, message.User)
 						if moved {
-							sheet.mu.RLock()
-							payload, _ := json.Marshal(sheet)
-							sheet.mu.RUnlock()
+							payload, _ := json.Marshal(sheet.SnapshotForClient())
 							toSend = &Message{
 								Type:    "COL_MOVED",
 								SheetID: message.SheetID,
@@ -378,9 +360,7 @@ func (h *Hub) run() {
 					if sheet != nil {
 						inserted := sheet.InsertRowBelow(ins.TargetRow, message.User)
 						if inserted {
-							sheet.mu.RLock()
-							payload, _ := json.Marshal(sheet)
-							sheet.mu.RUnlock()
+							payload, _ := json.Marshal(sheet.SnapshotForClient())
 							toSend = &Message{
 								Type:    "ROW_COL_UPDATED",
 								SheetID: message.SheetID,
@@ -405,9 +385,7 @@ func (h *Hub) run() {
 					if sheet != nil {
 						inserted := sheet.InsertColumnRight(ins.TargetCol, message.User)
 						if inserted {
-							sheet.mu.RLock()
-							payload, _ := json.Marshal(sheet)
-							sheet.mu.RUnlock()
+							payload, _ := json.Marshal(sheet.SnapshotForClient())
 							toSend = &Message{
 								Type:    "ROW_COL_UPDATED",
 								SheetID: message.SheetID,
@@ -419,6 +397,57 @@ func (h *Hub) run() {
 				} else {
 					log.Printf("Error unmarshalling INSERT_COL payload: %v", err)
 				}
+			} else if message.Type == "DELETE_ROW" {
+				if denyIfNotEditor() {
+					continue
+				}
+				var req struct {
+					Row  string `json:"row"`
+					User string `json:"user"`
+				}
+				if err := json.Unmarshal(message.Payload, &req); err == nil {
+					sheet := globalSheetManager.GetSheetBy(message.SheetID, message.Project)
+					if sheet != nil {
+						deleted := sheet.DeleteRowAt(req.Row, message.User)
+						if deleted {
+							payload, _ := json.Marshal(sheet.SnapshotForClient())
+							toSend = &Message{
+								Type:    "ROW_COL_UPDATED",
+								SheetID: message.SheetID,
+								Payload: payload,
+								User:    message.User,
+							}
+						}
+					}
+				} else {
+					log.Printf("Error unmarshalling DELETE_ROW payload: %v", err)
+				}
+			} else if message.Type == "DELETE_COL" {
+				if denyIfNotEditor() {
+					continue
+				}
+				var req struct {
+					Col  string `json:"col"`
+					User string `json:"user"`
+				}
+				if err := json.Unmarshal(message.Payload, &req); err == nil {
+					sheet := globalSheetManager.GetSheetBy(message.SheetID, message.Project)
+					if sheet != nil {
+						deleted := sheet.DeleteColumnAt(req.Col, message.User)
+						if deleted {
+							payload, _ := json.Marshal(sheet.SnapshotForClient())
+							toSend = &Message{
+								Type:    "ROW_COL_UPDATED",
+								SheetID: message.SheetID,
+								Payload: payload,
+								User:    message.User,
+							}
+						}
+					}
+				} else {
+					log.Printf("Error unmarshalling DELETE_COL payload: %v", err)
+				}
+
 			} else if message.Type == "SELECTION_COPIED" {
 				// Forward selection range/values only to the same user's clients within the sheet room
 				// Payload is forwarded as-is; clients will interpret it and render boundaries / clipboard

@@ -41,14 +41,17 @@ type Cell struct {
 }
 
 type AuditEntry struct {
-	Timestamp time.Time `json:"timestamp"`
-	User      string    `json:"user"`
-	Action    string    `json:"action"` // e.g., "EDIT_CELL", "CREATE_SHEET"
-	Details   string    `json:"details"`
-	Row       int       `json:"row,omitempty"`
-	Col       string    `json:"col,omitempty"`
-	OldValue  string    `json:"old_value,omitempty"` // Added for tracking previous value
-	NewValue  string    `json:"new_value,omitempty"` // Added for tracking new value
+	Timestamp      time.Time `json:"timestamp"`
+	User           string    `json:"user"`
+	Action         string    `json:"action"` // e.g., "EDIT_CELL", "CREATE_SHEET"
+	Details        string    `json:"details,omitempty"`
+	Row1           int       `json:"row,omitempty"`
+	Col1           string    `json:"col,omitempty"`
+	Row2           int       `json:"row,omitempty"`
+	Col2           string    `json:"col,omitempty"`
+	OldValue       string    `json:"old_value,omitempty"`       // Added for tracking previous value
+	NewValue       string    `json:"new_value,omitempty"`       // Added for tracking new value
+	ChangeReversed bool      `json:"change_reversed,omitempty"` // Indicates if the change was reversed by owner later default value is false
 }
 
 type Permissions struct {
@@ -233,12 +236,11 @@ func (sm *SheetManager) CreateSheet(name, owner, projectName string) *Sheet {
 		AuditLog: []AuditEntry{},
 	}
 
-	// Initial Audit
+	// Initial Audit (details left empty for persistence)
 	sheet.AuditLog = append(sheet.AuditLog, AuditEntry{
 		Timestamp: time.Now(),
 		User:      owner,
 		Action:    "CREATE_SHEET",
-		Details:   "Created sheet " + name,
 	})
 
 	sm.sheets[sheetKey(projectName, id)] = sheet
@@ -350,25 +352,25 @@ func (s *Sheet) SetCell(row, col, value, user string) {
 	s.Data[row][col] = Cell{Value: value, User: user, Locked: currentVal.Locked, LockedBy: currentVal.LockedBy, Background: currentVal.Background, Bold: currentVal.Bold, Italic: currentVal.Italic}
 	if exists {
 		s.AuditLog = append(s.AuditLog, AuditEntry{
-			Timestamp: time.Now(),
-			User:      user,
-			Action:    "EDIT_CELL",
-			Details:   "Changed cell " + row + "," + col + " from " + firstNChar(currentVal.Value, 10) + " to " + firstNChar(value, 10),
-			Row:       atoiSafe(row),
-			Col:       col,
-			OldValue:  currentVal.Value,
-			NewValue:  value,
+			Timestamp:      time.Now(),
+			User:           user,
+			Action:         "EDIT_CELL",
+			Row1:           atoiSafe(row),
+			Col1:           col,
+			OldValue:       currentVal.Value,
+			NewValue:       value,
+			ChangeReversed: false,
 		})
 	} else {
 		s.AuditLog = append(s.AuditLog, AuditEntry{
-			Timestamp: time.Now(),
-			User:      user,
-			Action:    "EDIT_CELL",
-			Details:   "Set cell " + row + "," + col + " to " + firstNChar(value, 10),
-			Row:       atoiSafe(row),
-			Col:       col,
-			OldValue:  "",
-			NewValue:  value,
+			Timestamp:      time.Now(),
+			User:           user,
+			Action:         "EDIT_CELL",
+			Row1:           atoiSafe(row),
+			Col1:           col,
+			OldValue:       "",
+			NewValue:       value,
+			ChangeReversed: false,
 		})
 	}
 
@@ -401,21 +403,21 @@ func (s *Sheet) SetCellStyle(row, col, background string, bold, italic bool, use
 
 	if exists {
 		s.AuditLog = append(s.AuditLog, AuditEntry{
-			Timestamp: time.Now(),
-			User:      user,
-			Action:    "STYLE_CELL",
-			Details:   "Updated style for cell " + row + "," + col,
-			Row:       atoiSafe(row),
-			Col:       col,
+			Timestamp:      time.Now(),
+			User:           user,
+			Action:         "STYLE_CELL",
+			Row1:           atoiSafe(row),
+			Col1:           col,
+			ChangeReversed: false,
 		})
 	} else {
 		s.AuditLog = append(s.AuditLog, AuditEntry{
-			Timestamp: time.Now(),
-			User:      user,
-			Action:    "STYLE_CELL",
-			Details:   "Set style for new cell " + row + "," + col,
-			Row:       atoiSafe(row),
-			Col:       col,
+			Timestamp:      time.Now(),
+			User:           user,
+			Action:         "STYLE_CELL",
+			Row1:           atoiSafe(row),
+			Col1:           col,
+			ChangeReversed: false,
 		})
 	}
 	s.mu.Unlock()
@@ -454,12 +456,12 @@ func (s *Sheet) LockCell(row, col, user string) bool {
 	cell.LockedBy = user
 	s.Data[row][col] = cell
 	s.AuditLog = append(s.AuditLog, AuditEntry{
-		Timestamp: time.Now(),
-		User:      user,
-		Action:    "LOCK_CELL",
-		Details:   "Locked cell " + row + "," + col,
-		Row:       atoiSafe(row),
-		Col:       col,
+		Timestamp:      time.Now(),
+		User:           user,
+		Action:         "LOCK_CELL",
+		Row1:           atoiSafe(row),
+		Col1:           col,
+		ChangeReversed: false,
 	})
 	// Save after unlock via manager
 	go globalSheetManager.SaveSheet(s)
@@ -484,12 +486,12 @@ func (s *Sheet) UnlockCell(row, col, user string) bool {
 	cell.LockedBy = ""
 	s.Data[row][col] = cell
 	s.AuditLog = append(s.AuditLog, AuditEntry{
-		Timestamp: time.Now(),
-		User:      user,
-		Action:    "UNLOCK_CELL",
-		Details:   "Unlocked cell " + row + "," + col,
-		Row:       atoiSafe(row),
-		Col:       col,
+		Timestamp:      time.Now(),
+		User:           user,
+		Action:         "UNLOCK_CELL",
+		Row1:           atoiSafe(row),
+		Col1:           col,
+		ChangeReversed: false,
 	})
 	// Save after unlock via manager
 	go globalSheetManager.SaveSheet(s)
@@ -504,13 +506,6 @@ func (s *Sheet) SetColWidth(col string, width int, user string) {
 	}
 	s.ColWidths[col] = width
 
-	s.AuditLog = append(s.AuditLog, AuditEntry{
-		Timestamp: time.Now(),
-		User:      user,
-		Action:    "RESIZE_COL",
-		Details:   "Set width of column " + col + " to " + itoa(width),
-		Col:       col,
-	})
 	s.mu.Unlock()
 
 	globalSheetManager.SaveSheet(s)
@@ -523,13 +518,6 @@ func (s *Sheet) SetRowHeight(row string, height int, user string) {
 	}
 	s.RowHeights[row] = height
 
-	s.AuditLog = append(s.AuditLog, AuditEntry{
-		Timestamp: time.Now(),
-		User:      user,
-		Action:    "RESIZE_ROW",
-		Details:   "Set height of row " + row + " to " + itoa(height),
-		Row:       atoiSafe(row),
-	})
 	s.mu.Unlock()
 
 	globalSheetManager.SaveSheet(s)
@@ -572,13 +560,9 @@ func (s *Sheet) UpdatePermissions(editors []string, performedBy string) bool {
 	}
 
 	s.Permissions.Editors = editors
-	s.AuditLog = append(s.AuditLog, AuditEntry{
-		Timestamp: time.Now(),
-		User:      performedBy,
-		Action:    "UPDATE_PERMISSIONS",
-		Details:   fmt.Sprintf("Editors: %v", editors),
-	})
 	go globalSheetManager.SaveSheet(s)
+	// Log only in project audit
+	globalProjectAuditManager.Append(s.ProjectName, performedBy, "UPDATE_SHEET_PERMISSIONS", fmt.Sprintf("For Sheet %s Editors: %v", s.ID, editors))
 	return true
 }
 
@@ -606,13 +590,9 @@ func (s *Sheet) TransferOwnership(newOwner, performedBy string) bool {
 	if !found {
 		s.Permissions.Editors = append(s.Permissions.Editors, newOwner)
 	}
-	s.AuditLog = append(s.AuditLog, AuditEntry{
-		Timestamp: time.Now(),
-		User:      performedBy,
-		Action:    "TRANSFER_OWNERSHIP",
-		Details:   fmt.Sprintf("Owner changed from %s to %s", old, newOwner),
-	})
 	go globalSheetManager.SaveSheet(s)
+	// Log only in project audit
+	globalProjectAuditManager.Append(s.ProjectName, performedBy, "TRANSFER_SHEET_OWNERSHIP", fmt.Sprintf("For Sheet %s Owner changed from %s to %s", s.ID, old, newOwner))
 	return true
 }
 
@@ -623,7 +603,6 @@ func (s *Sheet) InsertRowBelow(targetRowStr, user string) bool {
 	if _, err := fmt.Sscanf(targetRowStr, "%d", &targetRow); err != nil {
 		return false
 	}
-
 	insertRow := targetRow + 1
 
 	s.mu.Lock()
@@ -685,19 +664,86 @@ func (s *Sheet) InsertRowBelow(targetRowStr, user string) bool {
 	if h, ok := s.RowHeights[targetRowStr]; ok {
 		s.RowHeights[newKey] = h
 	}
+	// Adjust audit log row references for rows at or below the inserted position
+	s.adjustAuditRowsOnInsert(insertRow)
 
 	s.AuditLog = append(s.AuditLog, AuditEntry{
 		Timestamp: time.Now(),
 		User:      user,
 		Action:    "INSERT_ROW",
-		Details:   "Inserted row " + newKey + " below row " + targetRowStr,
+		Row1:      insertRow,
 	})
-
-	// Adjust audit log row references for rows at or below the inserted position
-	s.adjustAuditRowsOnInsert(insertRow)
 
 	s.mu.Unlock()
 
+	globalSheetManager.SaveSheet(s)
+	return true
+}
+
+// DeleteRowAt removes the row at rowStr and shifts subsequent rows up by one
+func (s *Sheet) DeleteRowAt(rowStr, user string) bool {
+	var row int
+	if _, err := fmt.Sscanf(rowStr, "%d", &row); err != nil || row <= 0 {
+		return false
+	}
+	s.mu.Lock()
+	// Determine max row
+	maxRow := 0
+	for rowKey := range s.Data {
+		var r int
+		if _, err := fmt.Sscanf(rowKey, "%d", &r); err == nil {
+			if r > maxRow {
+				maxRow = r
+			}
+		}
+	}
+	// Remove the target row
+	delete(s.Data, rowStr)
+	// Shift rows [row+1..maxRow] up by 1
+	for r := row + 1; r <= maxRow; r++ {
+		fromKey := itoa(r)
+		toKey := itoa(r - 1)
+		if rowData, ok := s.Data[fromKey]; ok {
+			delete(s.Data, fromKey)
+			s.Data[toKey] = rowData
+		} else {
+			delete(s.Data, toKey)
+		}
+	}
+	// RowHeights shift
+	if s.RowHeights == nil {
+		s.RowHeights = make(map[string]int)
+	}
+	maxHeightRow := 0
+	for rowKey := range s.RowHeights {
+		var r int
+		if _, err := fmt.Sscanf(rowKey, "%d", &r); err == nil {
+			if r > maxHeightRow {
+				maxHeightRow = r
+			}
+		}
+	}
+	delete(s.RowHeights, rowStr)
+	for r := row + 1; r <= maxHeightRow; r++ {
+		fromKey := itoa(r)
+		toKey := itoa(r - 1)
+		if h, ok := s.RowHeights[fromKey]; ok {
+			delete(s.RowHeights, fromKey)
+			s.RowHeights[toKey] = h
+		} else {
+			delete(s.RowHeights, toKey)
+		}
+	}
+	// Adjust audit logs for deletion
+	s.adjustAuditRowsOnDelete(row)
+	s.AuditLog = append(s.AuditLog, AuditEntry{
+		Timestamp: time.Now(),
+		User:      user,
+		Action:    "DELETE_ROW",
+		Row1:      row,
+	})
+
+	s.mu.Unlock()
 	globalSheetManager.SaveSheet(s)
 	return true
 }
@@ -832,7 +878,8 @@ func (s *Sheet) MoveRowBelow(fromRowStr, targetRowStr, user string) bool {
 		Timestamp: time.Now(),
 		User:      user,
 		Action:    "MOVE_ROW",
-		Details:   fmt.Sprintf("Moved row %d to below row %d", fromRow, targetRow),
+		Row1:      fromRow,
+		Row2:      destIndex,
 	})
 
 	// Adjust audit log rows according to move mapping
@@ -991,7 +1038,8 @@ func (s *Sheet) MoveColumnRight(fromColStr, targetColStr, user string) bool {
 		Timestamp: time.Now(),
 		User:      user,
 		Action:    "MOVE_COL",
-		Details:   fmt.Sprintf("Moved column %s to right of column %s", fromColStr, targetColStr),
+		Col1:      fromColStr,
+		Col2:      toColLabel(destIdx),
 	})
 
 	// Adjust audit log columns according to move mapping
@@ -1101,19 +1149,91 @@ func (s *Sheet) InsertColumnRight(targetColStr, user string) bool {
 	if w, ok := s.ColWidths[targetColStr]; ok {
 		s.ColWidths[newLabel] = w
 	}
-
-	s.AuditLog = append(s.AuditLog, AuditEntry{
-		Timestamp: time.Now(),
-		User:      user,
-		Action:    "INSERT_COL",
-		Details:   "Inserted column " + newLabel + " to the right of column " + targetColStr,
-	})
-
 	// Adjust audit log column references for columns at or beyond the inserted position
 	s.adjustAuditColsOnInsert(insertIdx)
 
+	s.AuditLog = append(s.AuditLog, AuditEntry{
+		Timestamp:      time.Now(),
+		User:           user,
+		Action:         "INSERT_COL",
+		Col1:           newLabel,
+		ChangeReversed: false,
+	})
+
 	s.mu.Unlock()
 
+	globalSheetManager.SaveSheet(s)
+	return true
+}
+
+// DeleteColumnAt removes a column by label and shifts subsequent columns left by one
+func (s *Sheet) DeleteColumnAt(colStr, user string) bool {
+	insertIdx := colLabelToIndex(colStr)
+	if insertIdx <= 0 {
+		return false
+	}
+	s.mu.Lock()
+	// Determine max column index
+	maxIdx := 0
+	for _, rowMap := range s.Data {
+		for col := range rowMap {
+			if idx := colLabelToIndex(col); idx > maxIdx {
+				maxIdx = idx
+			}
+		}
+	}
+	// Remove target column
+	for _, rowMap := range s.Data {
+		delete(rowMap, colStr)
+	}
+	// Shift [insertIdx+1..maxIdx] left by 1
+	for idx := insertIdx + 1; idx <= maxIdx; idx++ {
+		fromLabel := indexToColLabel(idx)
+		toLabel := indexToColLabel(idx - 1)
+		for rowKey, rowMap := range s.Data {
+			if cell, ok := rowMap[fromLabel]; ok {
+				if s.Data[rowKey] == nil {
+					s.Data[rowKey] = make(map[string]Cell)
+				}
+				rowMap[toLabel] = cell
+				delete(rowMap, fromLabel)
+			} else {
+				delete(rowMap, toLabel)
+			}
+		}
+	}
+	// Shift ColWidths
+	if s.ColWidths == nil {
+		s.ColWidths = make(map[string]int)
+	}
+	maxWidthIdx := 0
+	for col := range s.ColWidths {
+		if idx := colLabelToIndex(col); idx > maxWidthIdx {
+			maxWidthIdx = idx
+		}
+	}
+	delete(s.ColWidths, colStr)
+	for idx := insertIdx + 1; idx <= maxWidthIdx; idx++ {
+		fromLabel := indexToColLabel(idx)
+		toLabel := indexToColLabel(idx - 1)
+		if w, ok := s.ColWidths[fromLabel]; ok {
+			delete(s.ColWidths, fromLabel)
+			s.ColWidths[toLabel] = w
+		} else {
+			delete(s.ColWidths, toLabel)
+		}
+	}
+	// Adjust audit logs for deletion
+	s.adjustAuditColsOnDelete(insertIdx)
+	s.AuditLog = append(s.AuditLog, AuditEntry{
+		Timestamp:      time.Now(),
+		User:           user,
+		Action:         "DELETE_COL",
+		Col1:           colStr,
+		ChangeReversed: false,
+	})
+
+	s.mu.Unlock()
 	globalSheetManager.SaveSheet(s)
 	return true
 }
@@ -1167,25 +1287,25 @@ var (
 
 // ensureEntryCoords tries to ensure Row/Col fields are populated for an entry by parsing Details if needed
 func ensureEntryCoords(e *AuditEntry) {
-	if e.Row == 0 || e.Col == "" {
+	if e.Row1 == 0 || e.Col1 == "" {
 		if m := reCell.FindStringSubmatch(e.Details); len(m) == 3 {
 			var r int
 			_, _ = fmt.Sscanf(m[1], "%d", &r)
-			e.Row = r
-			e.Col = m[2]
+			e.Row1 = r
+			e.Col1 = m[2]
 			return
 		}
 	}
-	if e.Row == 0 {
+	if e.Row1 == 0 {
 		if m := reRow.FindStringSubmatch(e.Details); len(m) == 2 {
 			var r int
 			_, _ = fmt.Sscanf(m[1], "%d", &r)
-			e.Row = r
+			e.Row1 = r
 		}
 	}
-	if e.Col == "" {
+	if e.Col1 == "" {
 		if m := reCol.FindStringSubmatch(e.Details); len(m) == 2 {
-			e.Col = m[1]
+			e.Col1 = m[1]
 		}
 	}
 }
@@ -1193,15 +1313,17 @@ func ensureEntryCoords(e *AuditEntry) {
 // replaceDetailCoords updates the coordinates present in Details if patterns are found
 func replaceDetailCoords(details string, newRow int, newCol string) string {
 	updated := details
-	if newRow > 0 && reRow.MatchString(updated) {
-		updated = reRow.ReplaceAllStringFunc(updated, func(s string) string {
-			return reRow.ReplaceAllString(s, fmt.Sprintf("row %d", newRow))
-		})
+	// Replace only the first occurrence of row and column to reflect the entry's coordinates
+	if newRow > 0 {
+		if loc := reRow.FindStringIndex(updated); loc != nil {
+			// Replace entire match with "row <newRow>"
+			updated = updated[:loc[0]] + fmt.Sprintf("row %d", newRow) + updated[loc[1]:]
+		}
 	}
-	if newCol != "" && reCol.MatchString(updated) {
-		updated = reCol.ReplaceAllStringFunc(updated, func(s string) string {
-			return reCol.ReplaceAllString(s, fmt.Sprintf("column %s", newCol))
-		})
+	if newCol != "" {
+		if loc := reCol.FindStringIndex(updated); loc != nil {
+			updated = updated[:loc[0]] + fmt.Sprintf("column %s", newCol) + updated[loc[1]:]
+		}
 	}
 	if newRow > 0 || newCol != "" {
 		if reCell.MatchString(updated) {
@@ -1223,18 +1345,110 @@ func replaceDetailCoords(details string, newRow int, newCol string) string {
 	return updated
 }
 
+// computeAuditDetails constructs a user-friendly details string for an audit entry
+// without persisting it. Uses structured fields from the entry and, when needed,
+// sheet context (e.g., sheet name).
+func computeAuditDetails(s *Sheet, e AuditEntry) string {
+	switch e.Action {
+	case "CREATE_SHEET":
+		if s != nil {
+			return "Created sheet " + s.Name
+		}
+		return "Created sheet"
+	case "EDIT_CELL":
+		r := e.Row1
+		c := e.Col1
+		if e.OldValue == "" {
+			return fmt.Sprintf("Set cell %d,%s to %s", r, c, firstNChar(e.NewValue, 10))
+		}
+		return fmt.Sprintf("Changed cell %d,%s from %s to %s", r, c, firstNChar(e.OldValue, 10), firstNChar(e.NewValue, 10))
+	case "STYLE_CELL":
+		return fmt.Sprintf("Updated style for cell %d,%s", e.Row1, e.Col1)
+	case "LOCK_CELL":
+		return fmt.Sprintf("Locked cell %d,%s", e.Row1, e.Col1)
+	case "UNLOCK_CELL":
+		return fmt.Sprintf("Unlocked cell %d,%s", e.Row1, e.Col1)
+	case "INSERT_ROW":
+		return fmt.Sprintf("Inserted row %d", e.Row1)
+	case "DELETE_ROW":
+		return fmt.Sprintf("Deleted row %d", e.Row1)
+	case "MOVE_ROW":
+		if e.Row2 > 0 {
+			return fmt.Sprintf("Moved row %d to row %d", e.Row1, e.Row2)
+		}
+		return fmt.Sprintf("Moved row %d", e.Row1)
+	case "INSERT_COL":
+		return fmt.Sprintf("Inserted column %s", e.Col1)
+	case "DELETE_COL":
+		return fmt.Sprintf("Deleted column %s", e.Col1)
+	case "MOVE_COL":
+		if e.Col2 != "" {
+			return fmt.Sprintf("Moved column %s to right of column %s", e.Col1, e.Col2)
+		}
+		return fmt.Sprintf("Moved column %s", e.Col1)
+	case "UPDATE_PERMISSIONS":
+		return "Updated permissions"
+	case "TRANSFER_OWNERSHIP":
+		return "Transferred ownership"
+	default:
+		return e.Action
+	}
+}
+
+// SnapshotForClient builds a copy of the sheet with audit Details filled for response
+// without mutating or leaking internal state. This snapshot is safe to marshal/send.
+func (s *Sheet) SnapshotForClient() *Sheet {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// Deep copy data
+	dataCopy := make(map[string]map[string]Cell, len(s.Data))
+	for r, cols := range s.Data {
+		inner := make(map[string]Cell, len(cols))
+		for c, cell := range cols {
+			inner[c] = cell
+		}
+		dataCopy[r] = inner
+	}
+	colWidthsCopy := make(map[string]int, len(s.ColWidths))
+	for k, v := range s.ColWidths {
+		colWidthsCopy[k] = v
+	}
+	rowHeightsCopy := make(map[string]int, len(s.RowHeights))
+	for k, v := range s.RowHeights {
+		rowHeightsCopy[k] = v
+	}
+	auditCopy := make([]AuditEntry, 0, len(s.AuditLog))
+	for _, e := range s.AuditLog {
+		e2 := e
+		e2.Details = computeAuditDetails(s, e)
+		auditCopy = append(auditCopy, e2)
+	}
+
+	snap := &Sheet{
+		ID:          s.ID,
+		Name:        s.Name,
+		Owner:       s.Owner,
+		ProjectName: s.ProjectName,
+		Data:        dataCopy,
+		AuditLog:    auditCopy,
+		Permissions: Permissions{Editors: append([]string(nil), s.Permissions.Editors...)},
+		ColWidths:   colWidthsCopy,
+		RowHeights:  rowHeightsCopy,
+	}
+	return snap
+}
+
 // adjustAuditRowsOnInsert increments row references for entries at or below insertRow
 func (s *Sheet) adjustAuditRowsOnInsert(insertRow int) {
 	for i := range s.AuditLog {
 		e := &s.AuditLog[i]
-		oldRow := e.Row
+		oldRow := e.Row1
 		ensureEntryCoords(e)
-		if e.Row >= insertRow && e.Row > 0 {
-			e.Row = e.Row + 1
+		if e.Row1 >= insertRow && e.Row1 > 0 {
+			e.Row1 = e.Row1 + 1
 		}
-		if e.Row != oldRow {
-			e.Details = replaceDetailCoords(e.Details, e.Row, "")
-		}
+		_ = oldRow // details left empty; no string rewrite
 	}
 }
 
@@ -1243,26 +1457,24 @@ func (s *Sheet) adjustAuditRowsOnMove(fromRow, destIndex int) {
 	for i := range s.AuditLog {
 		e := &s.AuditLog[i]
 		ensureEntryCoords(e)
-		if e.Row == 0 {
+		if e.Row1 == 0 {
 			continue
 		}
-		old := e.Row
+		old := e.Row1
 		if fromRow < destIndex {
-			if e.Row == fromRow {
-				e.Row = destIndex
-			} else if e.Row > fromRow && e.Row <= destIndex {
-				e.Row = e.Row - 1
+			if e.Row1 == fromRow {
+				e.Row1 = destIndex
+			} else if e.Row1 > fromRow && e.Row1 <= destIndex {
+				e.Row1 = e.Row1 - 1
 			}
 		} else if fromRow > destIndex {
-			if e.Row == fromRow {
-				e.Row = destIndex
-			} else if e.Row >= destIndex && e.Row < fromRow {
-				e.Row = e.Row + 1
+			if e.Row1 == fromRow {
+				e.Row1 = destIndex
+			} else if e.Row1 >= destIndex && e.Row1 < fromRow {
+				e.Row1 = e.Row1 + 1
 			}
 		}
-		if e.Row != old {
-			e.Details = replaceDetailCoords(e.Details, e.Row, "")
-		}
+		_ = old // details left empty; no string rewrite
 	}
 }
 
@@ -1270,16 +1482,14 @@ func (s *Sheet) adjustAuditRowsOnMove(fromRow, destIndex int) {
 func (s *Sheet) adjustAuditColsOnInsert(insertIdx int) {
 	for i := range s.AuditLog {
 		e := &s.AuditLog[i]
-		oldCol := e.Col
+		oldCol := e.Col1
 		ensureEntryCoords(e)
-		idx := colLabelToIndex(e.Col)
+		idx := colLabelToIndex(e.Col1)
 		if idx >= insertIdx && idx > 0 {
 			idx = idx + 1
-			e.Col = indexToColLabel(idx)
+			e.Col1 = indexToColLabel(idx)
 		}
-		if e.Col != oldCol {
-			e.Details = replaceDetailCoords(e.Details, 0, e.Col)
-		}
+		_ = oldCol // details left empty; no string rewrite
 	}
 }
 
@@ -1288,7 +1498,7 @@ func (s *Sheet) adjustAuditColsOnMove(fromIdx, destIdx int) {
 	for i := range s.AuditLog {
 		e := &s.AuditLog[i]
 		ensureEntryCoords(e)
-		idx := colLabelToIndex(e.Col)
+		idx := colLabelToIndex(e.Col1)
 		if idx == 0 {
 			continue
 		}
@@ -1307,11 +1517,40 @@ func (s *Sheet) adjustAuditColsOnMove(fromIdx, destIdx int) {
 			}
 		}
 		if idx != oldIdx {
-			e.Col = indexToColLabel(idx)
-			e.Details = replaceDetailCoords(e.Details, 0, e.Col)
+			e.Col1 = indexToColLabel(idx)
 		}
 	}
 }
+
+// adjustAuditRowsOnDelete decrements row references for entries strictly above deleted row
+func (s *Sheet) adjustAuditRowsOnDelete(deleteRow int) {
+	for i := range s.AuditLog {
+		e := &s.AuditLog[i]
+		oldRow := e.Row1
+		ensureEntryCoords(e)
+		if e.Row1 > deleteRow {
+			e.Row1 = e.Row1 - 1
+		}
+		_ = oldRow // details left empty; no string rewrite
+	}
+}
+
+// adjustAuditColsOnDelete decrements column references for entries strictly right of deleted column
+func (s *Sheet) adjustAuditColsOnDelete(deleteIdx int) {
+	for i := range s.AuditLog {
+		e := &s.AuditLog[i]
+		oldCol := e.Col1
+		ensureEntryCoords(e)
+		idx := colLabelToIndex(e.Col1)
+		if idx > deleteIdx {
+			idx = idx - 1
+			e.Col1 = indexToColLabel(idx)
+		}
+		_ = oldCol // details left empty; no string rewrite
+	}
+}
+
+// (Removed) MoveColumnToIndex: undo now uses MOVE_COL with computed target column.
 
 func (sm *SheetManager) ListSheets() []*Sheet {
 	sm.mu.RLock()
