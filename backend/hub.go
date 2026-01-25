@@ -126,15 +126,16 @@ func (h *Hub) run() {
 				}
 				// Parse payload
 				var update struct {
-					Row   string `json:"row"`
-					Col   string `json:"col"`
-					Value string `json:"value"`
-					User  string `json:"user"`
+					Row    string `json:"row"`
+					Col    string `json:"col"`
+					Value  string `json:"value"`
+					User   string `json:"user"`
+					Revert bool   `json:"revert,omitempty"`
 				}
 				if err := json.Unmarshal(message.Payload, &update); err == nil {
 					sheet := globalSheetManager.GetSheetBy(message.SheetID, message.Project)
 					if sheet != nil {
-						sheet.SetCell(update.Row, update.Col, update.Value, message.User)
+						sheet.SetCell(update.Row, update.Col, update.Value, message.User, update.Revert)
 						// Broadcast updated sheet snapshot with constructed details
 						payload, _ := json.Marshal(sheet.SnapshotForClient())
 						toSend = &Message{

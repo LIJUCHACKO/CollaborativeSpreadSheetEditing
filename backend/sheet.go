@@ -44,14 +44,14 @@ type AuditEntry struct {
 	Timestamp      time.Time `json:"timestamp"`
 	User           string    `json:"user"`
 	Action         string    `json:"action"` // e.g., "EDIT_CELL", "CREATE_SHEET"
-	Details        string    `json:"details,omitempty"`
-	Row1           int       `json:"row,omitempty"`
-	Col1           string    `json:"col,omitempty"`
-	Row2           int       `json:"row,omitempty"`
-	Col2           string    `json:"col,omitempty"`
-	OldValue       string    `json:"old_value,omitempty"`       // Added for tracking previous value
-	NewValue       string    `json:"new_value,omitempty"`       // Added for tracking new value
-	ChangeReversed bool      `json:"change_reversed,omitempty"` // Indicates if the change was reversed by owner later default value is false
+	Details        string    `json:"details"`
+	Row1           int       `json:"row"`
+	Col1           string    `json:"col"`
+	Row2           int       `json:"row2"`
+	Col2           string    `json:"col2"`
+	OldValue       string    `json:"old_value"`       // previous value
+	NewValue       string    `json:"new_value"`       // new value
+	ChangeReversed bool      `json:"change_reversed"` // true if a revert operation logged
 }
 
 type Permissions struct {
@@ -330,7 +330,7 @@ func generateID() string {
 	return time.Now().Format("20060102150405")
 }
 
-func (s *Sheet) SetCell(row, col, value, user string) {
+func (s *Sheet) SetCell(row, col, value, user string, reverted bool) {
 	s.mu.Lock()
 	// defer s.mu.Unlock() // MOVED to explicit unlock before Save()
 
@@ -350,28 +350,43 @@ func (s *Sheet) SetCell(row, col, value, user string) {
 	}
 	// Preserve existing lock metadata on write
 	s.Data[row][col] = Cell{Value: value, User: user, Locked: currentVal.Locked, LockedBy: currentVal.LockedBy, Background: currentVal.Background, Bold: currentVal.Bold, Italic: currentVal.Italic}
-	if exists {
-		s.AuditLog = append(s.AuditLog, AuditEntry{
-			Timestamp:      time.Now(),
-			User:           user,
-			Action:         "EDIT_CELL",
-			Row1:           atoiSafe(row),
-			Col1:           col,
-			OldValue:       currentVal.Value,
-			NewValue:       value,
-			ChangeReversed: false,
-		})
+	if reverted {
+		// Mark the original EDIT_CELL entry as reverted instead of appending a new one
+		// Find the latest matching edit for this cell where NewValue equals the current cell value prior to revert
+		prevNew := currentVal.Value
+		r1 := atoiSafe(row)
+		for i := len(s.AuditLog) - 1; i >= 0; i-- {
+			e := &s.AuditLog[i]
+			if e.Action == "EDIT_CELL" && e.Row1 == r1 && e.Col1 == col && e.NewValue == prevNew && !e.ChangeReversed {
+				e.ChangeReversed = true
+				break
+			}
+		}
+		// Do not append a new audit entry for revert
 	} else {
-		s.AuditLog = append(s.AuditLog, AuditEntry{
-			Timestamp:      time.Now(),
-			User:           user,
-			Action:         "EDIT_CELL",
-			Row1:           atoiSafe(row),
-			Col1:           col,
-			OldValue:       "",
-			NewValue:       value,
-			ChangeReversed: false,
-		})
+		if exists {
+			s.AuditLog = append(s.AuditLog, AuditEntry{
+				Timestamp:      time.Now(),
+				User:           user,
+				Action:         "EDIT_CELL",
+				Row1:           atoiSafe(row),
+				Col1:           col,
+				OldValue:       currentVal.Value,
+				NewValue:       value,
+				ChangeReversed: false,
+			})
+		} else {
+			s.AuditLog = append(s.AuditLog, AuditEntry{
+				Timestamp:      time.Now(),
+				User:           user,
+				Action:         "EDIT_CELL",
+				Row1:           atoiSafe(row),
+				Col1:           col,
+				OldValue:       "",
+				NewValue:       value,
+				ChangeReversed: false,
+			})
+		}
 	}
 
 	s.mu.Unlock() // Unlock BEFORE saving to avoid deadlock (Save -> MarshalJSON -> tries RLock)

@@ -1,3 +1,4 @@
+    
 import React, { useEffect, useState, useRef, useMemo } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import {
@@ -85,6 +86,15 @@ export default function Sheet() {
     const [chatInput, setChatInput] = useState('');
     const [chatRecipient, setChatRecipient] = useState('all');
     const [allUsers, setAllUsers] = useState([]);
+    // Ref for chat panel body
+    const chatBodyRef = useRef(null);
+
+    // Scroll chat to bottom on open/init and when chatMessages change
+    useEffect(() => {
+        if (chatBodyRef.current) {
+            chatBodyRef.current.scrollTop = chatBodyRef.current.scrollHeight;
+        }
+    }, [isSidebarOpen, chatMessages]);
     // Highlight selected audit log entry
     const [selectedAuditId, setSelectedAuditId] = useState(null);
     // Floating diff panel for audit value changes
@@ -1421,30 +1431,70 @@ export default function Sheet() {
                                 ←
                             </button>
                         </div>
-                        <div ref={auditLogRef} className="overflow-auto p-3" style={{ height: 'calc(70% - 56px)', overflowY: 'scroll' , opacity: 0.95}}>
+                        <div ref={auditLogRef} className="overflow-auto p-3" style={{ height: 'calc(70% - 56px)', overflowY: 'scroll' , opacity: 1 }}>
                             {auditLog.slice().reverse().map((entry, i) => {
                                 const ts = entry.timestamp ? new Date(entry.timestamp).toLocaleString() : '';
                                 const entryId = `${entry.timestamp || i}|${entry.user || ''}|${entry.action || ''}|${entry.details || ''}`;
                                 const isSelected = selectedAuditId === entryId;
+                                const canRevert = (
+                                    isOwner && 
+                                    entry && username !== entry.user && entry.action === 'EDIT_CELL' &&
+                                    Number.isInteger(entry.row) && entry.row > 0 && typeof entry.col === 'string' && entry.col &&
+                                    (data[`${entry.row}-${entry.col}`]?.value ?? '')?.toString() === (entry.new_value ?? '')?.toString() &&
+                                    (data[`${entry.row}-${entry.col}`]?.locked !== true)
+                                );
+                                const onRevert = (e) => {
+                                    e.stopPropagation();
+                                    if (!canRevert) return;
+                                    if (!ws.current || ws.current.readyState !== WebSocket.OPEN) return;
+                                    const row = String(entry.row);
+                                    const col = String(entry.col);
+                                    const oldVal = (entry.old_value ?? '').toString();
+                                    ws.current.send(JSON.stringify({
+                                        type: 'UPDATE_CELL',
+                                        sheet_id: id,
+                                        payload: { row, col, value: oldVal, user: username, revert: true }
+                                    }));
+                                    // Notify entry.user with a chat message
+                                    if (entry.user && username !== entry.user) {
+                                        const msg = `Your change to cell ${col}${row} was reverted by ${username}.`;
+                                        ws.current.send(JSON.stringify({
+                                            type: 'CHAT_MESSAGE',
+                                            sheet_id: id,
+                                            payload: {
+                                                text: msg,
+                                                user: username,
+                                                to: entry.user
+                                            }
+                                        }));
+                                    }
+                                };
                                 return (
                                     <div
                                         key={entryId}
-                                        className={`p-2 mb-2 rounded ${isSelected ? 'bg-indigo-100' : 'bg-white'} border opacity-100 `}
+                                        className={`p-2 mb-2 rounded border opacity-100 `}
                                         onClick={() => { setSelectedAuditId(entryId); navigateToCellFromDetails(entry); openDiffForEntry(entry); }}
                                         title={ts}
-                                        style={{ opacity: 1 }}
+                                        style={{ opacity: 1, backgroundColor: entry.change_reversed ? (isSelected ? '#e6e3dc' : '#fee2e2') : (isSelected ? '#beebeb' : '#ffffff') }}
                                     >
                                         <div className="d-flex justify-content-between" style={{ opacity: 1}} >
                                             <span className="fw-semibold small">{entry.user}</span>
                                             <span className="text-muted small">{ts}</span>
                                         </div>
-                                        <div className="small"><span className="badge bg-light text-dark me-2">{entry.action}</span>{entry.details}</div>
+                                        <div className="small d-flex align-items-center justify-content-between">
+                                            <div>
+                                                <span className="badge bg-light text-dark me-2">{entry.action}</span>{entry.details}
+                                            </div>
+                                            {canRevert && !entry.change_reversed && (
+                                                <button className="btn btn-sm btn-outline-danger ms-2" onClick={onRevert} title="Revert to previous value">Revert</button>
+                                            )}
+                                        </div>
                                     </div>
                                 );
                             })}
                             {auditLog.length === 0 && (
                                 <div className="text-center text-muted py-5">
-                                    <History className="mb-2" size={48} opacity={0.3} />
+                                    <History className="mb-2" size={48} opacity={1} />
                                     <p className="mb-0">No activity yet.</p>
                                 </div>
                             )}
@@ -2157,18 +2207,33 @@ export default function Sheet() {
                                     <span className="badge bg-light text-dark">{chatMessages.length}</span>
                                 </div>
                                 <div className="card-body p-2" style={{ maxHeight: 240, overflowY: 'auto' }}>
-                                    {chatMessages.length === 0 && (
-                                        <div className="text-muted small text-center py-2">No messages yet.</div>
-                                    )}
-                                    {chatMessages.map((m, idx) => (
-                                        <div key={`${m.timestamp || idx}-${m.user}-${idx}`} className="mb-2">
-                                            <div className="d-flex justify-content-between">
-                                                <span className="fw-semibold small">{m.user}{m.to && m.to !== 'all' ? ` → @${m.to}` : ''}</span>
-                                                <span className="text-muted small">{m.timestamp ? new Date(m.timestamp).toLocaleString() : ''}</span>
+                                    <div ref={chatBodyRef} style={{ maxHeight: 240, overflowY: 'auto' }}>
+                                        {chatMessages.length === 0 && (
+                                            <div className="text-muted small text-center py-2">No messages yet.</div>
+                                        )}
+                                        {chatMessages.map((m, idx) => (
+                                            <div 
+                                                key={`${m.timestamp || idx}-${m.user}-${idx}`} 
+                                                className={`mb-2 d-flex ${m.user === username ? 'justify-content-end' : 'justify-content-start'}`}
+                                            >
+                                                <div 
+                                                    style={{ 
+                                                        maxWidth: '80%', 
+                                                        background: m.user === username ? '#f7f5af' : '#f3f4f6', 
+                                                        borderRadius: '12px', 
+                                                        padding: '8px 12px',
+                                                        boxShadow: '0 1px 2px rgba(0,0,0,0.04)',
+                                                    }}
+                                                >
+                                                    <div className="d-flex justify-content-between align-items-center">
+                                                        <span className="fw-semibold small">{m.user === username ? 'me' : m.user}{m.to && m.to !== 'all' ? ` → ${m.to === username ? 'me' : m.to}` : ''}</span>
+                                                        <span className="text-muted" style={{ fontSize: '0.75em', marginLeft: 8 }}>{m.timestamp ? new Date(m.timestamp).toLocaleString() : ''}</span>
+                                                    </div>
+                                                    <div className="small">{m.text}</div>
+                                                </div>
                                             </div>
-                                            <div className="small">{m.text}</div>
-                                        </div>
-                                    ))}
+                                        ))}
+                                    </div>
                                 </div>
                                 <div className="card-footer p-2">
                                     <div className="input-group input-group-sm">
