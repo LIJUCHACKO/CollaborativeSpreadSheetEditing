@@ -19,7 +19,7 @@ import {
     Undo2,
     Redo2
 } from 'lucide-react';
-import { isSessionValid, clearAuth, getUsername, authenticatedFetch } from '../utils/auth';
+import { isSessionValid, clearAuth, getUsername, authenticatedFetch, apiUrl } from '../utils/auth';
 import 'bootstrap/dist/css/bootstrap.min.css';
 export default function Sheet() {
     const navigate = useNavigate();
@@ -267,6 +267,7 @@ export default function Sheet() {
         const anchorRowIndex = filteredRowHeaders.indexOf(anchorRow);
         if (anchorRowIndex < 0) return;
         const updates = {};
+        const changes = [];
         let hasConflict = false;
         // Prevent pasting into any locked destination cells using filtered row order
         for (let rOff = 0; rOff < copiedBlock.Rows; rOff++) {
@@ -318,7 +319,9 @@ export default function Sheet() {
                 if (!cLabel) continue;
                 const key = `${r}-${cLabel}`;
                 const value = copiedBlock.values[rOff][cOff] ?? '';
+                const oldValue = (data[key]?.value ?? '').toString();
                 updates[key] = { value, user: username };
+                changes.push({ row: String(r), col: String(cLabel), oldValue, newValue: (value ?? '').toString() });
             }
         }
 
@@ -331,14 +334,19 @@ export default function Sheet() {
             return next;
         });
 
+        // Record paste operation for undo/redo as a single batch
+        if (changes.length > 0) {
+            setUndoStack(prev => [...prev, { type: 'paste', changes }]);
+            setRedoStack([]);
+        }
+
         // Broadcast each cell update to server
         if (ws.current && ws.current.readyState === WebSocket.OPEN) {
             Object.entries(updates).forEach(([key, cell]) => {
-                if (cell.value !== '') {
-                    const [rowStr, colLabel] = key.split('-');
-                    const payload = { row: rowStr, col: colLabel, value: cell.value, user: username };
-                    ws.current.send(JSON.stringify({ type: 'UPDATE_CELL', sheet_id: id, payload }));
-                }
+                // Send even empty values to correctly overwrite
+                const [rowStr, colLabel] = key.split('-');
+                const payload = { row: rowStr, col: colLabel, value: cell.value, user: username };
+                ws.current.send(JSON.stringify({ type: 'UPDATE_CELL', sheet_id: id, payload }));
             });
         }
 
@@ -372,11 +380,24 @@ export default function Sheet() {
     const [colHeaderHeight, setColHeaderHeight] = useState(DEFAULT_COL_HEADER_HEIGHT);
     const dragRef = useRef({ type: null, label: null, startPos: 0, startSize: 0 });
 
+    // Floating script editor popup state
+    const [scriptPopup, setScriptPopup] = useState({ visible: false, x: 0, y: 0, row: null, col: null });
+    const openScriptPopup = (row, col, x, y) => {
+        if (!row || !col) return;
+        const key = `${row}-${col}`;
+        const existingScript = (data[key]?.script ?? '').toString();
+        setScriptText(existingScript);
+        setScriptPopup({ visible: true, x: Math.max(8, x), y: Math.max(8, y), row, col });
+    };
+    const closeScriptPopup = () => setScriptPopup({ visible: false, x: 0, y: 0, row: null, col: null });
+
+    // Toggle to show scripts instead of values (read-only mode)
+    const [showScripts, setShowScripts] = useState(false);
+
     const handleDownloadXlsx = async () => {
         try {
-            const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
             const projQS = projectName ? `&project=${encodeURIComponent(projectName)}` : '';
-            const res = await authenticatedFetch(`http://${host}:8080/api/export?sheet_id=${encodeURIComponent(id)}${projQS}`, {
+            const res = await authenticatedFetch(apiUrl(`/api/export?sheet_id=${encodeURIComponent(id)}${projQS}`), {
                 method: 'GET',
             });
 
@@ -422,14 +443,13 @@ export default function Sheet() {
         // Validate with server token immediately and fetch user preferences
         (async () => {
             try {
-                const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
-                const res = await authenticatedFetch(`http://${host}:8080/api/validate`);
+                const res = await authenticatedFetch(apiUrl('/api/validate'));
                 if (!res.ok) {
                     handleUnauthorized();
                     return;
                 }
                 // Load user preferences for visible rows/cols
-                const prefsRes = await authenticatedFetch(`http://${host}:8080/api/user/preferences`);
+                const prefsRes = await authenticatedFetch(apiUrl('/api/user/preferences'));
                 if (prefsRes.ok) {
                     const prefs = await prefsRes.json();
                     if (typeof prefs.visible_rows === 'number' && prefs.visible_rows > 0) {
@@ -463,9 +483,10 @@ export default function Sheet() {
         let shouldReconnect = true;
 
         function connectWS() {
-            const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
             const projQS = projectName ? `&project=${encodeURIComponent(projectName)}` : '';
-            const socket = new WebSocket(`ws://${host}:8080/ws?user=${encodeURIComponent(username)}&id=${id}${projQS}` );
+            const httpBase = apiUrl('/').replace(/\/$/, '');
+            const wsBase = httpBase.replace(/^http/, 'ws');
+            const socket = new WebSocket(`${wsBase}/ws?user=${encodeURIComponent(username)}&id=${id}${projQS}`);
 
             socket.onopen = () => {
                 console.log('Connected to WS');
@@ -585,8 +606,7 @@ export default function Sheet() {
         // Fetch users for chat recipient dropdown
         (async () => {
             try {
-                const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
-                const res = await authenticatedFetch(`http://${host}:8080/api/users`);
+                const res = await authenticatedFetch(apiUrl('/api/users'));
                 if (res.status === 401) {
                     handleUnauthorized();
                     return;
@@ -746,13 +766,32 @@ export default function Sheet() {
             // Move to redo stack
             setRedoStack(prev => [...prev, last]);
             setUndoStack(prev => prev.slice(0, -1));
+        } else if (last.type === 'paste') {
+            const { changes } = last;
+            // Apply local state for all changes (restore old values)
+            setData(prev => {
+                const next = { ...prev };
+                for (const ch of changes) {
+                    const key = `${ch.row}-${ch.col}`;
+                    next[key] = { ...(next[key] || {}), value: ch.oldValue, user: username };
+                }
+                return next;
+            });
+            // Send revert updates to server for all changes
+            if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+                for (const ch of changes) {
+                    ws.current.send(JSON.stringify({ type: 'UPDATE_CELL', sheet_id: id, payload: { row: String(ch.row), col: String(ch.col), value: ch.oldValue, user: username } }));
+                }
+            }
+            setRedoStack(prev => [...prev, last]);
+            setUndoStack(prev => prev.slice(0, -1));
         } else if (last.type === 'cell_script') {
             const { row, col, oldValue } = last;
             // Apply local state
             updateCellScriptState(row, col, oldValue, username);
             // Send to server
             if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-                ws.current.send(JSON.stringify({ type: 'UPDATE_CELL_SCRIPT', sheet_id: id, payload: { row, col, script: oldValue, user: username, revert: true } }));
+                ws.current.send(JSON.stringify({ type: 'UPDATE_CELL_SCRIPT', sheet_id: id, payload: { row, col, script: oldValue, user: username} }));
             }
             setRedoStack(prev => [...prev, last]);
             setUndoStack(prev => prev.slice(0, -1));
@@ -810,6 +849,25 @@ export default function Sheet() {
             updateCellState(row, col, newValue, username);
             if (ws.current && ws.current.readyState === WebSocket.OPEN) {
                 ws.current.send(JSON.stringify({ type: 'UPDATE_CELL', sheet_id: id, payload: { row, col, value: newValue, user: username } }));
+            }
+            setUndoStack(prev => [...prev, last]);
+            setRedoStack(prev => prev.slice(0, -1));
+        } else if (last.type === 'paste') {
+            const { changes } = last;
+            // Apply local state for all changes (reapply new values)
+            setData(prev => {
+                const next = { ...prev };
+                for (const ch of changes) {
+                    const key = `${ch.row}-${ch.col}`;
+                    next[key] = { ...(next[key] || {}), value: ch.newValue, user: username };
+                }
+                return next;
+            });
+            // Send updates to server for all changes
+            if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+                for (const ch of changes) {
+                    ws.current.send(JSON.stringify({ type: 'UPDATE_CELL', sheet_id: id, payload: { row: String(ch.row), col: String(ch.col), value: ch.newValue, user: username } }));
+                }
             }
             setUndoStack(prev => [...prev, last]);
             setRedoStack(prev => prev.slice(0, -1));
@@ -924,7 +982,7 @@ export default function Sheet() {
         setStyleBg(cell.background || '');
         setStyleBold(!!cell.bold);
         setStyleItalic(!!cell.italic);
-        setScriptText(cell.script || '');
+        //setScriptText(cell.script || '');
         editingOriginalScriptRef.current = (cell.script ?? '').toString();
     }, [ selectedRange, data]);
 
@@ -1334,7 +1392,7 @@ export default function Sheet() {
                                     navigate('/projects');
                                 }
                             }}
-                            className="btn btn-outline-primary btn-sm d-flex align-items-center"
+                            className="btn btn-outline-primary btn-sm d-flex align-items-center hover:bg-indigo-100 hover:shadow-md active:bg-indigo-200 active:scale-95 transition-all duration-100"
                         >
                             <ArrowLeft className="me-1" />
                         </button>
@@ -1379,7 +1437,7 @@ export default function Sheet() {
                 <div className="flex items-center justify-between px-4 h-16">
                     <div className="flex items-center gap-2">
                         <button
-                            className="px-3 py-1.5 text-sm rounded border border-gray-300 bg-white hover:bg-gray-100 flex items-center gap-2"
+                            className="px-3 py-1.5 text-sm rounded border border-gray-300 bg-white hover:bg-indigo-100 hover:shadow-md active:bg-indigo-200 active:scale-95 transition-all duration-100 flex items-center gap-2"
                             onClick={() => setShowFilters(v => !v)}
                             title="Toggle column filters"
                         >
@@ -1387,7 +1445,7 @@ export default function Sheet() {
                             {showFilters ? 'Hide Filters' : 'Show Filters'}
                         </button>
                         <button
-                            className="px-2 py-1.5 text-sm rounded border border-gray-300 bg-white hover:bg-gray-100 flex items-center gap-1"
+                            className="px-2 py-1.5 text-sm rounded border border-gray-300 bg-white hover:bg-indigo-100 hover:shadow-md active:bg-indigo-200 active:scale-95 transition-all duration-100 flex items-center gap-1"
                             onClick={doUndo}
                             disabled={!canEdit || undoStack.length === 0}
                             title="Undo (Ctrl+Z)"
@@ -1418,8 +1476,7 @@ export default function Sheet() {
                                     // persist preference
                                     (async () => {
                                         try {
-                                            const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
-                                            await authenticatedFetch(`http://${host}:8080/api/user/preferences`, {
+                                            await authenticatedFetch(apiUrl('/api/user/preferences'), {
                                                 method: 'PUT',
                                                 headers: { 'Content-Type': 'application/json' },
                                                 body: JSON.stringify({ visible_rows: val, visible_cols: visibleColsCount })
@@ -1443,8 +1500,7 @@ export default function Sheet() {
                                     // persist preference
                                     (async () => {
                                         try {
-                                            const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
-                                            await authenticatedFetch(`http://${host}:8080/api/user/preferences`, {
+                                            await authenticatedFetch(apiUrl('/api/user/preferences'), {
                                                 method: 'PUT',
                                                 headers: { 'Content-Type': 'application/json' },
                                                 body: JSON.stringify({ visible_rows: visibleRowsCount, visible_cols: val })
@@ -1481,7 +1537,7 @@ export default function Sheet() {
                                 I
                             </button>
                             <button
-                                className="px-2 py-1 text-sm rounded border border-gray-300 bg-white hover:bg-gray-100"
+                                className="px-2 py-1 text-sm rounded border border-gray-300 bg-white hover:bg-indigo-100 hover:shadow-md active:bg-indigo-200 active:scale-95 transition-all duration-100"
                                 onClick={applyStyleToSelectedRange}
                                 disabled={!canEdit}
                                 title="Apply to selected cells"
@@ -1489,37 +1545,18 @@ export default function Sheet() {
                                 Apply
                             </button>
                         </div>
+                        {/* Show Scripts toggle */}
                         <div className="flex items-center gap-2 ml-4">
-                            <span className="text-sm text-gray-600">Script</span>
-                            <textarea
-                                className="border rounded px-2 py-1 text-sm"
-                                rows={3}
-                                style={{ width: 240 }}
-                                value={scriptText}
-                                onChange={(e) => {
-                                     setScriptText(e.target.value); 
-                                    // const target = (selectedRange && selectedRange.length > 0) ? selectedRange[0] : focusedCell;
-                                    //if (!target || !target.row || !target.col) return;
-                                   //     updateCellScriptState(target.row, target.col, e.target.value, username); 
-                                    }}
-                                disabled={!canEdit}
-                                placeholder="Edit script for selected cell"
-                                title="Edit script"
-                            />
-                            <button
-                                className="px-2 py-1 text-sm rounded border border-gray-300 bg-white hover:bg-gray-100"
-                                onClick={() => {
-                                    if (!canEdit) return;
-                                    const target = (selectedRange && selectedRange.length > 0) ? selectedRange[0] : focusedCell;
-                                    if (!target || !target.row || !target.col) return;
-                                    updateCellScriptState(target.row, target.col, scriptText, username);
-                                    handleScriptChange(target.row, target.col, scriptText);
-                                }}
-                                disabled={!canEdit}
-                                title="Apply script"
-                            >
-                                Apply Script
-                            </button>
+                            <label className="inline-flex items-center gap-2 text-sm">
+                                <input
+                                    type="checkbox"
+                                    className="form-check-input"
+                                    checked={showScripts}
+                                    onChange={(e) => setShowScripts(e.target.checked)}
+                                    title="Display cell scripts instead of values (cells become read-only)"
+                                />
+                                Show Scripts (read-only)
+                            </label>
                         </div>
                         
                     </div>
@@ -1594,7 +1631,7 @@ export default function Sheet() {
                                         </div>
                                         <div className="small d-flex align-items-center justify-content-between">
                                             <div>
-                                                <span className="badge bg-light text-dark me-2">{entry.action}</span>{entry.details}
+                                                <span className="badge bg-light text-dark me-2">{entry.action}</span> {entry.change_reversed ? <del>{entry.details}</del> : entry.details}
                                             </div>
                                             {canRevert && !entry.change_reversed && (
                                                 <button className="btn btn-sm btn-outline-danger ms-2" onClick={onRevert} title="Revert to previous value">Revert</button>
@@ -1631,6 +1668,52 @@ export default function Sheet() {
                                     })}
                                 </div>
                             </div>
+                        </div>
+                    </div>
+                )}
+                {scriptPopup.visible && (
+                    <div style={{ position: 'fixed', top: scriptPopup.y + 8, left: scriptPopup.x + 8, zIndex: 2100 }} className="bg-white border rounded shadow p-3">
+                        <div className="flex items-center gap-2">
+                            <span className="text-sm text-gray-600">Script [Cell : {String(scriptPopup.col)}{String(scriptPopup.row)}]</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                            
+                            <textarea
+                                className="border rounded px-2 py-1 text-sm"
+                                rows={3}
+                                style={{ width: 240 }}
+                                value={scriptText}
+                                onChange={(e) => setScriptText(e.target.value)}
+                                disabled={!canEdit}
+                                placeholder={`Edit script for ${String(scriptPopup.col)}${String(scriptPopup.row)}`}
+                                title="Edit script"
+                            />
+                        </div>
+                        <div className="mt-2 flex items-center gap-2 justify-end">
+                            <button
+                                className="px-2 py-1 text-sm rounded border border-gray-300 bg-white hover:bg-red-100 hover:shadow-md active:bg-red-200 active:scale-95 transition-all duration-100"
+                                onClick={() => {
+                                    const { row, col } = scriptPopup;
+                                    const key = row && col ? `${row}-${col}` : null;
+                                    const isLocked = key ? (data[key]?.locked === true) : false;
+                                    if (!canEdit || isLocked) { closeScriptPopup(); return; }
+                                    if (!row || !col) { closeScriptPopup(); return; }
+                                    updateCellScriptState(row, col, scriptText, username);
+                                    handleScriptChange(row, col, scriptText);
+                                    closeScriptPopup();
+                                }}
+                                disabled={!canEdit || (scriptPopup.row && scriptPopup.col ? (data[`${scriptPopup.row}-${scriptPopup.col}`]?.locked === true) : false)}
+                                title="Apply script"
+                            >
+                                Apply Script
+                            </button>
+                            <button
+                                className="px-2 py-1 text-sm rounded border border-gray-300 bg-white hover:bg-indigo-100 hover:shadow-md active:bg-indigo-200 active:scale-95 transition-all duration-100"
+                                onClick={closeScriptPopup}
+                                title="Cancel"
+                            >
+                                Cancel
+                            </button>
                         </div>
                     </div>
                 )}
@@ -2007,7 +2090,7 @@ export default function Sheet() {
                                                     key={key}
                                                     className={`border-b border-r border-gray-200 bg-gray-100 p-0 relative min-w-[7rem] group ${ inShared ? 'bg-indigo-50' : 'bg-white'} hover:bg-green-50/20 transition-colors`}
                                                     style={{ width: `${colWidths[colLabel] || DEFAULT_COL_WIDTH}px`, height: `${rowHeights[rowLabel] || DEFAULT_ROW_HEIGHT}px`, ...boundaryStyles }}
-                                                    onContextMenu={(e) => {  !isEditing && showContextMenu(e, rowLabel, colLabel)}}
+                                                    onContextMenu={(e) => {  !isEditing && !showScripts && showContextMenu(e, rowLabel, colLabel)}}
                                                 >
                                                     <textarea
                                                         className={`w-full h-full px-3 py-1 text-sm outline-none border border-gray-200 focus:border-green-200 focus:ring-0 z-10 relative text-gray-800 resize-none`}
@@ -2024,13 +2107,15 @@ export default function Sheet() {
                                                             fontWeight: cell.bold ? '700' : 'normal',
                                                             fontStyle: cell.italic ? 'italic' : 'normal',
                                                         }}
-                                                        value={cell.value}
+                                                        value={showScripts ? (cell.script || '') : (cell.value || '')}
+
                                                         data-row={rowLabel}
                                                         data-col={colLabel}
-                                                        readOnly={!!cell.locked || !canEdit}
+                                                        readOnly={showScripts || !!cell.locked || !canEdit}
                                                         onFocus={() => { setFocusedCell({ row: rowLabel, col: colLabel }); setIsEditing(false); setIsDoubleClicked(false); }}
                                                         onMouseOver={e => { e.target.focus(); }}
                                                         onDoubleClick={(e) => {
+                                                            if (showScripts) return;
                                                             if (isEditing) return;
                                                             if (cell.locked || !canEdit) return;
                                                             // Prevent default double-click text selection
@@ -2050,6 +2135,7 @@ export default function Sheet() {
                                                             }
                                                         }}
                                                         onMouseDown={(e) => { 
+                                                            if (showScripts) { e.preventDefault(); return; }
                                                             if (isEditing) {
                                                                 // In edit mode: allow normal text selection, but keep focus
                                                                 // Do NOT call preventDefault or selection handlers
@@ -2138,6 +2224,7 @@ export default function Sheet() {
                                                             }}
                                                         // Only update value locally while editing, commit on blur
                                                         onChange={(e) => {
+                                                            if (showScripts) return;
                                                             // Update local state for textarea value
                                                             if (cell.locked || !canEdit) return;
                                                             if (connected)
@@ -2147,6 +2234,7 @@ export default function Sheet() {
                                                             
                                                         }}
                                                         onBlur={(e) => {
+                                                            if (showScripts) return;
                                                             setIsEditing(false);
                                                             setIsDoubleClicked(false);
                                                             // Commit value to backend only on blur
@@ -2162,9 +2250,6 @@ export default function Sheet() {
                                                                 className="bg-white border p-2 text-sm"
                                                                 onClick={(e) => e.stopPropagation()}
                                                             >
-                                                                
-                                                                
-                                                                 
                                                                         <button
                                                                             className="block w-full text-left px-2 py-1 hover:bg-gray-100 rounded"
                                                                             disabled={!copiedBlock || !contextMenu.cell}
@@ -2172,7 +2257,40 @@ export default function Sheet() {
                                                                         >
                                                                             Paste
                                                                         </button>
-                                                                    
+                                                                        <button
+                                                                            className="block w-full text-left px-2 py-1 hover:bg-gray-100 rounded"
+                                                                            disabled={!canEdit || !contextMenu.cell}
+                                                                            onClick={() => {
+                                                                                if (!canEdit || !contextMenu.cell) return;
+                                                                                openScriptPopup(contextMenu.cell.row, contextMenu.cell.col, contextMenu.x, contextMenu.y);
+                                                                                closeContextMenu();
+                                                                            }}
+                                                                        >
+                                                                            Edit Script
+                                                                        </button>
+                                                                {contextMenu.cell && (
+                                                                    <>
+                                                                        {(() => {
+                                                                            // Only show Copy if contextMenu.cell is inside selectedRange
+                                                                            let copy = false;
+                                                                            if (selectedRange && contextMenu.cell) {
+                                                                                copy = selectedRange.some(c => c.row === contextMenu.cell.row && c.col === contextMenu.cell.col);
+                                                                            }
+                                                                            return copy ? (
+                                                                                <button
+                                                                                    className="block w-full text-left px-2 py-1 hover:bg-gray-100 rounded"
+                                                                                    onClick={() => {
+                                                                                        sendSelection();
+                                                                                        closeContextMenu();
+                                                                                    }}
+                                                                                >
+                                                                                    Copy
+                                                                                </button>
+                                                                                
+                                                                            ) : null;
+                                                                        })()}
+                                                                        </>
+                                                                )}
                                                                 {isOwner && contextMenu.cell && (
                                                                     <>
                                                                         {(() => {
@@ -2205,25 +2323,7 @@ export default function Sheet() {
                                                                                 
                                                                             ) : null;
                                                                         })()}
-                                                                        {(() => {
-                                                                            // Only show Copy if contextMenu.cell is inside selectedRange
-                                                                            let copy = false;
-                                                                            if (selectedRange && contextMenu.cell) {
-                                                                                copy = selectedRange.some(c => c.row === contextMenu.cell.row && c.col === contextMenu.cell.col);
-                                                                            }
-                                                                            return copy ? (
-                                                                                <button
-                                                                                    className="block w-full text-left px-2 py-1 hover:bg-gray-100 rounded"
-                                                                                    onClick={() => {
-                                                                                        sendSelection();
-                                                                                        closeContextMenu();
-                                                                                    }}
-                                                                                >
-                                                                                    Copy
-                                                                                </button>
-                                                                                
-                                                                            ) : null;
-                                                                        })()}
+                                                                        
                                                                         {(() => {
                                                                             // Only show Unlock Cell if contextMenu.cell is inside selectedRange
                                                                             let showUnlock = false;

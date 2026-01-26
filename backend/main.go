@@ -553,6 +553,50 @@ func main() {
 		})
 	})
 
+	// Change password for current user
+	http.HandleFunc("/api/user/password", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "PUT, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if r.Method != http.MethodPut {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		token := r.Header.Get("Authorization")
+		username, err := globalUserManager.ValidateToken(token)
+		if err != nil {
+			http.Error(w, "Unauthorized: "+err.Error(), http.StatusUnauthorized)
+			return
+		}
+
+		var req struct {
+			OldPassword string `json:"old_password"`
+			NewPassword string `json:"new_password"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if req.OldPassword == "" || req.NewPassword == "" {
+			http.Error(w, "old_password and new_password are required", http.StatusBadRequest)
+			return
+		}
+
+		if err := globalUserManager.ChangePassword(username, req.OldPassword, req.NewPassword); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"message": "password updated"})
+	})
+
 	http.HandleFunc("/api/sheets", func(w http.ResponseWriter, r *http.Request) {
 		// Simple CORS
 		w.Header().Set("Access-Control-Allow-Origin", "*")

@@ -5,6 +5,7 @@ import Dashboard from './components/Dashboard';
 import Projects from './components/Projects';
 import Sheet from './components/Sheet';
 import Settings from './components/Settings';
+import ChangePassword from './components/ChangePassword';
 
 function App() {
   return (
@@ -15,6 +16,7 @@ function App() {
         <Route path="/project/:project" element={<Dashboard />} />
         <Route path="/sheet/:id" element={<Sheet />} />
         <Route path="/settings/:id" element={<Settings />} />
+        <Route path="/change-password" element={<ChangePassword />} />
       </Routes>
     </Router>
   );

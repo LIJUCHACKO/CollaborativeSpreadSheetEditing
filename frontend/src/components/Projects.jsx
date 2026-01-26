@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { authenticatedFetch, isSessionValid, clearAuth, getUsername } from '../utils/auth';
-import { FolderPlus, Edit2, Trash2, Search, User, LogOut, Folder } from 'lucide-react';
+import { authenticatedFetch, isSessionValid, clearAuth, getUsername, apiUrl } from '../utils/auth';
+import { FolderPlus, Edit2, Trash2, Search, User, LogOut, Folder, Lock } from 'lucide-react';
 import 'bootstrap/dist/css/bootstrap.min.css';
 
 export default function Projects() {
@@ -37,8 +37,7 @@ export default function Projects() {
 
   const fetchProjects = async () => {
     try {
-      const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
-      const res = await authenticatedFetch(`http://${host}:8080/api/projects`);
+      const res = await authenticatedFetch(apiUrl('/api/projects'));
       if (res.ok) {
         const data = await res.json();
         setProjects(Array.isArray(data) ? data : []);
@@ -68,8 +67,7 @@ export default function Projects() {
     const name = newProject.trim();
     if (!name) return;
     try {
-      const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
-      const res = await authenticatedFetch(`http://${host}:8080/api/projects`, {
+      const res = await authenticatedFetch(apiUrl('/api/projects'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name }),
@@ -102,8 +100,7 @@ export default function Projects() {
     const newName = editingName.trim();
     if (!oldName || !newName) return;
     try {
-      const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
-      const res = await authenticatedFetch(`http://${host}:8080/api/projects`, {
+      const res = await authenticatedFetch(apiUrl('/api/projects'), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ OldName: oldName, NewName: newName }),
@@ -151,8 +148,7 @@ export default function Projects() {
     const newName = duplicateName.trim();
     if (!source || !newName) return;
     try {
-      const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
-      const res = await authenticatedFetch(`http://${host}:8080/api/projects/duplicate`, {
+      const res = await authenticatedFetch(apiUrl('/api/projects/duplicate'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ source_name: source, new_name: newName }),
@@ -184,8 +180,7 @@ export default function Projects() {
     if (!name) return;
     if (deleteConfirm.trim() !== name) return; // require exact match
     try {
-      const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
-      const res = await authenticatedFetch(`http://${host}:8080/api/projects?name=${encodeURIComponent(name)}`, {
+      const res = await authenticatedFetch(apiUrl(`/api/projects?name=${encodeURIComponent(name)}`), {
         method: 'DELETE',
       });
       if (res.status === 403) {
@@ -213,12 +208,13 @@ export default function Projects() {
 
   const handleLogout = async () => {
     try {
-      const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
-      await authenticatedFetch(`http://${host}:8080/api/logout`, { method: 'POST' });
+      await authenticatedFetch(apiUrl('/api/logout'), { method: 'POST' });
     } catch {}
     clearAuth();
     navigate('/');
   };
+
+  // Password change moved to dedicated page
 
   return (
     <div className="min-h-screen bg-gray-50 flex flex-col font-sans text-gray-900">
@@ -231,6 +227,9 @@ export default function Projects() {
             <span className="navbar-text me-3 d-flex align-items-center">
               <User className="me-1" /> {username}
             </span>
+            <button onClick={() => navigate('/change-password')} className="btn btn-outline-primary btn-sm d-flex align-items-center me-2" title="Change Password">
+              <Lock className="me-1" /> Change Password
+            </button>
             <button onClick={handleLogout} className="btn btn-outline-danger btn-sm d-flex align-items-center" title="Logout">
               <LogOut className="me-1" /> Logout
             </button>

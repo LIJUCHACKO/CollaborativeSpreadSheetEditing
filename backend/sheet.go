@@ -388,16 +388,18 @@ func (s *Sheet) SetCell(row, col, value, user string, reverted bool) {
 				s.AuditLog = append(s.AuditLog[:prevIdx], s.AuditLog[prevIdx+1:]...)
 			}
 		}
-		s.AuditLog = append(s.AuditLog, AuditEntry{
-			Timestamp:      time.Now(),
-			User:           user,
-			Action:         "EDIT_CELL",
-			Row1:           r1,
-			Col1:           col,
-			OldValue:       oldValForNew,
-			NewValue:       value,
-			ChangeReversed: false,
-		})
+		if oldValForNew != value {
+			s.AuditLog = append(s.AuditLog, AuditEntry{
+				Timestamp:      time.Now(),
+				User:           user,
+				Action:         "EDIT_CELL",
+				Row1:           r1,
+				Col1:           col,
+				OldValue:       oldValForNew,
+				NewValue:       value,
+				ChangeReversed: false,
+			})
+		}
 	}
 
 	s.mu.Unlock() // Unlock BEFORE saving to avoid deadlock (Save -> MarshalJSON -> tries RLock)
@@ -410,7 +412,7 @@ func (s *Sheet) SetCell(row, col, value, user string, reverted bool) {
 // SetCellScript updates only the script attribute for a cell, preserving value and other metadata.
 func (s *Sheet) SetCellScript(row, col, script, user string, reverted bool) {
 	s.mu.Lock()
-	println("SetCellScript")
+	//println("SetCellScript")
 	// ensure row map
 	if s.Data[row] == nil {
 		s.Data[row] = make(map[string]Cell)
@@ -423,7 +425,7 @@ func (s *Sheet) SetCellScript(row, col, script, user string, reverted bool) {
 	}
 	if exists && currentVal.Script == script {
 		// No change
-		println("No change in script:", script)
+		//println("No change in script:", script)
 		s.mu.Unlock()
 		return
 	}
@@ -433,7 +435,7 @@ func (s *Sheet) SetCellScript(row, col, script, user string, reverted bool) {
 	updated.Script = script
 	updated.User = user
 	s.Data[row][col] = updated
-	println(s.Data[row][col].Script)
+	//println(s.Data[row][col].Script)
 	if reverted {
 		// Mark the original EDIT_SCRIPT entry as reverted instead of appending a new one
 		prevNew := currentVal.Script
@@ -456,7 +458,7 @@ func (s *Sheet) SetCellScript(row, col, script, user string, reverted bool) {
 		for i := len(s.AuditLog) - 1; i >= 0; i-- {
 			entry := s.AuditLog[i]
 			if entry.Action == "EDIT_SCRIPT" && entry.Row1 == r1 && entry.Col1 == col {
-				if entry.User == user && !entry.ChangeReversed && {
+				if entry.User == user && !entry.ChangeReversed {
 					prevIdx = i
 				}
 				break
@@ -469,16 +471,18 @@ func (s *Sheet) SetCellScript(row, col, script, user string, reverted bool) {
 				s.AuditLog = append(s.AuditLog[:prevIdx], s.AuditLog[prevIdx+1:]...)
 			}
 		}
-		s.AuditLog = append(s.AuditLog, AuditEntry{
-			Timestamp:      time.Now(),
-			User:           user,
-			Action:         "EDIT_SCRIPT",
-			Row1:           r1,
-			Col1:           col,
-			OldValue:       oldScript,
-			NewValue:       script,
-			ChangeReversed: false,
-		})
+		if oldScript != script {
+			s.AuditLog = append(s.AuditLog, AuditEntry{
+				Timestamp:      time.Now(),
+				User:           user,
+				Action:         "EDIT_SCRIPT",
+				Row1:           r1,
+				Col1:           col,
+				OldValue:       oldScript,
+				NewValue:       script,
+				ChangeReversed: false,
+			})
+		}
 	}
 
 	s.mu.Unlock()

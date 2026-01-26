@@ -243,3 +243,27 @@ func (um *UserManager) UpdatePreferences(username string, prefs Preferences) err
 	um.saveUsersLocked()
 	return nil
 }
+
+// ChangePassword updates the user's password after verifying the old password
+func (um *UserManager) ChangePassword(username, oldPassword, newPassword string) error {
+	um.mu.Lock()
+	defer um.mu.Unlock()
+	u, ok := um.users[username]
+	if !ok {
+		return errors.New("user not found")
+	}
+	// verify old password
+	if err := bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(oldPassword)); err != nil {
+		return errors.New("invalid current password")
+	}
+	if len(newPassword) < 6 {
+		return errors.New("new password must be at least 6 characters")
+	}
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+	u.PasswordHash = string(hashedPassword)
+	um.saveUsersLocked()
+	return nil
+}

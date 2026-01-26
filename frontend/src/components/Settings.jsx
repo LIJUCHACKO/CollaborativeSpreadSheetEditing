@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate, useParams, useLocation } from 'react-router-dom';
-import { isSessionValid, clearAuth, getUsername, authenticatedFetch } from '../utils/auth';
-import { ArrowLeft, Settings as SettingsIcon, User, Save } from 'lucide-react';
+import { isSessionValid, clearAuth, getUsername, authenticatedFetch, apiUrl } from '../utils/auth';
+import { ArrowLeft, Settings as SettingsIcon, User, Save, Lock } from 'lucide-react';
 import 'bootstrap/dist/css/bootstrap.min.css';
 
 
@@ -32,10 +32,9 @@ export default function Settings() {
       return;
     }
 
-    const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
     const fetchData = async () => {
       try {
-        const sheetRes = await authenticatedFetch(`http://${host}:8080/api/sheet?id=${encodeURIComponent(id)}${project ? `&project=${encodeURIComponent(project)}` : ''}`);
+        const sheetRes = await authenticatedFetch(apiUrl(`/api/sheet?id=${encodeURIComponent(id)}${project ? `&project=${encodeURIComponent(project)}` : ''}`));
         if (!sheetRes.ok) {
           if (sheetRes.status === 401) {
             clearAuth();
@@ -52,7 +51,7 @@ export default function Settings() {
         setEditors((s.permissions?.editors) || []);
         setNewOwner(s.owner || '');
 
-        const usersRes = await authenticatedFetch(`http://${host}:8080/api/users`);
+        const usersRes = await authenticatedFetch(apiUrl('/api/users'));
         if (usersRes.ok) {
           const list = await usersRes.json();
           setUsers(Array.isArray(list) ? list : []);
@@ -72,8 +71,7 @@ export default function Settings() {
   const savePermissions = async () => {
     if (!isOwner) return;
     try {
-      const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
-      const res = await authenticatedFetch(`http://${host}:8080/api/sheet/permissions?sheet_id=${encodeURIComponent(id)}${project ? `&project=${encodeURIComponent(project)}` : ''}`, {
+      const res = await authenticatedFetch(apiUrl(`/api/sheet/permissions?sheet_id=${encodeURIComponent(id)}${project ? `&project=${encodeURIComponent(project)}` : ''}`), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ editors }),
@@ -97,8 +95,7 @@ export default function Settings() {
       return;
     }
     try {
-      const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
-      const res = await authenticatedFetch(`http://${host}:8080/api/sheet/transfer_owner`, {
+      const res = await authenticatedFetch(apiUrl('/api/sheet/transfer_owner'), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(project ? { sheet_id: id, new_owner: newOwner, project_name: project } : { sheet_id: id, new_owner: newOwner }),

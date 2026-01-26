@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import 'bootstrap/dist/css/bootstrap.min.css';
+import { apiUrl } from '../utils/auth';
 
 export default function Login() {
   const [username, setUsername] = useState('');
@@ -26,8 +27,7 @@ export default function Login() {
     const endpoint = isRegistering ? '/api/register' : '/api/login';
 
     try {
-      const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
-      const res = await fetch(`http://${host}:8080${endpoint}`, {
+      const res = await fetch(apiUrl(endpoint), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password }),
@@ -146,7 +146,7 @@ export default function Login() {
           )}
         </button>
           {!isRegistering && (
-          <div className="text-end mb-3">
+          <div className="text-center mt-3" style={{ maxWidth: '400px', margin: '0 auto' }}>
             <button
               type="button"
               className="btn btn-link text-decoration-none"
