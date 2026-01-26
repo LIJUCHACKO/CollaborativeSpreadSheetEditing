@@ -176,6 +176,38 @@ func (h *Hub) run() {
 				} else {
 					log.Printf("Error unmarshalling UPDATE_CELL_STYLE payload: %v", err)
 				}
+
+			} else if message.Type == "UPDATE_CELL_SCRIPT" {
+				if denyIfNotEditor() {
+					continue
+				}
+				var update struct {
+					Row    string `json:"row"`
+					Col    string `json:"col"`
+					Script string `json:"script"`
+					User   string `json:"user"`
+					Revert bool   `json:"revert,omitempty"`
+				}
+				//println("Received UPDATE_CELL_SCRIPT message")
+				if err := json.Unmarshal(message.Payload, &update); err == nil {
+					sheet := globalSheetManager.GetSheetBy(message.SheetID, message.Project)
+					if sheet != nil {
+						sheet.SetCellScript(update.Row, update.Col, update.Script, message.User, update.Revert)
+						//println("Updated cell script to:")
+						//println(string(update.Script))
+						//println("for cell", update.Row, update.Col)
+						payload, _ := json.Marshal(sheet.SnapshotForClient())
+						toSend = &Message{
+							Type:    "ROW_COL_UPDATED",
+							SheetID: message.SheetID,
+							Payload: payload,
+							User:    message.User,
+						}
+
+					}
+				} else {
+					log.Printf("Error unmarshalling UPDATE_CELL_SCRIPT payload: %v", err)
+				}
 			} else if message.Type == "LOCK_CELL" {
 				var req struct {
 					Row  string `json:"row"`

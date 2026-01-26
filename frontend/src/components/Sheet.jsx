@@ -73,6 +73,8 @@ export default function Sheet() {
     const [styleBg, setStyleBg] = useState('');
     const [styleBold, setStyleBold] = useState(false);
     const [styleItalic, setStyleItalic] = useState(false);
+    // Cell script editor (common)
+    const [scriptText, setScriptText] = useState('');
 
     // Multi-cell selection and clipboard state
     const [selectionStart, setSelectionStart] = useState(null); // { row, col }
@@ -106,6 +108,7 @@ export default function Sheet() {
     const auditLogRef = useRef(null);
     const auditLogScrollTopRef = useRef(0);
     const editingOriginalValueRef = useRef(null);
+    const editingOriginalScriptRef = useRef(null);
 
     const colIndexMap = useMemo(() => {
         const map = {};
@@ -120,6 +123,7 @@ export default function Sheet() {
     };
 
     const startSelection = (rowLabel, colLabel) => {
+        if(!connected) return
         //console.log(rowLabel, colLabel);
         setIsSelecting(true);
         setSelectionStart({ row: rowLabel, col: colLabel });
@@ -318,8 +322,14 @@ export default function Sheet() {
             }
         }
 
-        // Apply local state in one batch
-        setData(prev => ({ ...prev, ...updates }));
+        // Apply local state in one batch (preserve existing fields like script/style)
+        setData(prev => {
+            const next = { ...prev };
+            Object.entries(updates).forEach(([key, cell]) => {
+                next[key] = { ...(prev[key] || {}), value: cell.value, user: cell.user };
+            });
+            return next;
+        });
 
         // Broadcast each cell update to server
         if (ws.current && ws.current.readyState === WebSocket.OPEN) {
@@ -339,6 +349,7 @@ export default function Sheet() {
 
     // Viewport state for virtualized grid
     const [cellModified, setCellModified] = useState(0);
+    const [scriptModified, setScriptModified] = useState(0);
     const [rowStart, setRowStart] = useState(1);
     const [visibleRowsCount, setVisibleRowsCount] = useState(15);
     const [colStart, setColStart] = useState(1);
@@ -639,7 +650,11 @@ export default function Sheet() {
     const updateCellState = (row, col, value, user) => {
         setData(prev => ({
             ...prev,
-            [`${row}-${col}`]: { value, user }
+            [`${row}-${col}`]: {
+                ...(prev[`${row}-${col}`] || {}),
+                value,
+                user,
+            }
         }));
         setCellModified(1)
     };
@@ -655,6 +670,18 @@ export default function Sheet() {
                 user,
             }
         }));
+    };
+
+    const updateCellScriptState = (row, col, script, user) => {
+        setData(prev => ({
+            ...prev,
+            [`${row}-${col}`]: {
+                ...(prev[`${row}-${col}`] || {}),
+                script,
+                user,
+            }
+        }));
+        setScriptModified(1);
     };
 
     const handleCellChange = (r, c, value) => {
@@ -682,6 +709,29 @@ export default function Sheet() {
         editingOriginalValueRef.current = null;
     };
 
+    const handleScriptChange = (r, c, script) => {
+        //if (scriptModified === 0) { return; } //non-blocking for scripts
+        const key = `${r}-${c}`;
+        const oldScript = (editingOriginalScriptRef.current ?? (data[key]?.script ?? '')).toString();
+        const newScript = (script ?? '').toString();
+        if (oldScript !== newScript) {
+            setUndoStack(prev => [...prev, { type: 'cell_script', row: String(r), col: String(c), oldValue: oldScript, newValue: newScript }]);
+            setRedoStack([]);
+        }
+        console.log('Submitting script change:', { r, c, script });
+        if (canEdit && ws.current && ws.current.readyState === WebSocket.OPEN) {
+            console.log('WS sending script update');
+            const msg = {
+                type: 'UPDATE_CELL_SCRIPT',
+                sheet_id: id,
+                payload: { row: String(r), col: String(c), script, user: username }
+            };
+            ws.current.send(JSON.stringify(msg));
+        }
+        setScriptModified(0);
+        editingOriginalScriptRef.current = null;
+    };
+
     const doUndo = () => {
         if (undoStack.length === 0 || !canEdit) return;
         const last = undoStack[undoStack.length - 1];
@@ -694,6 +744,16 @@ export default function Sheet() {
                 ws.current.send(JSON.stringify({ type: 'UPDATE_CELL', sheet_id: id, payload: { row, col, value: oldValue, user: username } }));
             }
             // Move to redo stack
+            setRedoStack(prev => [...prev, last]);
+            setUndoStack(prev => prev.slice(0, -1));
+        } else if (last.type === 'cell_script') {
+            const { row, col, oldValue } = last;
+            // Apply local state
+            updateCellScriptState(row, col, oldValue, username);
+            // Send to server
+            if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+                ws.current.send(JSON.stringify({ type: 'UPDATE_CELL_SCRIPT', sheet_id: id, payload: { row, col, script: oldValue, user: username, revert: true } }));
+            }
             setRedoStack(prev => [...prev, last]);
             setUndoStack(prev => prev.slice(0, -1));
         } else if (last.type === 'insert_row') {
@@ -750,6 +810,14 @@ export default function Sheet() {
             updateCellState(row, col, newValue, username);
             if (ws.current && ws.current.readyState === WebSocket.OPEN) {
                 ws.current.send(JSON.stringify({ type: 'UPDATE_CELL', sheet_id: id, payload: { row, col, value: newValue, user: username } }));
+            }
+            setUndoStack(prev => [...prev, last]);
+            setRedoStack(prev => prev.slice(0, -1));
+        } else if (last.type === 'cell_script') {
+            const { row, col, oldValue, newValue } = last;
+            updateCellScriptState(row, col, newValue, username);
+            if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+                ws.current.send(JSON.stringify({ type: 'UPDATE_CELL_SCRIPT', sheet_id: id, payload: { row, col, script: newValue, user: username } }));
             }
             setUndoStack(prev => [...prev, last]);
             setRedoStack(prev => prev.slice(0, -1));
@@ -856,6 +924,8 @@ export default function Sheet() {
         setStyleBg(cell.background || '');
         setStyleBold(!!cell.bold);
         setStyleItalic(!!cell.italic);
+        setScriptText(cell.script || '');
+        editingOriginalScriptRef.current = (cell.script ?? '').toString();
     }, [ selectedRange, data]);
 
     const applyStyleToSelectedRange = () => {
@@ -1109,19 +1179,28 @@ export default function Sheet() {
     // Navigate to a specific cell and ensure it's visible, then focus it
     const navigateToCell = (targetRow, targetColLabel) => {
         if (!targetRow || !targetColLabel) return;
-        // Adjust rowStart so targetRow is within visible window
+        // Adjust rowStart only if targetRow is not already within the visible window
         const rowIdx = filteredRowHeaders.indexOf(targetRow);
         if (rowIdx !== -1) {
-            const maxRowStart = Math.max(1, filteredRowHeaders.length - visibleRowsCount + 1);
-            const desiredStart = Math.max(1, Math.min(maxRowStart, rowIdx));
-            setRowStart(desiredStart);
+            const currentStartIdx = Math.max(0, rowStart - 1);
+            const currentEndIdx = Math.min(filteredRowHeaders.length - 1, currentStartIdx + visibleRowsCount - 1);
+            const rowVisible = rowIdx >= currentStartIdx && rowIdx <= currentEndIdx;
+            if (!rowVisible) {
+                const maxRowStart = Math.max(1, filteredRowHeaders.length - visibleRowsCount + 1);
+                const desiredStart = Math.max(1, Math.min(maxRowStart, rowIdx + 1));
+                setRowStart(desiredStart);
+            }
         }
-        // Adjust colStart so targetCol is within visible window
+        // Adjust colStart only if targetCol is not already within the visible window
         const colIdx = COL_HEADERS.indexOf(targetColLabel);
         if (colIdx !== -1) {
-            const maxColStart = Math.max(1, COLS - visibleColsCount + 1);
-            const desiredColStart = Math.max(1, Math.min(maxColStart, colIdx));
-            setColStart(desiredColStart);
+            const colNumber = colIdx + 1; // 1-based
+            const colVisible = colNumber >= colStart && colNumber <= colEnd;
+            if (!colVisible) {
+                const maxColStart = Math.max(1, COLS - visibleColsCount + 1);
+                const desiredColStart = Math.max(1, Math.min(maxColStart, colNumber));
+                setColStart(desiredColStart);
+            }
         }
         // Set focus state and focus the element after re-render
         setFocusedCell({ row: targetRow, col: targetColLabel });
@@ -1410,6 +1489,38 @@ export default function Sheet() {
                                 Apply
                             </button>
                         </div>
+                        <div className="flex items-center gap-2 ml-4">
+                            <span className="text-sm text-gray-600">Script</span>
+                            <textarea
+                                className="border rounded px-2 py-1 text-sm"
+                                rows={3}
+                                style={{ width: 240 }}
+                                value={scriptText}
+                                onChange={(e) => {
+                                     setScriptText(e.target.value); 
+                                    // const target = (selectedRange && selectedRange.length > 0) ? selectedRange[0] : focusedCell;
+                                    //if (!target || !target.row || !target.col) return;
+                                   //     updateCellScriptState(target.row, target.col, e.target.value, username); 
+                                    }}
+                                disabled={!canEdit}
+                                placeholder="Edit script for selected cell"
+                                title="Edit script"
+                            />
+                            <button
+                                className="px-2 py-1 text-sm rounded border border-gray-300 bg-white hover:bg-gray-100"
+                                onClick={() => {
+                                    if (!canEdit) return;
+                                    const target = (selectedRange && selectedRange.length > 0) ? selectedRange[0] : focusedCell;
+                                    if (!target || !target.row || !target.col) return;
+                                    updateCellScriptState(target.row, target.col, scriptText, username);
+                                    handleScriptChange(target.row, target.col, scriptText);
+                                }}
+                                disabled={!canEdit}
+                                title="Apply script"
+                            >
+                                Apply Script
+                            </button>
+                        </div>
                         
                     </div>
                 </div>
@@ -1594,7 +1705,7 @@ export default function Sheet() {
                                     }
                                     
                                     setRowStart(Math.max(1, Math.min(ROWS - visibleRowsCount + 1, parseInt(e.target.value, 10) || 1)))}}
-                                style={{ writingMode: 'vertical-lr', height:  '100%', width: '100%' }}
+                                style={{  height:  '100%', width: '100%' }}
                                 aria-label="Rows scrollbar"
                             />
                         </div>
@@ -1603,7 +1714,7 @@ export default function Sheet() {
                         <div
                             style={{ gridColumn: '2 / span 1', gridRow: '2 / span 1', overflow: 'auto' }}
                             onWheel={(e) => {
-                                 e.preventDefault();
+                                 // Allow native scrolling; only paginate rows when hitting limits
                                  setIsEditing(false);
                                  setIsDoubleClicked(false);
                                  const { row, col } = focusedCell;
@@ -1613,7 +1724,19 @@ export default function Sheet() {
                                  }
                                  const step = e.deltaY > 0 ? 1 : -1;
                                  const maxStart = Math.max(1, ROWS - visibleRowsCount + 1);
-                                 setRowStart(prev => Math.max(1, Math.min(maxStart, prev + step)));
+                                // Use browser window scroll position instead of container scroll
+                                const winScrollY = typeof window !== 'undefined' ? window.scrollY : 0;
+                                const docEl = typeof document !== 'undefined' ? document.documentElement : null;
+                                const docScrollTop = docEl ? docEl.scrollTop : 0;
+                                const scrollTop = winScrollY || docScrollTop || 0;
+                                const viewportBottom = scrollTop + (typeof window !== 'undefined' ? window.innerHeight : 0);
+                                const docScrollHeight = docEl ? docEl.scrollHeight : 0;
+                                const atTop = scrollTop <= 0;
+                                const atBottom = Math.ceil(viewportBottom) >= docScrollHeight;
+
+                                 if ((step < 0 && atTop) || (step > 0 && atBottom)) {
+                                   setRowStart(prev => Math.max(1, Math.min(maxStart, prev + step)));
+                                 }
                              }}
                             tabIndex={0}
                             id="grid-container"
@@ -1694,8 +1817,8 @@ export default function Sheet() {
                                                     height: '100%',
                                                     cursor: 'col-resize',
                                                     userSelect: 'none',
-                                                    background: 'rgba(99,102,241,0.15)', // indigo-500 tint
-                                                    borderRight: '1px solid #6366f1',
+                                                    background: 'rgba(250, 250, 250, 0)', // indigo-500 tint
+                                                    borderRight: '1px solid rgb(113, 114, 113)',
                                                     zIndex: 20,
                                                     touchAction: 'none'
                                                 }}
@@ -1831,8 +1954,8 @@ export default function Sheet() {
                                                     height: '8px',
                                                     cursor: 'row-resize',
                                                     userSelect: 'none',
-                                                    background: 'rgba(99,102,241,0.15)',
-                                                    borderTop: '1px solid #0ead23ff',
+                                                    background: 'rgba(247, 247, 248, 0)',
+                                                    borderBottom: '1px solid rgb(113, 114, 113)',
                                                     zIndex: 20,
                                                     touchAction: 'none'
                                                 }}
@@ -1882,12 +2005,12 @@ export default function Sheet() {
                                             return (
                                                 <td
                                                     key={key}
-                                                    className={`border-b border-r bg-gray-100 p-0 relative min-w-[7rem] group ${ inShared ? 'bg-indigo-50' : 'bg-white'} hover:bg-green-50/20 transition-colors`}
+                                                    className={`border-b border-r border-gray-200 bg-gray-100 p-0 relative min-w-[7rem] group ${ inShared ? 'bg-indigo-50' : 'bg-white'} hover:bg-green-50/20 transition-colors`}
                                                     style={{ width: `${colWidths[colLabel] || DEFAULT_COL_WIDTH}px`, height: `${rowHeights[rowLabel] || DEFAULT_ROW_HEIGHT}px`, ...boundaryStyles }}
                                                     onContextMenu={(e) => {  !isEditing && showContextMenu(e, rowLabel, colLabel)}}
                                                 >
                                                     <textarea
-                                                        className={`w-full h-full px-3 py-1 text-sm outline-none border-2 border-transparent focus:border-green-100 focus:ring-0 z-10 relative  text-gray-800 resize-none`}
+                                                        className={`w-full h-full px-3 py-1 text-sm outline-none border border-gray-200 focus:border-green-200 focus:ring-0 z-10 relative text-gray-800 resize-none`}
                                                         rows={1}
                                                         style={{
                                                             width: '100%',
@@ -2019,6 +2142,8 @@ export default function Sheet() {
                                                             if (cell.locked || !canEdit) return;
                                                             if (connected)
                                                             updateCellState(rowLabel, colLabel, e.target.value);
+                                                            setIsSelecting(false);
+                                                            setSelectedRange([]);
                                                             
                                                         }}
                                                         onBlur={(e) => {
@@ -2038,27 +2163,8 @@ export default function Sheet() {
                                                                 onClick={(e) => e.stopPropagation()}
                                                             >
                                                                 
-                                                                {(() => {
-                                                                    // Only show Paste if focused cell is not within current selectedRange rectangle
-                                                                    let showPaste = true;
-                                                                    if (selectedRange && selectedRange.length > 0 && contextMenu.cell) {
-                                                                        const rows = selectedRange.map(c => c.row);
-                                                                        const rMin = Math.min(...rows);
-                                                                        const rMax = Math.max(...rows);
-                                                                        const colIdxs = selectedRange.map(c => colIndexMap[c.col] ?? -1);
-                                                                        const cMin = Math.min(...colIdxs);
-                                                                        const cMax = Math.max(...colIdxs);
-                                                                        const cIdx = colIndexMap[contextMenu.cell.col] ?? -1;
-                                                                        if (
-                                                                            contextMenu.cell.row >= rMin &&
-                                                                            contextMenu.cell.row <= rMax &&
-                                                                            cIdx >= cMin &&
-                                                                            cIdx <= cMax
-                                                                        ) {
-                                                                            showPaste = false;
-                                                                        }
-                                                                    }
-                                                                    return showPaste ? (
+                                                                
+                                                                 
                                                                         <button
                                                                             className="block w-full text-left px-2 py-1 hover:bg-gray-100 rounded"
                                                                             disabled={!copiedBlock || !contextMenu.cell}
@@ -2066,8 +2172,7 @@ export default function Sheet() {
                                                                         >
                                                                             Paste
                                                                         </button>
-                                                                    ) : null;
-                                                                })()}
+                                                                    
                                                                 {isOwner && contextMenu.cell && (
                                                                     <>
                                                                         {(() => {

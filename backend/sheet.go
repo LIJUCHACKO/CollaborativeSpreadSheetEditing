@@ -32,6 +32,7 @@ func ensureDataDir() error {
 
 type Cell struct {
 	Value      string `json:"value"`
+	Script     string `json:"script"`
 	User       string `json:"user,omitempty"` // Last edited by
 	Locked     bool   `json:"locked,omitempty"`
 	LockedBy   string `json:"locked_by,omitempty"`
@@ -348,8 +349,8 @@ func (s *Sheet) SetCell(row, col, value, user string, reverted bool) {
 		s.mu.Unlock()
 		return
 	}
-	// Preserve existing lock metadata on write
-	s.Data[row][col] = Cell{Value: value, User: user, Locked: currentVal.Locked, LockedBy: currentVal.LockedBy, Background: currentVal.Background, Bold: currentVal.Bold, Italic: currentVal.Italic}
+	// Preserve existing metadata on write (including script)
+	s.Data[row][col] = Cell{Value: value, Script: currentVal.Script, User: user, Locked: currentVal.Locked, LockedBy: currentVal.LockedBy, Background: currentVal.Background, Bold: currentVal.Bold, Italic: currentVal.Italic}
 	if reverted {
 		// Mark the original EDIT_CELL entry as reverted instead of appending a new one
 		// Find the latest matching edit for this cell where NewValue equals the current cell value prior to revert
@@ -364,35 +365,123 @@ func (s *Sheet) SetCell(row, col, value, user string, reverted bool) {
 		}
 		// Do not append a new audit entry for revert
 	} else {
+		// Append edit entry, merging with the last same-user edit for this cell if present
+		oldValForNew := ""
 		if exists {
-			s.AuditLog = append(s.AuditLog, AuditEntry{
-				Timestamp:      time.Now(),
-				User:           user,
-				Action:         "EDIT_CELL",
-				Row1:           atoiSafe(row),
-				Col1:           col,
-				OldValue:       currentVal.Value,
-				NewValue:       value,
-				ChangeReversed: false,
-			})
-		} else {
-			s.AuditLog = append(s.AuditLog, AuditEntry{
-				Timestamp:      time.Now(),
-				User:           user,
-				Action:         "EDIT_CELL",
-				Row1:           atoiSafe(row),
-				Col1:           col,
-				OldValue:       "",
-				NewValue:       value,
-				ChangeReversed: false,
-			})
+			oldValForNew = currentVal.Value
 		}
+		r1 := atoiSafe(row)
+		prevIdx := -1
+		for i := len(s.AuditLog) - 1; i >= 0; i-- {
+			entry := s.AuditLog[i]
+			if entry.Action == "EDIT_CELL" && entry.Row1 == r1 && entry.Col1 == col {
+				if entry.User == user && !entry.ChangeReversed {
+					prevIdx = i
+				}
+				break
+			}
+		}
+		if prevIdx >= 0 {
+			// Only merge if previous log is within 24 hours
+			if time.Since(s.AuditLog[prevIdx].Timestamp) < 24*time.Hour {
+				oldValForNew = s.AuditLog[prevIdx].OldValue
+				s.AuditLog = append(s.AuditLog[:prevIdx], s.AuditLog[prevIdx+1:]...)
+			}
+		}
+		s.AuditLog = append(s.AuditLog, AuditEntry{
+			Timestamp:      time.Now(),
+			User:           user,
+			Action:         "EDIT_CELL",
+			Row1:           r1,
+			Col1:           col,
+			OldValue:       oldValForNew,
+			NewValue:       value,
+			ChangeReversed: false,
+		})
 	}
 
 	s.mu.Unlock() // Unlock BEFORE saving to avoid deadlock (Save -> MarshalJSON -> tries RLock)
 
 	// Persist changes
 	// Optimally we shouldn't save on every cell edit for performance, but for this task it ensures safety.
+	globalSheetManager.SaveSheet(s)
+}
+
+// SetCellScript updates only the script attribute for a cell, preserving value and other metadata.
+func (s *Sheet) SetCellScript(row, col, script, user string, reverted bool) {
+	s.mu.Lock()
+	println("SetCellScript")
+	// ensure row map
+	if s.Data[row] == nil {
+		s.Data[row] = make(map[string]Cell)
+	}
+	currentVal, exists := s.Data[row][col]
+	// Prevent edits to locked cells
+	if exists && currentVal.Locked {
+		s.mu.Unlock()
+		return
+	}
+	if exists && currentVal.Script == script {
+		// No change
+		println("No change in script:", script)
+		s.mu.Unlock()
+		return
+	}
+	println("Setting script for cell", row, col, "to:", script)
+	// Preserve existing metadata
+	updated := currentVal
+	updated.Script = script
+	updated.User = user
+	s.Data[row][col] = updated
+	println(s.Data[row][col].Script)
+	if reverted {
+		// Mark the original EDIT_SCRIPT entry as reverted instead of appending a new one
+		prevNew := currentVal.Script
+		r1 := atoiSafe(row)
+		for i := len(s.AuditLog) - 1; i >= 0; i-- {
+			e := &s.AuditLog[i]
+			if e.Action == "EDIT_SCRIPT" && e.Row1 == r1 && e.Col1 == col && e.NewValue == prevNew && !e.ChangeReversed {
+				e.ChangeReversed = true
+				break
+			}
+		}
+	} else {
+		// Log script change with merge: if last entry is EDIT_SCRIPT for same cell and user, merge by keeping previous OldValue
+		var oldScript string
+		if exists {
+			oldScript = currentVal.Script
+		}
+		prevIdx := -1
+		r1 := atoiSafe(row)
+		for i := len(s.AuditLog) - 1; i >= 0; i-- {
+			entry := s.AuditLog[i]
+			if entry.Action == "EDIT_SCRIPT" && entry.Row1 == r1 && entry.Col1 == col {
+				if entry.User == user && !entry.ChangeReversed && {
+					prevIdx = i
+				}
+				break
+			}
+		}
+		if prevIdx >= 0 {
+			// Only merge if previous log is within 24 hours
+			if time.Since(s.AuditLog[prevIdx].Timestamp) < 24*time.Hour {
+				oldScript = s.AuditLog[prevIdx].OldValue
+				s.AuditLog = append(s.AuditLog[:prevIdx], s.AuditLog[prevIdx+1:]...)
+			}
+		}
+		s.AuditLog = append(s.AuditLog, AuditEntry{
+			Timestamp:      time.Now(),
+			User:           user,
+			Action:         "EDIT_SCRIPT",
+			Row1:           r1,
+			Col1:           col,
+			OldValue:       oldScript,
+			NewValue:       script,
+			ChangeReversed: false,
+		})
+	}
+
+	s.mu.Unlock()
 	globalSheetManager.SaveSheet(s)
 }
 
@@ -1377,6 +1466,13 @@ func computeAuditDetails(s *Sheet, e AuditEntry) string {
 			return fmt.Sprintf("Set cell %d,%s to %s", r, c, firstNChar(e.NewValue, 10))
 		}
 		return fmt.Sprintf("Changed cell %d,%s from %s to %s", r, c, firstNChar(e.OldValue, 10), firstNChar(e.NewValue, 10))
+	case "EDIT_SCRIPT":
+		r := e.Row1
+		c := e.Col1
+		if e.OldValue == "" {
+			return fmt.Sprintf("Set script for cell %d,%s to %s", r, c, firstNChar(e.NewValue, 10))
+		}
+		return fmt.Sprintf("Changed script for cell %d,%s", r, c)
 	case "STYLE_CELL":
 		return fmt.Sprintf("Updated style for cell %d,%s", e.Row1, e.Col1)
 	case "LOCK_CELL":
