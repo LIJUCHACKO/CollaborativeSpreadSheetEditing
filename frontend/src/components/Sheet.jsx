@@ -19,6 +19,7 @@ import {
     Undo2,
     Redo2
 } from 'lucide-react';
+import { Lock } from 'lucide-react';
 import { isSessionValid, clearAuth, getUsername, authenticatedFetch, apiUrl } from '../utils/auth';
 import 'bootstrap/dist/css/bootstrap.min.css';
 export default function Sheet() {
@@ -178,10 +179,11 @@ export default function Sheet() {
             // If extending hits the last visible cell at bottom/right, shift view
             const rowIdx = filteredRowHeaders.indexOf(rowLabel);
             if (rowIdx !== -1) {
-                const currentRowEnd = Math.min(rowStart + visibleRowsCount , filteredRowHeaders.length );
-                if (rowIdx + 1 >= currentRowEnd) {
+                const nfStart = Math.max(rowStart, freezeRowsCount);
+                const currentRowEnd = Math.min(nfStart + nonFrozenVisibleRowsCount, filteredRowHeaders.length);
+                if (rowIdx + 1 > currentRowEnd - 1) {
                     setRowStart(prev => Math.min(
-                        (filteredRowHeaders.length - visibleRowsCount + 1) > 1 ? (filteredRowHeaders.length - visibleRowsCount + 1) : 1,
+                        (filteredRowHeaders.length - (nonFrozenVisibleRowsCount) + 1) > 1 ? (filteredRowHeaders.length - (nonFrozenVisibleRowsCount) + 1) : 1,
                         rowStart + 1
                     ));
                 }
@@ -190,8 +192,8 @@ export default function Sheet() {
             const colIdx = COL_HEADERS.indexOf(colLabel);
             if (colIdx !== -1) {
                 const currentColNum = colIdx + 1; // 1-based column number
-                if (currentColNum >= colEnd) {
-                    setColStart(prev => Math.min(COLS - visibleColsCount + 1, prev + 1));
+                if (currentColNum > freezeColsCount && currentColNum >= colEnd) {
+                    setColStart(prev => Math.min(COLS - nonFrozenVisibleColsCount + 1, prev + 1));
                 }
             }
         }, 1000);
@@ -362,6 +364,9 @@ export default function Sheet() {
     const [visibleRowsCount, setVisibleRowsCount] = useState(15);
     const [colStart, setColStart] = useState(1);
     const [visibleColsCount, setVisibleColsCount] = useState(7);
+    // Configurable freeze counts (first N rows, first M columns)
+    const [freezeRowsCount, setFreezeRowsCount] = useState(1);
+    const [freezeColsCount, setFreezeColsCount] = useState(1);
     const DEFAULT_COL_WIDTH = 112; // px (Tailwind w-28)
     const DEFAULT_ROW_HEIGHT = 40; // px (Tailwind h-10)
     const DEFAULT_ROW_LABEL_WIDTH = 60; // px (Tailwind w-10)
@@ -387,6 +392,7 @@ export default function Sheet() {
         const key = `${row}-${col}`;
         const existingScript = (data[key]?.script ?? '').toString();
         setScriptText(existingScript);
+        editingOriginalScriptRef.current = existingScript;
         setScriptPopup({ visible: true, x: Math.max(8, x), y: Math.max(8, y), row, col });
     };
     const closeScriptPopup = () => setScriptPopup({ visible: false, x: 0, y: 0, row: null, col: null });
@@ -427,8 +433,11 @@ export default function Sheet() {
         }
     };
 
-    const rowEnd = Math.min(rowStart + visibleRowsCount - 1, ROWS);
-    const colEnd = Math.min(colStart + visibleColsCount - 1, COLS);
+    // Visible ranges accounting for frozen panes
+    const nonFrozenVisibleRowsCount = Math.max(0, Math.min(visibleRowsCount, ROWS) - Math.min(freezeRowsCount, ROWS));
+    const nonFrozenVisibleColsCount = Math.max(0, Math.min(visibleColsCount, COLS) - Math.min(freezeColsCount, COLS));
+    const rowEnd = Math.min(Math.max(rowStart, freezeRowsCount) + nonFrozenVisibleRowsCount - 1, ROWS);
+    const colEnd = Math.min(Math.max(colStart, freezeColsCount) + nonFrozenVisibleColsCount - 1, COLS);
 
     // Filtered rows state
     const [filteredRowHeaders, setFilteredRowHeaders] = useState(ROW_HEADERS);
@@ -454,18 +463,19 @@ export default function Sheet() {
                     const prefs = await prefsRes.json();
                     if (typeof prefs.visible_rows === 'number' && prefs.visible_rows > 0) {
                         setVisibleRowsCount(Math.min(ROWS, Math.max(1, prefs.visible_rows)));
-                        setRowStart((prev) => Math.min(prev, Math.max(2, ROWS - prefs.visible_rows + 1)));
+                        const nonFrozenPrefRows = Math.max(0, Math.min(ROWS, prefs.visible_rows) - Math.min(freezeRowsCount, ROWS));
+                        setRowStart((prev) => Math.min(prev, Math.max(Math.min(freezeRowsCount, ROWS) + 1, ROWS - nonFrozenPrefRows + 1)));
                     }
                     if (typeof prefs.visible_cols === 'number' && prefs.visible_cols > 0) {
                         setVisibleColsCount(Math.min(COLS, Math.max(1, prefs.visible_cols)));
-                        setColStart((prev) => Math.min(prev, Math.max(1, COLS - prefs.visible_cols + 1)));
+                        const nonFrozenPrefCols = Math.max(0, Math.min(COLS, prefs.visible_cols) - Math.min(freezeColsCount, COLS));
+                        setColStart((prev) => Math.min(prev, Math.max(1, COLS - nonFrozenPrefCols + 1)));
                     }
                 }
             } catch (e) {
-                // ignore fetch errors here; interval time-based check will still run
+                // ignore preference fetch errors
             }
         })();
-
         // Check session every minute
         const sessionCheckInterval = setInterval(() => {
             if (!isSessionValid()) {
@@ -1071,12 +1081,13 @@ export default function Sheet() {
     // Update filteredRowHeaders when filters or sort change
     useEffect(() => {
         const activeFilters = Object.entries(filters).filter(([col, val]) => val && val.trim() !== '');
+        const frozenRows = Array.from({ length: Math.min(freezeRowsCount, ROWS) }, (_, i) => i + 1);
         let newFilteredRowHeaders = activeFilters.length === 0
             ? ROW_HEADERS
             : [
-                1,
+                ...frozenRows,
                 ...ROW_HEADERS.filter((rowLabel) => {
-                    if (rowLabel === 1) return false; // avoid duplicate, we add 1 explicitly
+                    if (rowLabel <= freezeRowsCount) return false; // avoid duplicate, we add frozen rows explicitly
                     return activeFilters.every(([colLabel, filterVal]) => {
                         const key = `${rowLabel}-${colLabel}`;
                         const cell = data[key] || { value: '' };
@@ -1087,7 +1098,8 @@ export default function Sheet() {
 
         // Apply sorting if configured
         if (sortConfig && sortConfig.col && sortConfig.direction) {
-            const startIdx = newFilteredRowHeaders[0] === 1 ? 1 : 0;
+            const frozenRows = Array.from({ length: Math.min(freezeRowsCount, ROWS) }, (_, i) => i + 1);
+            const startIdx = frozenRows.length;
             const rowsToSort = newFilteredRowHeaders.slice(startIdx);
 
             const parseValue = (row) => {
@@ -1119,12 +1131,12 @@ export default function Sheet() {
                 return sortConfig.direction === 'asc' ? cmp : -cmp;
             });
 
-            newFilteredRowHeaders = startIdx === 1 ? [1, ...rowsToSort] : rowsToSort;
+            newFilteredRowHeaders = startIdx > 0 ? [...frozenRows, ...rowsToSort] : rowsToSort;
             //console.log("sorted::", newFilteredRowHeaders);
         }
 
         setFilteredRowHeaders(newFilteredRowHeaders);
-    }, [filters, sortConfig, data]);
+    }, [filters, sortConfig, data, freezeRowsCount]);
 
     // Determine if filtering is active (used to disable row reordering)
     const isFilterActive = Object.values(filters).some(v => v && v.trim() !== '');
@@ -1240,12 +1252,13 @@ export default function Sheet() {
         // Adjust rowStart only if targetRow is not already within the visible window
         const rowIdx = filteredRowHeaders.indexOf(targetRow);
         if (rowIdx !== -1) {
-            const currentStartIdx = Math.max(0, rowStart - 1);
-            const currentEndIdx = Math.min(filteredRowHeaders.length - 1, currentStartIdx + visibleRowsCount - 1);
+            const currentStartIdx = Math.max(0, Math.max(rowStart, freezeRowsCount) - 1);
+            const currentEndIdx = Math.min(filteredRowHeaders.length - 1, currentStartIdx + nonFrozenVisibleRowsCount - 1);
             const rowVisible = rowIdx >= currentStartIdx && rowIdx <= currentEndIdx;
             if (!rowVisible) {
-                const maxRowStart = Math.max(1, filteredRowHeaders.length - visibleRowsCount + 1);
-                const desiredStart = Math.max(1, Math.min(maxRowStart, rowIdx + 1));
+                if (targetRow <= freezeRowsCount) return; // frozen rows are always visible
+                const maxRowStart = Math.max(1, filteredRowHeaders.length - nonFrozenVisibleRowsCount + 1);
+                const desiredStart = Math.max(freezeRowsCount + 1, Math.min(maxRowStart, rowIdx + 1));
                 setRowStart(desiredStart);
             }
         }
@@ -1253,9 +1266,9 @@ export default function Sheet() {
         const colIdx = COL_HEADERS.indexOf(targetColLabel);
         if (colIdx !== -1) {
             const colNumber = colIdx + 1; // 1-based
-            const colVisible = colNumber >= colStart && colNumber <= colEnd;
+            const colVisible = (colNumber <= freezeColsCount) || (colNumber >= colStart && colNumber <= colEnd);
             if (!colVisible) {
-                const maxColStart = Math.max(1, COLS - visibleColsCount + 1);
+                const maxColStart = Math.max(1, COLS - nonFrozenVisibleColsCount + 1);
                 const desiredColStart = Math.max(1, Math.min(maxColStart, colNumber));
                 setColStart(desiredColStart);
             }
@@ -1359,15 +1372,17 @@ export default function Sheet() {
     };
     const closeDiffPanel = () => setDiffPanel({ visible: false, entry: null, parts: [] });
 
+    const nonFrozenRowSliceStart = Math.max(rowStart, freezeRowsCount);
+    const nonFrozenRowSliceEnd = Math.min(nonFrozenRowSliceStart + nonFrozenVisibleRowsCount, filteredRowHeaders.length);
     const displayedRowHeaders = [
-        1,
-        ...filteredRowHeaders.slice(
-            filteredRowHeaders.length > visibleRowsCount?  rowStart:1,
-            Math.min(rowStart + visibleRowsCount , filteredRowHeaders.length )
-        )
+        ...filteredRowHeaders.slice(0, freezeRowsCount),
+        ...filteredRowHeaders.slice(nonFrozenRowSliceStart, nonFrozenRowSliceEnd)
     ];
 
-    const displayedColHeaders = [COL_HEADERS[0], ...COL_HEADERS.slice(colStart , colEnd)];
+    const displayedColHeaders = [
+        ...COL_HEADERS.slice(0, freezeColsCount),
+        ...COL_HEADERS.slice(Math.max(colStart, freezeColsCount), colEnd)
+    ];
 
     // Clear filter values when showFilters is set to false
     useEffect(() => {
@@ -1472,7 +1487,8 @@ export default function Sheet() {
                                 onChange={(e) => {
                                     const val = Math.max(1, Math.min(ROWS, parseInt(e.target.value, 10) || 1));
                                     setVisibleRowsCount(val);
-                                    setRowStart((prev) => Math.min(prev, Math.max(2, ROWS - val + 1)));
+                                    const nfCount = Math.max(0, val - Math.min(freezeRowsCount, ROWS));
+                                    setRowStart((prev) => Math.min(prev, Math.max(Math.min(freezeRowsCount, ROWS) + 1, ROWS - nfCount + 1)));
                                     // persist preference
                                     (async () => {
                                         try {
@@ -1486,6 +1502,21 @@ export default function Sheet() {
                                 }}
                                 title="Visible rows"
                             />
+                            <span className="text-sm text-gray-600 ml-2">Frozen rows</span>
+                            <input
+                                type="number"
+                                className="w-16 border rounded px-2 py-1 text-sm"
+                                min={0}
+                                max={ROWS}
+                                value={freezeRowsCount}
+                                onChange={(e) => {
+                                    const val = Math.max(0, Math.min(ROWS, parseInt(e.target.value, 10) || 0));
+                                    setFreezeRowsCount(val);
+                                    const nfCount = Math.max(0, visibleRowsCount - Math.min(val, ROWS));
+                                    setRowStart((prev) => Math.min(Math.max(prev, val + 1), Math.max(1, ROWS - nfCount + 1)));
+                                }}
+                                title="Frozen rows (top)"
+                            />
                             <span className="text-sm text-gray-600 ml-2">Cols visible</span>
                             <input
                                 type="number"
@@ -1496,7 +1527,8 @@ export default function Sheet() {
                                 onChange={(e) => {
                                     const val = Math.max(1, Math.min(COLS, parseInt(e.target.value, 10) || 1));
                                     setVisibleColsCount(val);
-                                    setColStart((prev) => Math.min(prev, Math.max(1, COLS - val + 1)));
+                                    const nfCount = Math.max(0, val - Math.min(freezeColsCount, COLS));
+                                    setColStart((prev) => Math.min(prev, Math.max(1, COLS - nfCount + 1)));
                                     // persist preference
                                     (async () => {
                                         try {
@@ -1509,6 +1541,21 @@ export default function Sheet() {
                                     })();
                                 }}
                                 title="Visible columns"
+                            />
+                            <span className="text-sm text-gray-600 ml-2">Frozen cols</span>
+                            <input
+                                type="number"
+                                className="w-16 border rounded px-2 py-1 text-sm"
+                                min={0}
+                                max={COLS}
+                                value={freezeColsCount}
+                                onChange={(e) => {
+                                    const val = Math.max(0, Math.min(COLS, parseInt(e.target.value, 10) || 0));
+                                    setFreezeColsCount(val);
+                                    const nfCount = Math.max(0, visibleColsCount - Math.min(val, COLS));
+                                    setColStart((prev) => Math.min(Math.max(prev, 1), Math.max(1, COLS - nfCount + 1)));
+                                }}
+                                title="Frozen columns (left)"
                             />
                             {/* Style controls for focused cell */}
                         <div className="flex items-center gap-2 ml-2">
@@ -1735,13 +1782,13 @@ export default function Sheet() {
                                      handleCellChange(row, col, data[key].value);
                                  }
                                  const step = e.deltaY > 0 ? 1 : -1;
-                                 const maxStart = Math.max(1, COLS - visibleColsCount + 1);
+                                 const maxStart = Math.max(1, COLS - nonFrozenVisibleColsCount + 1);
                                  setColStart(prev => Math.max(1, Math.min(maxStart, prev + step)));
                              }}>
                             <input
                                 type="range"
                                 min={1}
-                                max={Math.max(1, COLS - visibleColsCount + 1)}
+                                max={Math.max(1, COLS - nonFrozenVisibleColsCount + 1)}
                                 value={colStart}
                                 onChange={(e) =>{ 
                                     // Commit edit and exit editing mode on scroll
@@ -1752,7 +1799,7 @@ export default function Sheet() {
                                     if (data[key]) {
                                         handleCellChange(row, col, data[key].value);
                                     }
-                                    setColStart(Math.max(1, Math.min(COLS - visibleColsCount + 1, parseInt(e.target.value, 10) || 1)))}}
+                                    setColStart(Math.max(1, Math.min(COLS - nonFrozenVisibleColsCount + 1, parseInt(e.target.value, 10) || 1)))}}
                                 style={{ width: '100%' }}
                                 aria-label="Columns scrollbar"
                             />
@@ -1769,8 +1816,8 @@ export default function Sheet() {
                                      handleCellChange(row, col, data[key].value);
                                  }
                                  const step = e.deltaY > 0 ? 1 : -1;
-                                 const maxStart = Math.max(1, ROWS - visibleRowsCount + 1);
-                                 setRowStart(prev => Math.max(1, Math.min(maxStart, prev + step)));
+                                 const maxStart = Math.max(freezeRowsCount + 1, ROWS - nonFrozenVisibleRowsCount + 1);
+                                 setRowStart(prev => Math.max(freezeRowsCount + 1, Math.min(maxStart, prev + step)));
                              }}
                              className="flex items-stretch">
                             <input
@@ -2089,7 +2136,7 @@ export default function Sheet() {
                                                 <td
                                                     key={key}
                                                     className={`border-b border-r border-gray-200 bg-gray-100 p-0 relative min-w-[7rem] group ${ inShared ? 'bg-indigo-50' : 'bg-white'} hover:bg-green-50/20 transition-colors`}
-                                                    style={{ width: `${colWidths[colLabel] || DEFAULT_COL_WIDTH}px`, height: `${rowHeights[rowLabel] || DEFAULT_ROW_HEIGHT}px`, ...boundaryStyles }}
+                                                    style={{ position : 'relative', width: `${colWidths[colLabel] || DEFAULT_COL_WIDTH}px`, height: `${rowHeights[rowLabel] || DEFAULT_ROW_HEIGHT}px`, ...boundaryStyles }}
                                                     onContextMenu={(e) => {  !isEditing && !showScripts && showContextMenu(e, rowLabel, colLabel)}}
                                                 >
                                                     <textarea
@@ -2111,14 +2158,20 @@ export default function Sheet() {
 
                                                         data-row={rowLabel}
                                                         data-col={colLabel}
-                                                        readOnly={showScripts || !!cell.locked || !canEdit}
+                                                        readOnly={showScripts || !!cell.locked || !!cell.script || !canEdit}
                                                         onFocus={() => { setFocusedCell({ row: rowLabel, col: colLabel }); setIsEditing(false); setIsDoubleClicked(false); }}
                                                         onMouseOver={e => { e.target.focus(); }}
                                                         onDoubleClick={(e) => {
                                                             if (showScripts) return;
                                                             if (isEditing) return;
                                                             if (cell.locked || !canEdit) return;
-                                                            // Prevent default double-click text selection
+                                                            // If the cell has a script, open the script editor instead of value editing
+                                                            if ((cell.script ?? '').toString().length > 0) {
+                                                                e.preventDefault();
+                                                                openScriptPopup(rowLabel, colLabel, e.clientX, e.clientY);
+                                                                return;
+                                                            }
+                                                            // Default behavior: enter value edit mode
                                                             e.preventDefault();
                                                             e.target.focus();
                                                             if (connected) {
@@ -2128,7 +2181,6 @@ export default function Sheet() {
                                                                 setCutCol(null);
                                                             }
                                                             editingOriginalValueRef.current = (cell.value ?? '').toString();
-                                                            // Clear any selection by collapsing caret
                                                             if (typeof e.target.setSelectionRange === 'function') {
                                                                 const len = e.target.value.length;
                                                                 e.target.setSelectionRange(len, len);
@@ -2160,7 +2212,13 @@ export default function Sheet() {
                                                             const isMultiline = typeof cell.value === 'string' && cell.value.includes('\n');
                                                             const keys = ['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Enter'];
                                                             // Enter edit mode when typing any non-arrow key (including Enter)
-                                                            if (!keys.includes(e.key)) { if(cell.locked) return; if(connected) setIsEditing(true); console.log('Entering edit mode for non-arrow key'); return; }
+                                                            if (!keys.includes(e.key)) {
+                                                                if (cell.locked) return;
+                                                                // If cell has a script, do not enter value edit mode
+                                                                if ((cell.script ?? '').toString().length > 0) return;
+                                                                if (connected) setIsEditing(true);
+                                                                return;
+                                                            }
                                                             // In edit mode, allow default arrow behavior inside textarea and disable cell navigation if multiline without Shift
                                                             if (isEditing && (isMultiline || (!isMultiline && e.shiftKey)|| isDoubleClicked ) && keys.includes(e.key) ) { return; }
                                                             e.preventDefault();
@@ -2172,9 +2230,10 @@ export default function Sheet() {
                                                             if (e.key === 'ArrowDown' || e.key === 'Enter') {
                                                                 if (rowIdx !== -1 && rowIdx + 1 < filteredRowHeaders.length) {
                                                                     nextRow = filteredRowHeaders[rowIdx + 1];
-                                                                    const currentRowEnd = Math.min(rowStart + visibleRowsCount , filteredRowHeaders.length );
+                                                                    const nfStart = Math.max(rowStart, freezeRowsCount);
+                                                                    const currentRowEnd = Math.min(nfStart + nonFrozenVisibleRowsCount, filteredRowHeaders.length );
                                                                     if (rowIdx + 1 > currentRowEnd - 1) {
-                                                                        setRowStart(prev => Math.min(filteredRowHeaders.length - visibleRowsCount + 1 > 1 ?  filteredRowHeaders.length - visibleRowsCount + 1 : 1, rowStart+1));
+                                                                        setRowStart(prev => Math.min(filteredRowHeaders.length - (nonFrozenVisibleRowsCount) + 1 > 1 ?  filteredRowHeaders.length - (nonFrozenVisibleRowsCount) + 1 : 1, rowStart+1));
                                                                     }
                                                                 }
                                                             } else if (e.key === 'ArrowUp') {
@@ -2190,7 +2249,7 @@ export default function Sheet() {
                                                                     nextCol = COL_HEADERS[colIdx + 1];
                                                                     const nextColNum = colIdx + 2;
                                                                     if (nextColNum > colEnd) {
-                                                                        setColStart(prev => Math.min(COLS - visibleColsCount + 1, prev + 1));
+                                                                        setColStart(prev => Math.min(COLS - nonFrozenVisibleColsCount + 1, prev + 1));
                                                                     }
                                                                 }
                                                             } else if (e.key === 'ArrowLeft') {
@@ -2226,7 +2285,7 @@ export default function Sheet() {
                                                         onChange={(e) => {
                                                             if (showScripts) return;
                                                             // Update local state for textarea value
-                                                            if (cell.locked || !canEdit) return;
+                                                            if (cell.locked || (cell.script ?? '').toString().length > 0 || !canEdit) return;
                                                             if (connected)
                                                             updateCellState(rowLabel, colLabel, e.target.value);
                                                             setIsSelecting(false);
@@ -2238,11 +2297,33 @@ export default function Sheet() {
                                                             setIsEditing(false);
                                                             setIsDoubleClicked(false);
                                                             // Commit value to backend only on blur
-                                                            if (!cell.locked && canEdit) handleCellChange(rowLabel, colLabel, e.target.value);
+                                                            if (!cell.locked && (cell.script ?? '').toString().length === 0 && canEdit) handleCellChange(rowLabel, colLabel, e.target.value);
                                                         }}
                                                     />
-
                                                     
+                                                    {cell.locked && (
+                                                        // Lock icon but not visible to be fixed
+                                                        <span
+                                                            title="Locked"
+                                                            style={{
+                                                                position: 'absolute',
+                                                                top: 2,
+                                                                right: 2,
+                                                                zIndex: 60,
+                                                                background: 'rgba(248, 243, 243, 0.95)',
+                                                                borderRadius: '4px',
+                                                                padding: '0px 0px',
+                                                                display: 'inline-flex',
+                                                                alignItems: 'center',
+                                                                lineHeight: 1,
+                                                                boxShadow: '0 0 0 0px rgba(0,0,0,0.05)',
+                                                                pointerEvents: 'none'
+                                                            }}
+                                                        >
+                                                            <Lock size={12} color="#4b5563" />
+                                                        </span>
+                                                    )}
+
                                                         {/* Context Menu */}
                                                         {contextMenu.visible && (
                                                             <div
