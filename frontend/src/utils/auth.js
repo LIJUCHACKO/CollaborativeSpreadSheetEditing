@@ -90,10 +90,10 @@ export async function authenticatedFetch(url, options = {}) {
 /**
  * Build full backend URL from env, accepting both host or full URL.
  * Examples:
- * - VITE_BACKEND_HOST="localhost" => http://localhost:8080
+ * - VITE_BACKEND_HOST="localhost" => http://localhost:8082
  * - VITE_BACKEND_HOST="127.0.0.1:9090" => http://127.0.0.1:9090
- * - VITE_BACKEND_HOST="http://localhost:8080" => http://localhost:8080
- * - VITE_BACKEND_HOST not set => http://localhost:8080
+ * - VITE_BACKEND_HOST="http://localhost:8082" => http://localhost:8082
+ * - VITE_BACKEND_HOST not set => http://localhost:8082
  * @param {string} path like "/api/login"
  * @returns {string} full URL
  */
@@ -101,12 +101,12 @@ export function apiUrl(path) {
   const raw = import.meta?.env?.VITE_BACKEND_HOST;
   let base;
   if (!raw || raw.trim() === '') {
-    base = 'http://localhost:8080';
+    base = 'http://localhost:8082';
   } else if (raw.startsWith('http://') || raw.startsWith('https://')) {
     base = raw.replace(/\/$/, '');
   } else {
     // treat as host[:port]
-    base = raw.includes(':') ? `http://${raw}` : `http://${raw}:8080`;
+    base = raw.includes(':') ? `http://${raw}` : `http://${raw}:8082`;
   }
   const p = path.startsWith('/') ? path : `/${path}`;
   return `${base}${p}`;

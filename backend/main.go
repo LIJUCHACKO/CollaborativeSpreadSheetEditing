@@ -15,7 +15,7 @@ import (
 	"github.com/xuri/excelize/v2"
 )
 
-var addr = flag.String("addr", ":8080", "http service address")
+var addr = flag.String("addr", ":8082", "http service address")
 
 func main() {
 	flag.Parse()
@@ -1036,6 +1036,112 @@ func main() {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(sheet.SnapshotForClient())
+	})
+
+	// Get the value of a specific cell in a sheet
+	//usage
+	//curl -s -H "Authorization: <token>" \
+	// "http://localhost:8082/api/sheet/cell?sheet_id=20260122223748&project=project32/new2&row=1&col=A"
+	//curl -s -H "Authorization: <token>" \
+	// "http://localhost:8082/api/sheet/cell?sheet_id=20260122223748&project=project32/new2&cell=A1"
+	//# With jq (recommended)
+	//TOKEN=$(curl -s -X POST http://localhost:8082/api/login \
+	// -H "Content-Type: application/json" \
+	//  -d '{"username":"alice","password":"secret"}' | jq -r '.token')
+	// # Without jq (basic grep/sed fallback)
+	//TOKEN=$(curl -s -X POST http://localhost:8082/api/login \
+	// -H "Content-Type: application/json" \
+	//  -d '{"username":"alice","password":"secret"}' | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+	//this function is not tested
+	http.HandleFunc("/api/sheet/cell", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		token := r.Header.Get("Authorization")
+		_, err := globalUserManager.ValidateToken(token)
+		if err != nil {
+			http.Error(w, "Unauthorized: "+err.Error(), http.StatusUnauthorized)
+			return
+		}
+
+		sheetID := r.URL.Query().Get("sheet_id")
+		project := r.URL.Query().Get("project")
+		row := r.URL.Query().Get("row")
+		col := r.URL.Query().Get("col")
+		cell := strings.TrimSpace(r.URL.Query().Get("cell"))
+
+		if sheetID == "" {
+			http.Error(w, "sheet_id is required", http.StatusBadRequest)
+			return
+		}
+
+		// Allow either row+col or a combined cell like A5
+		if cell != "" {
+			// Parse leading letters as column and trailing digits as row
+			i := 0
+			for i < len(cell) {
+				ch := cell[i]
+				if (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') {
+					i++
+					continue
+				}
+				break
+			}
+			colPart := cell[:i]
+			rowPart := cell[i:]
+			if colPart == "" || rowPart == "" {
+				http.Error(w, "invalid cell format; expected like A5", http.StatusBadRequest)
+				return
+			}
+			// Validate row is numeric
+			if _, err := strconv.Atoi(rowPart); err != nil {
+				http.Error(w, "invalid row number in cell", http.StatusBadRequest)
+				return
+			}
+			col = strings.ToUpper(colPart)
+			row = rowPart
+		}
+
+		if row == "" || col == "" {
+			http.Error(w, "row and col (or cell) required", http.StatusBadRequest)
+			return
+		}
+		sheet := globalSheetManager.GetSheetBy(sheetID, project)
+		if sheet == nil {
+			http.Error(w, "Sheet not found", http.StatusNotFound)
+			return
+		}
+
+		var value string
+		exists := false
+		sheet.mu.RLock()
+		if rowMap, ok := sheet.Data[row]; ok {
+			if cell, ok := rowMap[col]; ok {
+				value = cell.Value
+				exists = true
+			}
+		}
+		sheet.mu.RUnlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"sheet_id": sheetID,
+			"project":  project,
+			"row":      row,
+			"col":      col,
+			"value":    value,
+			"exists":   exists,
+		})
 	})
 
 	// List all usernames (for selection)

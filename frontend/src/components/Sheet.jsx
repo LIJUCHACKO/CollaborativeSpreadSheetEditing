@@ -82,7 +82,7 @@ export default function Sheet() {
     const [selectedRange, setSelectedRange] = useState(null); // Array of { row, col }
     const [isSelecting, setIsSelecting] = useState(false);
     const [isSelectingWithShift, setIsSelectingWithShift] = useState(false);
-    const [copiedBlock, setCopiedBlock] = useState(null); // { rows, cols, values: string[][] }
+    const [copiedBlock, setCopiedBlock] = useState(null); // { Rows, Cols, values: string[][], scripts?: string[][] }
     const [contextMenu, setContextMenu] = useState({ visible: false, x: 0, y: 0, cell: null });
     // Chat state
     const [chatMessages, setChatMessages] = useState([]); // [{timestamp, user, text, to}]
@@ -149,13 +149,17 @@ export default function Sheet() {
             .sort((a, b) => (colIndexMap[a] ?? -1) - (colIndexMap[b] ?? -1));
 
         const values = [];
+        const scripts = [];
         for (const r of uniqueRows) {
             const rowArr = [];
+            const scriptRowArr = [];
             for (const c of uniqueCols) {
                 const key = `${r}-${c}`;
                 rowArr.push((data[key]?.value ?? '').toString());
+                scriptRowArr.push((data[key]?.script ?? '').toString());
             }
             values.push(rowArr);
+            scripts.push(scriptRowArr);
         }
 
         const noOfRows = uniqueRows.length;
@@ -168,6 +172,7 @@ export default function Sheet() {
                 Cols: noOfCols,
                 sheet_id: id,
                 values,
+                scripts,
             };
             ws.current.send(JSON.stringify({ type: 'SELECTION_COPIED', sheet_id: id, payload }));
         }
@@ -269,6 +274,7 @@ export default function Sheet() {
         const anchorRowIndex = filteredRowHeaders.indexOf(anchorRow);
         if (anchorRowIndex < 0) return;
         const updates = {};
+        const scriptUpdates = {};
         const changes = [];
         let hasConflict = false;
         // Prevent pasting into any locked destination cells using filtered row order
@@ -321,8 +327,12 @@ export default function Sheet() {
                 if (!cLabel) continue;
                 const key = `${r}-${cLabel}`;
                 const value = copiedBlock.values[rOff][cOff] ?? '';
+                const scriptVal = copiedBlock.scripts && copiedBlock.scripts[rOff] ? (copiedBlock.scripts[rOff][cOff] ?? '') : '';
                 const oldValue = (data[key]?.value ?? '').toString();
                 updates[key] = { value, user: username };
+                if (scriptVal && scriptVal.toString().length > 0) {
+                    scriptUpdates[key] = { script: scriptVal.toString(), user: username };
+                }
                 changes.push({ row: String(r), col: String(cLabel), oldValue, newValue: (value ?? '').toString() });
             }
         }
@@ -332,6 +342,9 @@ export default function Sheet() {
             const next = { ...prev };
             Object.entries(updates).forEach(([key, cell]) => {
                 next[key] = { ...(prev[key] || {}), value: cell.value, user: cell.user };
+            });
+            Object.entries(scriptUpdates).forEach(([key, cell]) => {
+                next[key] = { ...(next[key] || prev[key] || {}), script: cell.script, user: cell.user };
             });
             return next;
         });
@@ -344,8 +357,15 @@ export default function Sheet() {
 
         // Broadcast each cell update to server
         if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+            // Send script updates first; backend will execute and broadcast updated values
+            Object.entries(scriptUpdates).forEach(([key, cell]) => {
+                const [rowStr, colLabel] = key.split('-');
+                const payload = { row: rowStr, col: colLabel, script: cell.script, user: username };
+                ws.current.send(JSON.stringify({ type: 'UPDATE_CELL_SCRIPT', sheet_id: id, payload }));
+            });
+            // Send value updates for cells without scripts in source
             Object.entries(updates).forEach(([key, cell]) => {
-                // Send even empty values to correctly overwrite
+                if (scriptUpdates[key]) return; // skip value update if a script will define the value
                 const [rowStr, colLabel] = key.split('-');
                 const payload = { row: rowStr, col: colLabel, value: cell.value, user: username };
                 ws.current.send(JSON.stringify({ type: 'UPDATE_CELL', sheet_id: id, payload }));
@@ -571,9 +591,9 @@ export default function Sheet() {
                             setChatMessages(prev => [...prev, appended]);
                         }
                     } else if (msg.type === 'SELECTION_SHARED') {
-                        const { Rows, Cols, sheet_id, values } = msg.payload || {};
+                        const { Rows, Cols, sheet_id, values, scripts } = msg.payload || {};
                         if (Rows && Cols && Array.isArray(values)) {
-                            setCopiedBlock({ Rows, Cols, values });
+                            setCopiedBlock({ Rows, Cols, values, scripts: Array.isArray(scripts) ? scripts : undefined });
                         }
                     } else if (msg.type === 'PONG') {
                         console.log("Received PONG from server");
@@ -1728,7 +1748,7 @@ export default function Sheet() {
                             <textarea
                                 className="border rounded px-2 py-1 text-sm"
                                 rows={3}
-                                style={{ width: 240 }}
+                                style={{ minWidth: 240, resize: 'horizontal', overflow: 'auto' }}
                                 value={scriptText}
                                 onChange={(e) => setScriptText(e.target.value)}
                                 disabled={!canEdit}

@@ -9,6 +9,14 @@ import (
 	"regexp"
 	"sync"
 	"time"
+
+	"bytes"
+	"strings"
+
+	"python-libs/data"
+
+	"github.com/kluctl/go-embed-python/embed_util"
+	"github.com/kluctl/go-embed-python/python"
 )
 
 const dataDir = "../DATA"
@@ -31,14 +39,17 @@ func ensureDataDir() error {
 }
 
 type Cell struct {
-	Value      string `json:"value"`
-	Script     string `json:"script"`
-	User       string `json:"user,omitempty"` // Last edited by
-	Locked     bool   `json:"locked,omitempty"`
-	LockedBy   string `json:"locked_by,omitempty"`
-	Background string `json:"background,omitempty"`
-	Bold       bool   `json:"bold,omitempty"`
-	Italic     bool   `json:"italic,omitempty"`
+	Value                string `json:"value"`
+	ScriptOutput         string `json:"script_output,omitempty"`
+	ScriptOutput_RowSpan int    `json:"script_output_row_span,omitempty"`
+	ScriptOutput_ColSpan int    `json:"script_output_col_span,omitempty"`
+	Script               string `json:"script,omitempty"` //python script
+	User                 string `json:"user,omitempty"`   // Last edited by
+	Locked               bool   `json:"locked,omitempty"`
+	LockedBy             string `json:"locked_by,omitempty"`
+	Background           string `json:"background,omitempty"`
+	Bold                 bool   `json:"bold,omitempty"`
+	Italic               bool   `json:"italic,omitempty"`
 }
 
 type AuditEntry struct {
@@ -164,6 +175,46 @@ var globalSheetManager = &SheetManager{
 // Initialize async saver once during startup
 func init() {
 	globalSheetManager.initAsyncSaver()
+	// Initialize embedded Python once at startup
+	if _, err := getEmbeddedPython(); err != nil {
+		log.Printf("Embedded Python init failed: %v", err)
+	}
+}
+
+var (
+	embeddedPy        *python.EmbeddedPython
+	embeddedPyOnce    sync.Once
+	embeddedPyInitErr error
+)
+
+// getEmbeddedPython initializes and returns a shared embedded Python interpreter.
+// It extracts the embedded Python distribution to a temp dir on first use.
+func getEmbeddedPython() (*python.EmbeddedPython, error) {
+	var initErr error
+	embeddedPyOnce.Do(func() {
+		ep, err := python.NewEmbeddedPython("shared-spreadsheet")
+		if err != nil {
+			initErr = err
+			embeddedPyInitErr = err
+			return
+		}
+
+		libFiles, err := embed_util.NewEmbeddedFiles(data.Data, "python-lib")
+
+		if err != nil {
+			initErr = err
+			embeddedPyInitErr = err
+			return
+		}
+		fmt.Println("Extracting embedded Python libraries to:", libFiles.GetExtractedPath())
+		ep.AddPythonPath(libFiles.GetExtractedPath())
+		embeddedPy = ep
+	})
+	if initErr != nil {
+		embeddedPyInitErr = initErr
+		return nil, initErr
+	}
+	return embeddedPy, nil
 }
 
 func (sm *SheetManager) initAsyncSaver() {
@@ -412,7 +463,6 @@ func (s *Sheet) SetCell(row, col, value, user string, reverted bool) {
 // SetCellScript updates only the script attribute for a cell, preserving value and other metadata.
 func (s *Sheet) SetCellScript(row, col, script, user string, reverted bool) {
 	s.mu.Lock()
-	//println("SetCellScript")
 	// ensure row map
 	if s.Data[row] == nil {
 		s.Data[row] = make(map[string]Cell)
@@ -425,19 +475,17 @@ func (s *Sheet) SetCellScript(row, col, script, user string, reverted bool) {
 	}
 	if exists && currentVal.Script == script {
 		// No change
-		//println("No change in script:", script)
 		s.mu.Unlock()
 		return
 	}
-	println("Setting script for cell", row, col, "to:", script)
 	// Preserve existing metadata
 	updated := currentVal
 	updated.Script = script
 	updated.User = user
 	s.Data[row][col] = updated
-	//println(s.Data[row][col].Script)
+
+	// Audit only script change
 	if reverted {
-		// Mark the original EDIT_SCRIPT entry as reverted instead of appending a new one
 		prevNew := currentVal.Script
 		r1 := atoiSafe(row)
 		for i := len(s.AuditLog) - 1; i >= 0; i-- {
@@ -448,7 +496,6 @@ func (s *Sheet) SetCellScript(row, col, script, user string, reverted bool) {
 			}
 		}
 	} else {
-		// Log script change with merge: if last entry is EDIT_SCRIPT for same cell and user, merge by keeping previous OldValue
 		var oldScript string
 		if exists {
 			oldScript = currentVal.Script
@@ -465,7 +512,6 @@ func (s *Sheet) SetCellScript(row, col, script, user string, reverted bool) {
 			}
 		}
 		if prevIdx >= 0 {
-			// Only merge if previous log is within 24 hours
 			if time.Since(s.AuditLog[prevIdx].Timestamp) < 24*time.Hour {
 				oldScript = s.AuditLog[prevIdx].OldValue
 				s.AuditLog = append(s.AuditLog[:prevIdx], s.AuditLog[prevIdx+1:]...)
@@ -485,7 +531,68 @@ func (s *Sheet) SetCellScript(row, col, script, user string, reverted bool) {
 		}
 	}
 
+	// Done updating script; release lock before running Python
 	s.mu.Unlock()
+	globalSheetManager.SaveSheet(s)
+	s.ExecuteCellScript(row, col)
+}
+func (s *Sheet) ExecuteCellScript(row, col string) {
+	if s.Data[row] == nil {
+		return
+	}
+	cur := s.Data[row][col]
+	script := cur.Script
+	if strings.TrimSpace(script) == "" {
+		return
+	}
+	// Execute the script and update the cell value without logging EDIT_CELL
+	ep := embeddedPy
+	if ep == nil {
+		// Store init error in the cell value
+		s.mu.Lock()
+		cur := s.Data[row][col]
+		if embeddedPyInitErr != nil {
+			cur.Value = "Error: " + embeddedPyInitErr.Error()
+		} else {
+			cur.Value = "Error: Embedded Python not initialized"
+		}
+		s.mu.Unlock()
+		globalSheetManager.SaveSheet(s)
+		return
+	}
+	cmd, err := ep.PythonCmd("-c", script)
+	if err != nil {
+		s.mu.Lock()
+		cur := s.Data[row][col]
+		cur.Value = "Error: " + err.Error()
+		s.mu.Unlock()
+		globalSheetManager.SaveSheet(s)
+		return
+	}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
+	var newVal string
+	if runErr != nil {
+		errOut := strings.TrimRight(stderr.String(), "\r\n")
+		if errOut == "" {
+			errOut = runErr.Error()
+		}
+		newVal = "Error: " + errOut
+	} else {
+		newVal = strings.TrimRight(stdout.String(), "\r\n")
+	}
+	// Write value back without audit
+	s.mu.Lock()
+	cur.ScriptOutput = newVal
+
+	// If scriptOutput is array [[...], [...]], copy value to cells below/right and it should not exceed scriptOutput_RowSpan/ColSpan
+	cur.Value = newVal // to be fixed as per above comment
+
+	s.Data[row][col] = cur
+	s.mu.Unlock()
+
 	globalSheetManager.SaveSheet(s)
 }
 
