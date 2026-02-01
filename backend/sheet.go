@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
+	"strconv"
 	"sync"
 	"time"
 
@@ -45,6 +47,7 @@ type Cell struct {
 	ScriptOutput_ColSpan int    `json:"script_output_col_span,omitempty"`
 	Script               string `json:"script,omitempty"` //python script
 	User                 string `json:"user,omitempty"`   // Last edited by
+	CellID               string `json:"cell_id,omitempty"`
 	Locked               bool   `json:"locked,omitempty"`
 	LockedBy             string `json:"locked_by,omitempty"`
 	Background           string `json:"background,omitempty"`
@@ -224,7 +227,7 @@ func (sm *SheetManager) initAsyncSaver() {
 		return
 	}
 	if sm.saveInterval == 0 {
-		sm.saveInterval = 1 * time.Second // default debounce window
+		sm.saveInterval = 5 * time.Second // default debounce window
 	}
 	sm.started = true
 	go sm.flusher()
@@ -461,7 +464,7 @@ func (s *Sheet) SetCell(row, col, value, user string, reverted bool) {
 }
 
 // SetCellScript updates only the script attribute for a cell, preserving value and other metadata.
-func (s *Sheet) SetCellScript(row, col, script, user string, reverted bool) {
+func (s *Sheet) SetCellScript(row, col, script, user string, reverted bool, rowSpan int, colSpan int) {
 	s.mu.Lock()
 	// ensure row map
 	if s.Data[row] == nil {
@@ -473,17 +476,6 @@ func (s *Sheet) SetCellScript(row, col, script, user string, reverted bool) {
 		s.mu.Unlock()
 		return
 	}
-	if exists && currentVal.Script == script {
-		// No change
-		s.mu.Unlock()
-		return
-	}
-	// Preserve existing metadata
-	updated := currentVal
-	updated.Script = script
-	updated.User = user
-	s.Data[row][col] = updated
-
 	// Audit only script change
 	if reverted {
 		prevNew := currentVal.Script
@@ -531,18 +523,116 @@ func (s *Sheet) SetCellScript(row, col, script, user string, reverted bool) {
 		}
 	}
 
+	// Preserve existing metadata
+	updated := currentVal
+	updated.Script = script
+	updated.User = user
+	if !exists || exists && strings.TrimSpace(currentVal.CellID) == "" {
+		updated.CellID = generateID()
+	}
+
+	// Normalize spans
+	if rowSpan <= 0 {
+		rowSpan = 1
+	}
+	if colSpan <= 0 {
+		colSpan = 1
+	}
+
+	updated.ScriptOutput_RowSpan = rowSpan
+	updated.ScriptOutput_ColSpan = colSpan
+	s.Data[row][col] = updated
+
 	// Done updating script; release lock before running Python
 	s.mu.Unlock()
 	globalSheetManager.SaveSheet(s)
 	s.ExecuteCellScript(row, col)
+	//s.FillValueFromScriptOutput(row, col)
 }
 func (s *Sheet) ExecuteCellScript(row, col string) {
 	if s.Data[row] == nil {
 		return
 	}
-	cur := s.Data[row][col]
+	cur, exists := s.Data[row][col]
+	if !exists {
+		return
+	}
 	script := cur.Script
+	rSpan := cur.ScriptOutput_RowSpan
+	cSpan := cur.ScriptOutput_ColSpan
+	lockedbyScriptAt := "script-span " + cur.CellID // 'script-span B5' means locked by script span starting at B5
+	if rSpan < 1 {
+		rSpan = 1
+	}
+	if cSpan < 1 {
+		cSpan = 1
+	}
+	s.mu.Lock()
+	// Reseting value and lock if cell is locked by lockedbyScriptAt
+	cur.Value = ""
+	for rKey, rowMap := range s.Data {
+		for cKey, cell := range rowMap {
+			if cell.Locked && cell.LockedBy == lockedbyScriptAt {
+				cell.Value = ""
+				cell.Locked = false
+				cell.LockedBy = ""
+				s.Data[rKey][cKey] = cell
+			}
+		}
+	}
+	// Validate emptiness for spanned area (excluding top-left)
+	if rSpan > 1 || cSpan > 1 {
+		baseIdx := colLabelToIndex(col)
+		baseRow := atoiSafe(row)
+		blocked := false
+		for dr := 0; dr < rSpan && !blocked; dr++ {
+			rKey := itoa(baseRow + dr)
+			for dc := 0; dc < cSpan; dc++ {
+				if dr == 0 && dc == 0 {
+					continue
+				}
+				cLabel := indexToColLabel(baseIdx + dc)
+				cell, ok := s.Data[rKey][cLabel]
+				if ok && (strings.TrimSpace(cell.Value) != "" || strings.TrimSpace(cell.Script) != "") {
+					blocked = true
+					break
+				}
+			}
+		}
+		if blocked {
+			// Keep spans at 1x1 if area is blocked
+			rSpan = 1
+			cSpan = 1
+		}
+		// Apply spans on top-left cell now that area is clear
+		cur.ScriptOutput_RowSpan = rSpan
+		cur.ScriptOutput_ColSpan = cSpan
+		// Lock covered cells
+		for dr := 0; dr < rSpan; dr++ {
+			rKey := itoa(baseRow + dr)
+			if s.Data[rKey] == nil {
+				s.Data[rKey] = make(map[string]Cell)
+			}
+			for dc := 0; dc < cSpan; dc++ {
+				if dr == 0 && dc == 0 {
+					continue
+				}
+				cLabel := indexToColLabel(baseIdx + dc)
+				c := s.Data[rKey][cLabel]
+				c.Locked = true
+				c.LockedBy = lockedbyScriptAt
+				s.Data[rKey][cLabel] = c
+			}
+		}
+	}
+	s.mu.Unlock()
 	if strings.TrimSpace(script) == "" {
+		s.mu.Lock()
+		cur.ScriptOutput = ""
+		s.Data[row][col] = cur
+		s.mu.Unlock()
+
+		globalSheetManager.SaveSheet(s)
 		return
 	}
 	// Execute the script and update the cell value without logging EDIT_CELL
@@ -556,15 +646,99 @@ func (s *Sheet) ExecuteCellScript(row, col string) {
 		} else {
 			cur.Value = "Error: Embedded Python not initialized"
 		}
+		s.Data[row][col] = cur
 		s.mu.Unlock()
 		globalSheetManager.SaveSheet(s)
 		return
 	}
+	// executing replaces the tags with values of the cells
+	//example
+	//1. if value at A2 is '7' then replace {{A2}} with '7' in the script
+	//2. if tag is like {{A2:B3}} then replace with a 2D array string like [[7,8],[9,10]] from the cell values
+
+	// Pattern to match {{A2}} or {{A2:B3}}
+	tagPattern := regexp.MustCompile(`\{\{([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?\}\}`)
+	s.mu.RLock()
+	script = tagPattern.ReplaceAllStringFunc(script, func(match string) string {
+		submatches := tagPattern.FindStringSubmatch(match)
+		if len(submatches) < 3 {
+			return match
+		}
+
+		startCol := submatches[1]
+		startRow := submatches[2]
+
+		// Single cell reference {{A2}}
+		if submatches[3] == "" || submatches[4] == "" {
+			//cellKey := startRow + "-" + startCol
+			if rowData, ok := s.Data[startRow]; ok {
+				if cell, ok := rowData[startCol]; ok {
+					// Return the cell value - quote only if not a number
+					val := cell.Value
+					if _, err := strconv.ParseFloat(val, 64); err == nil {
+						// It's a number, return unquoted
+						return val
+					}
+					// Not a number, return quoted
+					return fmt.Sprintf(`"%s"`, val)
+				}
+			}
+			return `""`
+		}
+
+		// Range reference {{A2:B3}}
+		endCol := submatches[3]
+		endRow := submatches[4]
+
+		startColIdx := colLabelToIndex(startCol)
+		endColIdx := colLabelToIndex(endCol)
+		startRowNum := atoiSafe(startRow)
+		endRowNum := atoiSafe(endRow)
+
+		// Ensure proper order
+		if startRowNum > endRowNum {
+			startRowNum, endRowNum = endRowNum, startRowNum
+		}
+		if startColIdx > endColIdx {
+			startColIdx, endColIdx = endColIdx, startColIdx
+		}
+
+		// Build 2D array
+		var rows []string
+		for r := startRowNum; r <= endRowNum; r++ {
+			var cols []string
+			for c := startColIdx; c <= endColIdx; c++ {
+				rowKey := itoa(r)
+				colLabel := indexToColLabel(c)
+
+				val := ""
+				if rowData, ok := s.Data[rowKey]; ok {
+					if cell, ok := rowData[colLabel]; ok {
+						val = cell.Value
+					}
+				}
+				// Quote only if not a number
+				if _, err := strconv.ParseFloat(val, 64); err == nil && val != "" {
+					// It's a number, use unquoted
+					cols = append(cols, val)
+				} else {
+					// Not a number or empty, use quoted
+					cols = append(cols, fmt.Sprintf(`"%s"`, val))
+				}
+			}
+			rows = append(rows, "["+strings.Join(cols, ",")+"]")
+		}
+
+		return "[" + strings.Join(rows, ",") + "]"
+	})
+	s.mu.RUnlock()
+
 	cmd, err := ep.PythonCmd("-c", script)
 	if err != nil {
 		s.mu.Lock()
 		cur := s.Data[row][col]
 		cur.Value = "Error: " + err.Error()
+		s.Data[row][col] = cur
 		s.mu.Unlock()
 		globalSheetManager.SaveSheet(s)
 		return
@@ -583,16 +757,127 @@ func (s *Sheet) ExecuteCellScript(row, col string) {
 	} else {
 		newVal = strings.TrimRight(stdout.String(), "\r\n")
 	}
-	// Write value back without audit
+	// Write value(s) back without audit
 	s.mu.Lock()
 	cur.ScriptOutput = newVal
-
-	// If scriptOutput is array [[...], [...]], copy value to cells below/right and it should not exceed scriptOutput_RowSpan/ColSpan
-	cur.Value = newVal // to be fixed as per above comment
-
 	s.Data[row][col] = cur
-	s.mu.Unlock()
 
+	// If no span, simply set value
+	if rSpan == 1 && cSpan == 1 {
+		cur.Value = newVal
+		s.Data[row][col] = cur
+		s.mu.Unlock()
+		globalSheetManager.SaveSheet(s)
+		return
+	}
+	baseIdx := colLabelToIndex(col)
+	baseRow := atoiSafe(row)
+	//handling single matrix nor a array
+
+	// Try to parse as single value (string, number, boolean)
+	// If it's not a JSON array or matrix, just set the value to the base cell
+	var testInterface interface{}
+	if err := json.Unmarshal([]byte(newVal), &testInterface); err != nil {
+		// Not valid JSON, treat as plain string
+		cur.Value = newVal
+		s.Data[row][col] = cur
+		s.mu.Unlock()
+		globalSheetManager.SaveSheet(s)
+		return
+	}
+	// Check if it's a simple value (not array or object)
+	switch testInterface.(type) {
+	case string, float64, bool, nil:
+		// Simple value, set to base cell
+		cur.Value = newVal
+		s.Data[row][col] = cur
+		s.mu.Unlock()
+		globalSheetManager.SaveSheet(s)
+		return
+	}
+
+	//handling matrix type  [[1,2],[3,4]]
+	var matrix [][]string
+	MatrixParsed := false
+	if rSpan > 1 || cSpan > 1 {
+		var any interface{}
+		if err := json.Unmarshal([]byte(newVal), &any); err == nil {
+			if arr, ok := any.([]interface{}); ok {
+				tmp := make([][]string, 0, len(arr))
+				for _, r := range arr {
+					if rowArr, ok := r.([]interface{}); ok {
+						rowVals := make([]string, 0, len(rowArr))
+						for _, v := range rowArr {
+							rowVals = append(rowVals, fmt.Sprint(v))
+						}
+						tmp = append(tmp, rowVals)
+					}
+				}
+				if len(tmp) > 0 {
+					matrix = tmp
+					MatrixParsed = true
+				}
+			}
+		}
+	}
+	if MatrixParsed {
+		// if matrix dimensions is more than ScriptOutput_RowSpan x ScriptOutput_ColSpan, we will simply fill cur.Value = scriptOutput
+		if len(matrix) > rSpan || (len(matrix) > 0 && len(matrix[0]) > cSpan) {
+			cur.Value = cur.ScriptOutput
+			s.Data[row][col] = cur
+			s.mu.Unlock()
+			globalSheetManager.SaveSheet(s)
+			return
+		}
+		//else
+
+		for dr := 0; dr < rSpan; dr++ {
+			rKey := itoa(baseRow + dr)
+			if s.Data[rKey] == nil {
+				s.Data[rKey] = make(map[string]Cell)
+			}
+			for dc := 0; dc < cSpan; dc++ {
+				cLabel := indexToColLabel(baseIdx + dc)
+				var val string
+				if dr < len(matrix) && dc < len(matrix[dr]) {
+					val = matrix[dr][dc]
+				}
+				c := s.Data[rKey][cLabel]
+				c.Value = val
+				s.Data[rKey][cLabel] = c
+			}
+		}
+		s.mu.Unlock()
+		globalSheetManager.SaveSheet(s)
+		return
+	}
+
+	// handling array type [1,2,3,4]
+	// If output is a flat array and span is 1xN or Nx1, fill accordingly
+	var arrAny []interface{}
+	if err := json.Unmarshal([]byte(cur.ScriptOutput), &arrAny); err == nil {
+		if (rSpan == 1 && cSpan > 1 && len(arrAny) <= cSpan) || (cSpan == 1 && rSpan > 1 && len(arrAny) <= rSpan) {
+			for i, v := range arrAny {
+				if rSpan == 1 {
+					// Fill row left to right
+					cLabel := indexToColLabel(baseIdx + i)
+					c := s.Data[row][cLabel]
+					c.Value = fmt.Sprint(v)
+					s.Data[row][cLabel] = c
+				} else {
+					// Fill column top to bottom
+					rKey := itoa(baseRow + i)
+					c := s.Data[rKey][col]
+					c.Value = fmt.Sprint(v)
+					s.Data[rKey][col] = c
+				}
+			}
+		} else {
+			cur.Value = cur.ScriptOutput
+			s.Data[row][col] = cur
+		}
+	}
+	s.mu.Unlock()
 	globalSheetManager.SaveSheet(s)
 }
 
@@ -881,6 +1166,8 @@ func (s *Sheet) InsertRowBelow(targetRowStr, user string) bool {
 	}
 	// Adjust audit log row references for rows at or below the inserted position
 	s.adjustAuditRowsOnInsert(insertRow)
+	// Adjust script tags in cells for row insertion
+	s.adjustScriptTagsOnInsertRow(insertRow)
 
 	s.AuditLog = append(s.AuditLog, AuditEntry{
 		Timestamp: time.Now(),
@@ -888,8 +1175,40 @@ func (s *Sheet) InsertRowBelow(targetRowStr, user string) bool {
 		Action:    "INSERT_ROW",
 		Row1:      insertRow,
 	})
-
 	s.mu.Unlock()
+	// If the target row contains cells locked by a script span, re-run those scripts
+	if rowMap, ok := s.Data[targetRowStr]; ok {
+		lockedIDs := []string{}
+		for _, cell := range rowMap {
+			if cell.Locked && strings.HasPrefix(cell.LockedBy, "script-span ") {
+				id := strings.TrimSpace(strings.TrimPrefix(cell.LockedBy, "script-span "))
+				if id != "" {
+					index := slices.Index(lockedIDs, id)
+					if index == -1 {
+						lockedIDs = append(lockedIDs, id)
+					}
+				}
+			}
+		}
+		for _, id := range lockedIDs {
+			startRow, startCol := "", ""
+			for rKey, cols := range s.Data {
+				for cKey, c := range cols {
+					if strings.TrimSpace(c.CellID) == id {
+						startRow = rKey
+						startCol = cKey
+						break
+					}
+				}
+				if startRow != "" {
+					break
+				}
+			}
+			if startRow != "" && startCol != "" {
+				s.ExecuteCellScript(startRow, startCol)
+			}
+		}
+	}
 
 	globalSheetManager.SaveSheet(s)
 	return true
@@ -951,6 +1270,8 @@ func (s *Sheet) DeleteRowAt(rowStr, user string) bool {
 	}
 	// Adjust audit logs for deletion
 	s.adjustAuditRowsOnDelete(row)
+	// Adjust script tags in cells for row deletion
+	s.adjustScriptTagsOnDeleteRow(row)
 	s.AuditLog = append(s.AuditLog, AuditEntry{
 		Timestamp: time.Now(),
 		User:      user,
@@ -1099,6 +1420,8 @@ func (s *Sheet) MoveRowBelow(fromRowStr, targetRowStr, user string) bool {
 
 	// Adjust audit log rows according to move mapping
 	s.adjustAuditRowsOnMove(fromRow, destIndex)
+	// Adjust script tags in cells for row move
+	s.adjustScriptTagsOnMoveRow(fromRow, destIndex)
 
 	s.mu.Unlock()
 
@@ -1259,6 +1582,8 @@ func (s *Sheet) MoveColumnRight(fromColStr, targetColStr, user string) bool {
 
 	// Adjust audit log columns according to move mapping
 	s.adjustAuditColsOnMove(fromIdx, destIdx)
+	// Adjust script tags in cells for column move
+	s.adjustScriptTagsOnMoveCol(fromIdx, destIdx)
 
 	s.mu.Unlock()
 
@@ -1290,10 +1615,13 @@ func (s *Sheet) InsertColumnRight(targetColStr, user string) bool {
 	}
 
 	targetIdx := toColIdx(targetColStr)
+	// Support inserting to the left of the first column when target is empty/invalid
+	var insertIdx int
 	if targetIdx == 0 {
-		return false
+		insertIdx = 1
+	} else {
+		insertIdx = targetIdx + 1
 	}
-	insertIdx := targetIdx + 1
 
 	s.mu.Lock()
 
@@ -1366,6 +1694,8 @@ func (s *Sheet) InsertColumnRight(targetColStr, user string) bool {
 	}
 	// Adjust audit log column references for columns at or beyond the inserted position
 	s.adjustAuditColsOnInsert(insertIdx)
+	// Adjust script tags in cells for column insertion
+	s.adjustScriptTagsOnInsertCol(insertIdx)
 
 	s.AuditLog = append(s.AuditLog, AuditEntry{
 		Timestamp:      time.Now(),
@@ -1374,8 +1704,43 @@ func (s *Sheet) InsertColumnRight(targetColStr, user string) bool {
 		Col1:           newLabel,
 		ChangeReversed: false,
 	})
-
 	s.mu.Unlock()
+	// If the target column contains cells locked by a script span, re-run those scripts
+	{
+		lockedIDs := []string{}
+		for _, rowMap := range s.Data {
+			if cell, ok := rowMap[targetColStr]; ok {
+				if cell.Locked && strings.HasPrefix(cell.LockedBy, "script-span ") {
+					id := strings.TrimSpace(strings.TrimPrefix(cell.LockedBy, "script-span "))
+					if id != "" {
+						index := slices.Index(lockedIDs, id)
+						if index == -1 {
+
+							lockedIDs = append(lockedIDs, id)
+						}
+					}
+				}
+			}
+		}
+		for _, id := range lockedIDs {
+			startRow, startCol := "", ""
+			for rKey, cols := range s.Data {
+				for cKey, c := range cols {
+					if strings.TrimSpace(c.CellID) == id {
+						startRow = rKey
+						startCol = cKey
+						break
+					}
+				}
+				if startRow != "" {
+					break
+				}
+			}
+			if startRow != "" && startCol != "" {
+				s.ExecuteCellScript(startRow, startCol)
+			}
+		}
+	}
 
 	globalSheetManager.SaveSheet(s)
 	return true
@@ -1440,6 +1805,8 @@ func (s *Sheet) DeleteColumnAt(colStr, user string) bool {
 	}
 	// Adjust audit logs for deletion
 	s.adjustAuditColsOnDelete(insertIdx)
+	// Adjust script tags in cells for column deletion
+	s.adjustScriptTagsOnDeleteCol(insertIdx)
 	s.AuditLog = append(s.AuditLog, AuditEntry{
 		Timestamp:      time.Now(),
 		User:           user,
@@ -1769,6 +2136,446 @@ func (s *Sheet) adjustAuditColsOnDelete(deleteIdx int) {
 			e.Col1 = indexToColLabel(idx)
 		}
 		_ = oldCol // details left empty; no string rewrite
+	}
+}
+
+// adjustScriptTagsOnInsertRow increments row references in script tags for rows at or below insertRow
+func (s *Sheet) adjustScriptTagsOnInsertRow(insertRow int) {
+	tagPattern := regexp.MustCompile(`\{\{([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?\}\}`)
+
+	for rowKey, rowMap := range s.Data {
+		for colKey, cell := range rowMap {
+			if cell.Script == "" {
+				continue
+			}
+
+			newScript := tagPattern.ReplaceAllStringFunc(cell.Script, func(match string) string {
+				submatches := tagPattern.FindStringSubmatch(match)
+				if len(submatches) < 3 {
+					return match
+				}
+
+				col1 := submatches[1]
+				row1 := atoiSafe(submatches[2])
+
+				// Single cell reference {{A2}}
+				if submatches[3] == "" || submatches[4] == "" {
+					if row1 >= insertRow && row1 > 0 {
+						row1++
+					}
+					return fmt.Sprintf("{{%s%d}}", col1, row1)
+				}
+
+				// Range reference {{A2:B3}}
+				col2 := submatches[3]
+				row2 := atoiSafe(submatches[4])
+
+				if row1 >= insertRow && row1 > 0 {
+					row1++
+				}
+				if row2 >= insertRow && row2 > 0 {
+					row2++
+				}
+
+				return fmt.Sprintf("{{%s%d:%s%d}}", col1, row1, col2, row2)
+			})
+
+			if newScript != cell.Script {
+				cell.Script = newScript
+				s.Data[rowKey][colKey] = cell
+			}
+		}
+	}
+}
+
+// adjustScriptTagsOnDeleteRow decrements row references in script tags for rows strictly above deleted row
+func (s *Sheet) adjustScriptTagsOnDeleteRow(deleteRow int) {
+	tagPattern := regexp.MustCompile(`\{\{([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?\}\}`)
+
+	for rowKey, rowMap := range s.Data {
+		for colKey, cell := range rowMap {
+			if cell.Script == "" {
+				continue
+			}
+
+			newScript := tagPattern.ReplaceAllStringFunc(cell.Script, func(match string) string {
+				submatches := tagPattern.FindStringSubmatch(match)
+				if len(submatches) < 3 {
+					return match
+				}
+
+				col1 := submatches[1]
+				row1 := atoiSafe(submatches[2])
+
+				// Single cell reference {{A2}}
+				if submatches[3] == "" || submatches[4] == "" {
+					if row1 == deleteRow {
+						// Reference to deleted row becomes invalid - keep as is or mark
+						return match
+					}
+					if row1 > deleteRow {
+						row1--
+					}
+					return fmt.Sprintf("{{%s%d}}", col1, row1)
+				}
+
+				// Range reference {{A2:B3}}
+				col2 := submatches[3]
+				row2 := atoiSafe(submatches[4])
+
+				// Handle deleted row in range
+				if deleteRow >= row1 && deleteRow <= row2 {
+					// Row is within range - shrink the range
+					if row1 == row2 {
+						// Single row range that got deleted - keep as invalid reference
+						return match
+					}
+					if deleteRow == row1 {
+						row1++
+					} else if deleteRow == row2 {
+						row2--
+					}
+					// If deleteRow is in the middle, just adjust the end
+					if row2 > deleteRow {
+						row2--
+					}
+				} else {
+					// Adjust if above deleted row
+					if row1 > deleteRow {
+						row1--
+					}
+					if row2 > deleteRow {
+						row2--
+					}
+				}
+
+				return fmt.Sprintf("{{%s%d:%s%d}}", col1, row1, col2, row2)
+			})
+
+			if newScript != cell.Script {
+				cell.Script = newScript
+				s.Data[rowKey][colKey] = cell
+			}
+		}
+	}
+}
+
+// adjustScriptTagsOnMoveRow adjusts row references in script tags for a row move from fromRow to destIndex
+func (s *Sheet) adjustScriptTagsOnMoveRow(fromRow, destIndex int) {
+	tagPattern := regexp.MustCompile(`\{\{([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?\}\}`)
+
+	for rowKey, rowMap := range s.Data {
+		for colKey, cell := range rowMap {
+			if cell.Script == "" {
+				continue
+			}
+
+			newScript := tagPattern.ReplaceAllStringFunc(cell.Script, func(match string) string {
+				submatches := tagPattern.FindStringSubmatch(match)
+				if len(submatches) < 3 {
+					return match
+				}
+
+				col1 := submatches[1]
+				row1 := atoiSafe(submatches[2])
+
+				// Single cell reference {{A2}}
+				if submatches[3] == "" || submatches[4] == "" {
+					if row1 == 0 {
+						return match
+					}
+
+					if fromRow < destIndex {
+						if row1 == fromRow {
+							row1 = destIndex
+						} else if row1 > fromRow && row1 <= destIndex {
+							row1--
+						}
+					} else if fromRow > destIndex {
+						if row1 == fromRow {
+							row1 = destIndex
+						} else if row1 >= destIndex && row1 < fromRow {
+							row1++
+						}
+					}
+					return fmt.Sprintf("{{%s%d}}", col1, row1)
+				}
+
+				// Range reference {{A2:B3}}
+				col2 := submatches[3]
+				row2 := atoiSafe(submatches[4])
+
+				if row1 == 0 || row2 == 0 {
+					return match
+				}
+
+				if fromRow < destIndex {
+					if row1 == fromRow {
+						row1 = destIndex
+					} else if row1 > fromRow && row1 <= destIndex {
+						row1--
+					}
+					if row2 == fromRow {
+						row2 = destIndex
+					} else if row2 > fromRow && row2 <= destIndex {
+						row2--
+					}
+				} else if fromRow > destIndex {
+					if row1 == fromRow {
+						row1 = destIndex
+					} else if row1 >= destIndex && row1 < fromRow {
+						row1++
+					}
+					if row2 == fromRow {
+						row2 = destIndex
+					} else if row2 >= destIndex && row2 < fromRow {
+						row2++
+					}
+				}
+
+				return fmt.Sprintf("{{%s%d:%s%d}}", col1, row1, col2, row2)
+			})
+
+			if newScript != cell.Script {
+				cell.Script = newScript
+				s.Data[rowKey][colKey] = cell
+			}
+		}
+	}
+}
+
+// adjustScriptTagsOnInsertCol increments column references in script tags for columns at or beyond insertIdx
+func (s *Sheet) adjustScriptTagsOnInsertCol(insertIdx int) {
+	tagPattern := regexp.MustCompile(`\{\{([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?\}\}`)
+
+	for rowKey, rowMap := range s.Data {
+		for colKey, cell := range rowMap {
+			if cell.Script == "" {
+				continue
+			}
+
+			newScript := tagPattern.ReplaceAllStringFunc(cell.Script, func(match string) string {
+				submatches := tagPattern.FindStringSubmatch(match)
+				if len(submatches) < 3 {
+					return match
+				}
+
+				col1 := submatches[1]
+				row1 := submatches[2]
+				col1Idx := colLabelToIndex(col1)
+
+				// Single cell reference {{A2}}
+				if submatches[3] == "" || submatches[4] == "" {
+					if col1Idx >= insertIdx && col1Idx > 0 {
+						col1Idx++
+						col1 = indexToColLabel(col1Idx)
+					}
+					return fmt.Sprintf("{{%s%s}}", col1, row1)
+				}
+
+				// Range reference {{A2:B3}}
+				col2 := submatches[3]
+				row2 := submatches[4]
+				col2Idx := colLabelToIndex(col2)
+
+				if col1Idx >= insertIdx && col1Idx > 0 {
+					col1Idx++
+					col1 = indexToColLabel(col1Idx)
+				}
+				if col2Idx >= insertIdx && col2Idx > 0 {
+					col2Idx++
+					col2 = indexToColLabel(col2Idx)
+				}
+
+				return fmt.Sprintf("{{%s%s:%s%s}}", col1, row1, col2, row2)
+			})
+
+			if newScript != cell.Script {
+				cell.Script = newScript
+				s.Data[rowKey][colKey] = cell
+			}
+		}
+	}
+}
+
+// adjustScriptTagsOnDeleteCol decrements column references in script tags for columns strictly right of deleted column
+func (s *Sheet) adjustScriptTagsOnDeleteCol(deleteIdx int) {
+	tagPattern := regexp.MustCompile(`\{\{([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?\}\}`)
+
+	for rowKey, rowMap := range s.Data {
+		for colKey, cell := range rowMap {
+			if cell.Script == "" {
+				continue
+			}
+
+			newScript := tagPattern.ReplaceAllStringFunc(cell.Script, func(match string) string {
+				submatches := tagPattern.FindStringSubmatch(match)
+				if len(submatches) < 3 {
+					return match
+				}
+
+				col1 := submatches[1]
+				row1 := submatches[2]
+				col1Idx := colLabelToIndex(col1)
+
+				// Single cell reference {{A2}}
+				if submatches[3] == "" || submatches[4] == "" {
+					if col1Idx == deleteIdx {
+						// Reference to deleted column becomes invalid - keep as is
+						return match
+					}
+					if col1Idx > deleteIdx {
+						col1Idx--
+						col1 = indexToColLabel(col1Idx)
+					}
+					return fmt.Sprintf("{{%s%s}}", col1, row1)
+				}
+
+				// Range reference {{A2:B3}}
+				col2 := submatches[3]
+				row2 := submatches[4]
+				col2Idx := colLabelToIndex(col2)
+
+				// Handle deleted column in range
+				if deleteIdx >= col1Idx && deleteIdx <= col2Idx {
+					// Column is within range - shrink the range
+					if col1Idx == col2Idx {
+						// Single column range that got deleted - keep as invalid reference
+						return match
+					}
+					if deleteIdx == col1Idx {
+						col1Idx++
+						col1 = indexToColLabel(col1Idx)
+					} else if deleteIdx == col2Idx {
+						col2Idx--
+						col2 = indexToColLabel(col2Idx)
+					}
+					// If deleteIdx is in the middle, just adjust the end
+					if col2Idx > deleteIdx {
+						col2Idx--
+						col2 = indexToColLabel(col2Idx)
+					}
+				} else {
+					// Adjust if to the right of deleted column
+					if col1Idx > deleteIdx {
+						col1Idx--
+						col1 = indexToColLabel(col1Idx)
+					}
+					if col2Idx > deleteIdx {
+						col2Idx--
+						col2 = indexToColLabel(col2Idx)
+					}
+				}
+
+				return fmt.Sprintf("{{%s%s:%s%s}}", col1, row1, col2, row2)
+			})
+
+			if newScript != cell.Script {
+				cell.Script = newScript
+				s.Data[rowKey][colKey] = cell
+			}
+		}
+	}
+}
+
+// adjustScriptTagsOnMoveCol adjusts column references in script tags for a column move from fromIdx to destIdx
+func (s *Sheet) adjustScriptTagsOnMoveCol(fromIdx, destIdx int) {
+	tagPattern := regexp.MustCompile(`\{\{([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?\}\}`)
+
+	for rowKey, rowMap := range s.Data {
+		for colKey, cell := range rowMap {
+			if cell.Script == "" {
+				continue
+			}
+
+			newScript := tagPattern.ReplaceAllStringFunc(cell.Script, func(match string) string {
+				submatches := tagPattern.FindStringSubmatch(match)
+				if len(submatches) < 3 {
+					return match
+				}
+
+				col1 := submatches[1]
+				row1 := submatches[2]
+				col1Idx := colLabelToIndex(col1)
+
+				// Single cell reference {{A2}}
+				if submatches[3] == "" || submatches[4] == "" {
+					if col1Idx == 0 {
+						return match
+					}
+
+					oldIdx := col1Idx
+					if fromIdx < destIdx {
+						if col1Idx == fromIdx {
+							col1Idx = destIdx
+						} else if col1Idx > fromIdx && col1Idx <= destIdx {
+							col1Idx--
+						}
+					} else if fromIdx > destIdx {
+						if col1Idx == fromIdx {
+							col1Idx = destIdx
+						} else if col1Idx >= destIdx && col1Idx < fromIdx {
+							col1Idx++
+						}
+					}
+
+					if col1Idx != oldIdx {
+						col1 = indexToColLabel(col1Idx)
+					}
+					return fmt.Sprintf("{{%s%s}}", col1, row1)
+				}
+
+				// Range reference {{A2:B3}}
+				col2 := submatches[3]
+				row2 := submatches[4]
+				col2Idx := colLabelToIndex(col2)
+
+				if col1Idx == 0 || col2Idx == 0 {
+					return match
+				}
+
+				oldIdx1 := col1Idx
+				oldIdx2 := col2Idx
+
+				if fromIdx < destIdx {
+					if col1Idx == fromIdx {
+						col1Idx = destIdx
+					} else if col1Idx > fromIdx && col1Idx <= destIdx {
+						col1Idx--
+					}
+					if col2Idx == fromIdx {
+						col2Idx = destIdx
+					} else if col2Idx > fromIdx && col2Idx <= destIdx {
+						col2Idx--
+					}
+				} else if fromIdx > destIdx {
+					if col1Idx == fromIdx {
+						col1Idx = destIdx
+					} else if col1Idx >= destIdx && col1Idx < fromIdx {
+						col1Idx++
+					}
+					if col2Idx == fromIdx {
+						col2Idx = destIdx
+					} else if col2Idx >= destIdx && col2Idx < fromIdx {
+						col2Idx++
+					}
+				}
+
+				if col1Idx != oldIdx1 {
+					col1 = indexToColLabel(col1Idx)
+				}
+				if col2Idx != oldIdx2 {
+					col2 = indexToColLabel(col2Idx)
+				}
+
+				return fmt.Sprintf("{{%s%s:%s%s}}", col1, row1, col2, row2)
+			})
+
+			if newScript != cell.Script {
+				cell.Script = newScript
+				s.Data[rowKey][colKey] = cell
+			}
+		}
 	}
 }
 

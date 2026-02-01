@@ -91,6 +91,8 @@ export default function Sheet() {
     const [allUsers, setAllUsers] = useState([]);
     // Ref for chat panel body
     const chatBodyRef = useRef(null);
+    // Ref for script textarea
+    const scriptTextareaRef = useRef(null);
 
     // Scroll chat to bottom on open/init and when chatMessages change
     useEffect(() => {
@@ -407,15 +409,62 @@ export default function Sheet() {
 
     // Floating script editor popup state
     const [scriptPopup, setScriptPopup] = useState({ visible: false, x: 0, y: 0, row: null, col: null });
+    const [scriptRowSpan, setScriptRowSpan] = useState(1);
+    const [scriptColSpan, setScriptColSpan] = useState(1);
     const openScriptPopup = (row, col, x, y) => {
         if (!row || !col) return;
         const key = `${row}-${col}`;
         const existingScript = (data[key]?.script ?? '').toString();
         setScriptText(existingScript);
         editingOriginalScriptRef.current = existingScript;
+        const existingRowSpan = parseInt(data[key]?.script_output_row_span ?? 1, 10) || 1;
+        const existingColSpan = parseInt(data[key]?.script_output_col_span ?? 1, 10) || 1;
+        setScriptRowSpan(existingRowSpan);
+        setScriptColSpan(existingColSpan);
         setScriptPopup({ visible: true, x: Math.max(8, x), y: Math.max(8, y), row, col });
     };
     const closeScriptPopup = () => setScriptPopup({ visible: false, x: 0, y: 0, row: null, col: null });
+
+    // Insert selected range into script at cursor position
+    const insertSelectedRangeIntoScript = () => {
+        if (!selectedRange || selectedRange.length === 0) return;
+        
+        let rangeText = '';
+        if (selectedRange.length === 1) {
+            // Single cell: {{A5}}
+            const cell = selectedRange[0];
+            rangeText = `{{${cell.col}${cell.row}}}`;
+        } else {
+            // Multiple cells: find top-left and bottom-right
+            const rows = selectedRange.map(c => c.row).sort((a, b) => a - b);
+            const cols = selectedRange.map(c => c.col);
+            const colIndices = cols.map(c => colIndexMap[c]).sort((a, b) => a - b);
+            
+            const topRow = rows[0];
+            const bottomRow = rows[rows.length - 1];
+            const leftCol = COL_HEADERS[colIndices[0]];
+            const rightCol = COL_HEADERS[colIndices[colIndices.length - 1]];
+            
+            rangeText = `{{${leftCol}${topRow}:${rightCol}${bottomRow}}}`;
+        }
+        
+        // Insert at cursor position
+        const textarea = scriptTextareaRef.current;
+        if (textarea) {
+            const start = textarea.selectionStart;
+            const end = textarea.selectionEnd;
+            const currentText = scriptText;
+            const newText = currentText.substring(0, start) + rangeText + currentText.substring(end);
+            setScriptText(newText);
+            
+            // Set cursor position after inserted text
+            setTimeout(() => {
+                textarea.focus();
+                const newCursorPos = start + rangeText.length;
+                textarea.setSelectionRange(newCursorPos, newCursorPos);
+            }, 0);
+        }
+    };
 
     // Toggle to show scripts instead of values (read-only mode)
     const [showScripts, setShowScripts] = useState(false);
@@ -543,16 +592,38 @@ export default function Sheet() {
                     const messages = [];
                     let depth = 0;
                     let start = -1;
+                    let inString = false;
+                    let escapeNext = false;
                     for (let i = 0; i < raw.length; i++) {
                         const ch = raw[i];
-                        if (ch === '{') {
-                            if (depth === 0) start = i;
-                            depth++;
-                        } else if (ch === '}') {
-                            depth--;
-                            if (depth === 0 && start !== -1) {
-                                messages.push(raw.slice(start, i + 1));
-                                start = -1;
+                        
+                        // Handle escape sequences
+                        if (escapeNext) {
+                            escapeNext = false;
+                            continue;
+                        }
+                        if (ch === '\\') {
+                            escapeNext = true;
+                            continue;
+                        }
+                        
+                        // Track string boundaries
+                        if (ch === '"') {
+                            inString = !inString;
+                            continue;
+                        }
+                        
+                        // Only count braces outside of strings
+                        if (!inString) {
+                            if (ch === '{') {
+                                if (depth === 0) start = i;
+                                depth++;
+                            } else if (ch === '}') {
+                                depth--;
+                                if (depth === 0 && start !== -1) {
+                                    messages.push(raw.slice(start, i + 1));
+                                    start = -1;
+                                }
                             }
                         }
                     }
@@ -606,6 +677,7 @@ export default function Sheet() {
                     }
                     });
                 } catch (e) {
+                    console.log("Received invalid WS message:", event.data);
                     console.error("WS Parse error", e);
                 }
             };
@@ -722,13 +794,15 @@ export default function Sheet() {
         }));
     };
 
-    const updateCellScriptState = (row, col, script, user) => {
+    const updateCellScriptState = (row, col, script, user, rowSpan = 1, colSpan = 1) => {
         setData(prev => ({
             ...prev,
             [`${row}-${col}`]: {
                 ...(prev[`${row}-${col}`] || {}),
                 script,
                 user,
+                script_output_row_span: rowSpan,
+                script_output_col_span: colSpan,
             }
         }));
         setScriptModified(1);
@@ -759,7 +833,7 @@ export default function Sheet() {
         editingOriginalValueRef.current = null;
     };
 
-    const handleScriptChange = (r, c, script) => {
+    const handleScriptChange = (r, c, script, rowSpan = 1, colSpan = 1) => {
         //if (scriptModified === 0) { return; } //non-blocking for scripts
         const key = `${r}-${c}`;
         const oldScript = (editingOriginalScriptRef.current ?? (data[key]?.script ?? '')).toString();
@@ -774,7 +848,7 @@ export default function Sheet() {
             const msg = {
                 type: 'UPDATE_CELL_SCRIPT',
                 sheet_id: id,
-                payload: { row: String(r), col: String(c), script, user: username }
+                payload: { row: String(r), col: String(c), script, user: username, row_span: Number(rowSpan) || 1, col_span: Number(colSpan) || 1 }
             };
             ws.current.send(JSON.stringify(msg));
         }
@@ -845,6 +919,23 @@ export default function Sheet() {
             const { newCol } = last;
             if (ws.current && ws.current.readyState === WebSocket.OPEN) {
                 ws.current.send(JSON.stringify({ type: 'DELETE_COL', sheet_id: id, payload: { col: String(newCol), user: username } }));
+            }
+            setRedoStack(prev => [...prev, last]);
+            setUndoStack(prev => prev.slice(0, -1));
+        } else if (last.type === 'delete_row') {
+            const { row } = last;
+            // Re-insert the deleted row at its original position
+            if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+                ws.current.send(JSON.stringify({ type: 'INSERT_ROW', sheet_id: id, payload: { targetRow: String(Number(row) - 1), user: username } }));
+            }
+            setRedoStack(prev => [...prev, last]);
+            setUndoStack(prev => prev.slice(0, -1));
+        } else if (last.type === 'delete_col') {
+            const { targetLeft } = last;
+            // Re-insert the deleted column to the right of its previous left neighbor (fallback to current first column)
+            const targetCol = targetLeft ?? colLabelAt(0);
+            if (targetCol && ws.current && ws.current.readyState === WebSocket.OPEN) {
+                ws.current.send(JSON.stringify({ type: 'INSERT_COL', sheet_id: id, payload: { targetCol: String(targetCol), user: username } }));
             }
             setRedoStack(prev => [...prev, last]);
             setUndoStack(prev => prev.slice(0, -1));
@@ -936,6 +1027,22 @@ export default function Sheet() {
             const { fromCol, targetCol } = last;
             if (ws.current && ws.current.readyState === WebSocket.OPEN) {
                 ws.current.send(JSON.stringify({ type: 'MOVE_COL', sheet_id: id, payload: { fromCol: String(fromCol), targetCol: String(targetCol), user: username } }));
+            }
+            setUndoStack(prev => [...prev, last]);
+            setRedoStack(prev => prev.slice(0, -1));
+        } else if (last.type === 'delete_row') {
+            const { row } = last;
+            // Reapply deletion of the row
+            if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+                ws.current.send(JSON.stringify({ type: 'DELETE_ROW', sheet_id: id, payload: { row: String(row), user: username } }));
+            }
+            setUndoStack(prev => [...prev, last]);
+            setRedoStack(prev => prev.slice(0, -1));
+        } else if (last.type === 'delete_col') {
+            const { col } = last;
+            // Reapply deletion of the column
+            if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+                ws.current.send(JSON.stringify({ type: 'DELETE_COL', sheet_id: id, payload: { col: String(col), user: username } }));
             }
             setUndoStack(prev => [...prev, last]);
             setRedoStack(prev => prev.slice(0, -1));
@@ -1178,6 +1285,33 @@ export default function Sheet() {
         return false;
     };
 
+    // Determine if a row is empty (no values, no scripts, no locks)
+    const isRowEmpty = (rowLabel) => {
+        for (let ci = 0; ci < COLS; ci++) {
+            const cLabel = colLabelAt(ci);
+            const key = `${rowLabel}-${cLabel}`;
+            const cell = data[key];
+            if (!cell) continue;
+            const hasValue = typeof cell.value === 'string' ? cell.value.trim() !== '' : Boolean(cell.value);
+            const hasScript = typeof cell.script === 'string' ? cell.script.trim() !== '' : Boolean(cell.script);
+            if (hasValue || hasScript || cell.locked) return false;
+        }
+        return true;
+    };
+
+    // Determine if a column is empty (no values, no scripts, no locks)
+    const isColEmpty = (colLabel) => {
+        for (let r = 1; r <= ROWS; r++) {
+            const key = `${r}-${colLabel}`;
+            const cell = data[key];
+            if (!cell) continue;
+            const hasValue = typeof cell.value === 'string' ? cell.value.trim() !== '' : Boolean(cell.value);
+            const hasScript = typeof cell.script === 'string' ? cell.script.trim() !== '' : Boolean(cell.script);
+            if (hasValue || hasScript || cell.locked) return false;
+        }
+        return true;
+    };
+
     const moveCutRowBelow = (targetRow) => {
         if (cutRow == null) return;
         if (isFilterActive) return; // disabled while filters are active
@@ -1228,6 +1362,18 @@ export default function Sheet() {
         }
     };
 
+    // Insert a row above the first row (i.e., before row 1)
+    const insertRowAboveFirst = () => {
+        if (isFilterActive) return;
+        if (canEdit && ws.current && ws.current.readyState === WebSocket.OPEN) {
+            const payload = { targetRow: String(0), user: username };
+            // The inserted row will be row 1
+            setUndoStack(prev => [...prev, { type: 'insert_row', insertedRow: 1 }]);
+            setRedoStack([]);
+            ws.current.send(JSON.stringify({ type: 'INSERT_ROW', sheet_id: id, payload }));
+        }
+    };
+
     const insertColumnRight = (targetCol) => {
         if (isFilterActive) return;
         if (canEdit && ws.current && ws.current.readyState === WebSocket.OPEN) {
@@ -1243,6 +1389,46 @@ export default function Sheet() {
                 }
             }
             ws.current.send(JSON.stringify({ type: 'INSERT_COL', sheet_id: id, payload }));
+        }
+    };
+
+    // Insert a column to the left of the first column (before 'A')
+    const insertColumnLeftOfFirst = () => {
+        if (isFilterActive) return;
+        if (canEdit && ws.current && ws.current.readyState === WebSocket.OPEN) {
+            // Use empty target to signal left-most insertion to backend
+            const payload = { targetCol: String(''), user: username };
+            // New column label will be 'A'
+            setUndoStack(prev => [...prev, { type: 'insert_col', newCol: String('A'), targetCol: String('') }]);
+            setRedoStack([]);
+            ws.current.send(JSON.stringify({ type: 'INSERT_COL', sheet_id: id, payload }));
+        }
+    };
+
+    // Delete row/column only if empty
+    const deleteRow = (rowLabel) => {
+        if (isFilterActive) return;
+        if (!isRowEmpty(rowLabel)) { alert('Cannot delete: row is not empty.'); return; }
+        if (canEdit && ws.current && ws.current.readyState === WebSocket.OPEN) {
+            const payload = { row: String(rowLabel), user: username };
+            ws.current.send(JSON.stringify({ type: 'DELETE_ROW', sheet_id: id, payload }));
+            // Push undo entry to allow reinsertion at the same index
+            setUndoStack(prev => [...prev, { type: 'delete_row', row: Number(rowLabel) }]);
+            setRedoStack([]);
+        }
+    };
+
+    const deleteColumn = (colLabel) => {
+        if (isFilterActive) return;
+        if (!isColEmpty(colLabel)) { alert('Cannot delete: column is not empty.'); return; }
+        if (canEdit && ws.current && ws.current.readyState === WebSocket.OPEN) {
+            const payload = { col: String(colLabel), user: username };
+            ws.current.send(JSON.stringify({ type: 'DELETE_COL', sheet_id: id, payload }));
+            // Push undo entry with left-neighbor hint for reinsertion
+            const idx = colIndexMap[String(colLabel)] ?? -1;
+            const leftLabel = idx > 0 ? colLabelAt(idx - 1) : null;
+            setUndoStack(prev => [...prev, { type: 'delete_col', col: String(colLabel), targetLeft: leftLabel }]);
+            setRedoStack([]);
         }
     };
 
@@ -1741,46 +1927,81 @@ export default function Sheet() {
                 {scriptPopup.visible && (
                     <div style={{ position: 'fixed', top: scriptPopup.y + 8, left: scriptPopup.x + 8, zIndex: 2100 }} className="bg-white border rounded shadow p-3">
                         <div className="flex items-center gap-2">
-                            <span className="text-sm text-gray-600">Script [Cell : {String(scriptPopup.col)}{String(scriptPopup.row)}]</span>
+                            <span className="text-sm text-gray-600">Python Script [Cell : {String(scriptPopup.col)}{String(scriptPopup.row)}]</span>
                         </div>
                         <div className="flex items-center gap-2">
                             
                             <textarea
+                                ref={scriptTextareaRef}
                                 className="border rounded px-2 py-1 text-sm"
                                 rows={3}
-                                style={{ minWidth: 240, resize: 'horizontal', overflow: 'auto' }}
+                                style={{ minWidth: 240, resize: 'both', overflow: 'auto' }}
                                 value={scriptText}
                                 onChange={(e) => setScriptText(e.target.value)}
                                 disabled={!canEdit}
                                 placeholder={`Edit script for ${String(scriptPopup.col)}${String(scriptPopup.row)}`}
                                 title="Edit script"
                             />
+                            <div className="flex items-center gap-1 ml-2">
+                                <label className="text-xs text-gray-600" title="Rows spanned by script output">Output Rows</label>
+                                <input
+                                    type="number"
+                                    min={1}
+                                    className="w-14 border rounded px-2 py-1 text-sm"
+                                    value={scriptRowSpan}
+                                    onChange={(e) => setScriptRowSpan(Math.max(1, parseInt(e.target.value, 10) || 1))}
+                                    disabled={!canEdit}
+                                    title="Script output row span"
+                                />
+                            </div>
+                            <div className="flex items-center gap-1 ml-2">
+                                <label className="text-xs text-gray-600 ml-2" title="Columns spanned by script output">Output Cols</label>
+                                <input
+                                    type="number"
+                                    min={1}
+                                    className="w-14 border rounded px-2 py-1 text-sm"
+                                    value={scriptColSpan}
+                                    onChange={(e) => setScriptColSpan(Math.max(1, parseInt(e.target.value, 10) || 1))}
+                                    disabled={!canEdit}
+                                    title="Script output column span"
+                                />
+                            </div>
                         </div>
-                        <div className="mt-2 flex items-center gap-2 justify-end">
+                        <div className="mt-2 flex items-center gap-2 justify-between">
                             <button
-                                className="px-2 py-1 text-sm rounded border border-gray-300 bg-white hover:bg-red-100 hover:shadow-md active:bg-red-200 active:scale-95 transition-all duration-100"
-                                onClick={() => {
-                                    const { row, col } = scriptPopup;
-                                    const key = row && col ? `${row}-${col}` : null;
-                                    const isLocked = key ? (data[key]?.locked === true) : false;
-                                    if (!canEdit || isLocked) { closeScriptPopup(); return; }
-                                    if (!row || !col) { closeScriptPopup(); return; }
-                                    updateCellScriptState(row, col, scriptText, username);
-                                    handleScriptChange(row, col, scriptText);
-                                    closeScriptPopup();
-                                }}
-                                disabled={!canEdit || (scriptPopup.row && scriptPopup.col ? (data[`${scriptPopup.row}-${scriptPopup.col}`]?.locked === true) : false)}
-                                title="Apply script"
+                                className="px-2 py-1 text-sm rounded border border-gray-300 bg-white hover:bg-green-100 hover:shadow-md active:bg-green-200 active:scale-95 transition-all duration-100"
+                                onClick={insertSelectedRangeIntoScript}
+                                disabled={!canEdit || !selectedRange || selectedRange.length === 0}
+                                title="Insert selected range into script at cursor position"
                             >
-                                Apply Script
+                                Insert Range
                             </button>
-                            <button
-                                className="px-2 py-1 text-sm rounded border border-gray-300 bg-white hover:bg-indigo-100 hover:shadow-md active:bg-indigo-200 active:scale-95 transition-all duration-100"
-                                onClick={closeScriptPopup}
-                                title="Cancel"
-                            >
-                                Cancel
-                            </button>
+                            <div className="flex items-center gap-2">
+                                <button
+                                    className="px-2 py-1 text-sm rounded border border-gray-300 bg-white hover:bg-red-100 hover:shadow-md active:bg-red-200 active:scale-95 transition-all duration-100"
+                                    onClick={() => {
+                                        const { row, col } = scriptPopup;
+                                        const key = row && col ? `${row}-${col}` : null;
+                                        const isLocked = key ? (data[key]?.locked === true) : false;
+                                        if (!canEdit || isLocked) { closeScriptPopup(); return; }
+                                        if (!row || !col) { closeScriptPopup(); return; }
+                                        updateCellScriptState(row, col, scriptText, username, scriptRowSpan, scriptColSpan);
+                                        handleScriptChange(row, col, scriptText, scriptRowSpan, scriptColSpan);
+                                        closeScriptPopup();
+                                    }}
+                                    disabled={!canEdit || (scriptPopup.row && scriptPopup.col ? (data[`${scriptPopup.row}-${scriptPopup.col}`]?.locked === true) : false)}
+                                    title="Apply script"
+                                >
+                                    Apply Script
+                                </button>
+                                <button
+                                    className="px-2 py-1 text-sm rounded border border-gray-300 bg-white hover:bg-indigo-100 hover:shadow-md active:bg-indigo-200 active:scale-95 transition-all duration-100"
+                                    onClick={closeScriptPopup}
+                                    title="Cancel"
+                                >
+                                    Cancel
+                                </button>
+                            </div>
                         </div>
                     </div>
                 )}
@@ -1855,7 +2076,7 @@ export default function Sheet() {
                                     }
                                     
                                     setRowStart(Math.max(1, Math.min(ROWS - visibleRowsCount + 1, parseInt(e.target.value, 10) || 1)))}}
-                                style={{  height:  '100%', width: '100%' }}
+                                style={{  writingMode: 'vertical-rl', height:  '100%', width: '100%' }}
                                 aria-label="Rows scrollbar"
                             />
                         </div>
@@ -1900,7 +2121,33 @@ export default function Sheet() {
                                         className="bg-gray-50 border-b border-r border-gray-200 p-2 relative select-none"
                                         style={{ width: `${rowLabelWidth}px`, height: `${colHeaderHeight}px` }}
                                     >
-                                        
+                                        <div className="inline-flex items-center gap-1">
+                                            <span>➕</span>
+                                            {connected && canEdit && (
+                                                <button
+                                                    type="button"
+                                                    className="btn btn-xs btn-light"
+                                                    disabled={isFilterActive}
+                                                    title={isFilterActive ? 'Disabled while filters are active' : 'Insert column to the left of A'}
+                                                    onClick={() => insertColumnLeftOfFirst()}
+                                                    style={{ padding: '0 4px', fontSize: '10px' }}
+                                                >
+                                                    <span role="img" aria-label="insert-col-right">➡️</span>
+                                                </button>
+                                            )}
+                                            {connected && canEdit && (
+                                                <button
+                                                    type="button"
+                                                    className="btn btn-xs btn-light"
+                                                    disabled={isFilterActive}
+                                                    title={isFilterActive ? 'Disabled while filters are active' : 'Insert row above first row'}
+                                                    onClick={() => insertRowAboveFirst()}
+                                                    style={{ padding: '0 4px', fontSize: '10px' }}
+                                                >
+                                                    <span role="img" aria-label="insert-row-below" >⬇️</span>
+                                                </button>
+                                            )}
+                                        </div>
                                     </th>
                                     {displayedColHeaders.map(h => (
                                         <th
@@ -1913,6 +2160,7 @@ export default function Sheet() {
                                             <div className="flex items-center justify-center gap-1">
                                                 <span>{h}</span>
                                                 <div style={{ position: 'absolute', top: 2, left: 2, display: 'flex', gap: '4px', zIndex: 25 }}>
+                                                  
                                                     {connected && canEdit && (
                                                         <button
                                                             type="button"
@@ -1923,6 +2171,18 @@ export default function Sheet() {
                                                             style={{ padding: '0 4px', fontSize: '10px' }}
                                                         >
                                                             <span role="img" aria-label="insert-col">➕</span>
+                                                        </button>
+                                                    )}
+                                                    {connected && canEdit && (
+                                                        <button
+                                                            type="button"
+                                                            className="btn btn-xs btn-light"
+                                                            disabled={isFilterActive || !isColEmpty(h)}
+                                                            title={isFilterActive ? 'Disabled while filters are active' : (!isColEmpty(h) ? `Cannot delete: column ${h} is not empty` : `Delete empty column ${h}`)}
+                                                            onClick={() => deleteColumn(h)}
+                                                            style={{ padding: '0 4px', fontSize: '10px' }}
+                                                        >
+                                                            <span role="img" aria-label="delete-col">🗑️</span>
                                                         </button>
                                                     )}
                                                     { cutCol == null && connected && canEdit && (
@@ -2061,6 +2321,19 @@ export default function Sheet() {
                                                         style={{ padding: '0 0px', fontSize: '8px' }}
                                                     >
                                                         <span role="img" aria-label="insert-row">➕</span>
+                                                    </button>
+                                                )}
+                                               
+                                                {connected && canEdit && (
+                                                    <button
+                                                        type="button"
+                                                        className="btn btn-xs btn-light"
+                                                        disabled={isFilterActive || !isRowEmpty(rowLabel)}
+                                                        title={isFilterActive ? 'Disabled while filters are active' : (!isRowEmpty(rowLabel) ? `Cannot delete: row ${rowLabel} is not empty` : `Delete empty row ${rowLabel}`)}
+                                                        onClick={() => deleteRow(rowLabel)}
+                                                        style={{ padding: '0 0px', fontSize: '8px' }}
+                                                    >
+                                                        <span role="img" aria-label="delete-row">🗑️</span>
                                                     </button>
                                                 )}
                                                 {cutRow === null && connected && canEdit &&(<button
@@ -2360,9 +2633,9 @@ export default function Sheet() {
                                                                         </button>
                                                                         <button
                                                                             className="block w-full text-left px-2 py-1 hover:bg-gray-100 rounded"
-                                                                            disabled={!canEdit || !contextMenu.cell}
+                                                                            disabled={!canEdit || !contextMenu.cell || (data[`${contextMenu.cell.row}-${contextMenu.cell.col}`]?.locked_by?.startsWith('script-span '))}
                                                                             onClick={() => {
-                                                                                if (!canEdit || !contextMenu.cell) return;
+                                                                                if (!canEdit || !contextMenu.cell || (data[`${contextMenu.cell.row}-${contextMenu.cell.col}`]?.locked_by?.startsWith('script-span '))) return;
                                                                                 openScriptPopup(contextMenu.cell.row, contextMenu.cell.col, contextMenu.x, contextMenu.y);
                                                                                 closeContextMenu();
                                                                             }}
@@ -2431,7 +2704,7 @@ export default function Sheet() {
                                                                             if (selectedRange && contextMenu.cell) {
                                                                                 showUnlock = selectedRange.some(c => c.row === contextMenu.cell.row && c.col === contextMenu.cell.col);
                                                                             }
-                                                                            return showUnlock && data[`${contextMenu.cell.row}-${contextMenu.cell.col}`]?.locked ? (
+                                                                            return showUnlock && data[`${contextMenu.cell.row}-${contextMenu.cell.col}`]?.locked && !(data[`${contextMenu.cell.row}-${contextMenu.cell.col}`]?.locked_by?.startsWith('script-span ')) ? (
                                                                                 <button
                                                                                     className="block w-full text-left px-2 py-1 hover:bg-gray-100 rounded"
                                                                                     onClick={() => {
@@ -2441,7 +2714,7 @@ export default function Sheet() {
                                                                                                 const colLabel = sel.col;
                                                                                                 if (!filteredRowHeaders.includes(r)) continue;
                                                                                                 const key = `${r}-${colLabel}`;
-                                                                                                if (data[key]?.locked) {
+                                                                                                if (data[key]?.locked && !(data[key]?.locked_by?.startsWith('script-span '))) {
                                                                                                     const payload = { row: String(r), col: String(colLabel), user: username };
                                                                                                     ws.current.send(JSON.stringify({ type: 'UNLOCK_CELL', sheet_id: id, payload }));
                                                                                                 }
