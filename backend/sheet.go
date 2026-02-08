@@ -621,11 +621,11 @@ func (s *Sheet) SetCellScript(row, col, script, user string, reverted bool, rowS
 	s.mu.Unlock()
 
 	// Update dependency map for this script
-	globalSheetManager.UpdateScriptDependencies(s.ProjectName, s.ID, cellID, script)
+	globalSheetManager.UpdateScriptDependencies(s.ProjectName, s.ID, cellID, script, row, col)
 
 	// Done updating script; save and execute
 	globalSheetManager.SaveSheet(s)
-	ExecuteCellScriptonScriptChange(s.ProjectName, s.ID, row, col)
+	ExecuteCellScriptonChange(s.ProjectName, s.ID, row, col)
 	//s.FillValueFromScriptOutput(row, col)
 }
 
@@ -924,6 +924,7 @@ func (s *Sheet) InsertRowBelow(targetRowStr, user string) bool {
 	s.mu.Unlock()
 	// Adjust script tags in cells for row insertion
 	s.adjustScriptTagsOnInsertRow(insertRow)
+
 	// If the target row contains cells locked by a script span, re-run those scripts
 	if rowMap, ok := s.Data[targetRowStr]; ok {
 		lockedIDs := []string{}
@@ -953,7 +954,7 @@ func (s *Sheet) InsertRowBelow(targetRowStr, user string) bool {
 				}
 			}
 			if startRow != "" && startCol != "" {
-				RefillingValuesonInsert(s.ProjectName, s.ID, startRow, startCol)
+				ExecuteCellScriptonChange(s.ProjectName, s.ID, startRow, startCol)
 			}
 		}
 	}
@@ -1467,8 +1468,10 @@ func (s *Sheet) InsertColumnRight(targetColStr, user string) bool {
 			}
 		}
 	}
+
 	for _, id := range lockedIDs {
 		startRow, startCol := "", ""
+		//fmt.Printf("Locked ID: %s\n", id)
 		for rKey, cols := range s.Data {
 			for cKey, c := range cols {
 				if strings.TrimSpace(c.CellID) == id {
@@ -1482,10 +1485,9 @@ func (s *Sheet) InsertColumnRight(targetColStr, user string) bool {
 			}
 		}
 		if startRow != "" && startCol != "" {
-			RefillingValuesonInsert(s.ProjectName, s.ID, startRow, startCol)
+			ExecuteCellScriptonChange(s.ProjectName, s.ID, startRow, startCol)
 		}
 	}
-
 	globalSheetManager.SaveSheet(s)
 	return true
 }
@@ -1891,6 +1893,9 @@ func (s *Sheet) adjustScriptTagsOnInsertRow(insertRow int) {
 	crossSheetPattern := regexp.MustCompile(`\{\{([^/\{\}]+)/([^/\{\}]+)/([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?\}\}`)
 	s.mu.Lock()
 	// Adjust same-sheet references in this sheet
+	// Collect modified scripts to update dependencies after releasing sheet lock
+	type depUpd struct{ project, sheet, cellID, script, row, col string }
+	pending := make([]depUpd, 0)
 	for rowKey, rowMap := range s.Data {
 		for colKey, cell := range rowMap {
 			if cell.Script == "" {
@@ -1931,12 +1936,15 @@ func (s *Sheet) adjustScriptTagsOnInsertRow(insertRow int) {
 			if newScript != cell.Script {
 				cell.Script = newScript
 				s.Data[rowKey][colKey] = cell
-				// Update dependencies for modified script
-				globalSheetManager.UpdateScriptDependencies(s.ProjectName, s.ID, cell.CellID, newScript)
+				pending = append(pending, depUpd{s.ProjectName, s.ID, cell.CellID, newScript, rowKey, colKey})
 			}
 		}
 	}
 	s.mu.Unlock()
+	// Update dependencies outside of sheet lock
+	for _, u := range pending {
+		globalSheetManager.UpdateScriptDependencies(u.project, u.sheet, u.cellID, u.script, u.row, u.col)
+	}
 	// Adjust cross-sheet references in sheets that reference this sheet
 	// Use scriptDeps to find which sheets have dependencies on this sheet
 	sheet_Key := s.ProjectName + "/" + s.ID
@@ -2020,17 +2028,23 @@ func (s *Sheet) adjustScriptTagsOnInsertRow(insertRow int) {
 		}
 		sheet.mu.Unlock()
 
-		// Update dependencies for all modified scripts in this sheet
+		// Update dependencies for all modified scripts in this sheet without holding sheet lock
 		if modified {
+			// Snapshot scripts under read lock
+			type depUpd2 struct{ project, sheet, cellID, script, row, col string }
+			updList := make([]depUpd2, 0)
 			sheet.mu.RLock()
-			for _, rowMap := range sheet.Data {
-				for _, cell := range rowMap {
+			for rKey, rowMap := range sheet.Data {
+				for cKey, cell := range rowMap {
 					if cell.Script != "" {
-						globalSheetManager.UpdateScriptDependencies(sheet.ProjectName, sheet.ID, cell.CellID, cell.Script)
+						updList = append(updList, depUpd2{sheet.ProjectName, sheet.ID, cell.CellID, cell.Script, rKey, cKey})
 					}
 				}
 			}
 			sheet.mu.RUnlock()
+			for _, u := range updList {
+				globalSheetManager.UpdateScriptDependencies(u.project, u.sheet, u.cellID, u.script, u.row, u.col)
+			}
 		}
 	}
 }
@@ -2042,6 +2056,8 @@ func (s *Sheet) adjustScriptTagsOnDeleteRow(deleteRow int) {
 	crossSheetPattern := regexp.MustCompile(`\{\{([^/\{\}]+)/([^/\{\}]+)/([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?\}\}`)
 	s.mu.Lock()
 	// Adjust same-sheet references in this sheet
+	type depUpd struct{ project, sheet, cellID, script, row, col string }
+	pending := make([]depUpd, 0)
 	for rowKey, rowMap := range s.Data {
 		for colKey, cell := range rowMap {
 			if cell.Script == "" {
@@ -2105,12 +2121,14 @@ func (s *Sheet) adjustScriptTagsOnDeleteRow(deleteRow int) {
 			if newScript != cell.Script {
 				cell.Script = newScript
 				s.Data[rowKey][colKey] = cell
-				// Update dependencies for modified script
-				globalSheetManager.UpdateScriptDependencies(s.ProjectName, s.ID, cell.CellID, newScript)
+				pending = append(pending, depUpd{s.ProjectName, s.ID, cell.CellID, newScript, rowKey, colKey})
 			}
 		}
 	}
 	s.mu.Unlock()
+	for _, u := range pending {
+		globalSheetManager.UpdateScriptDependencies(u.project, u.sheet, u.cellID, u.script, u.row, u.col)
+	}
 	// Adjust cross-sheet references in sheets that reference this sheet
 	// Use scriptDeps to find which sheets have dependencies on this sheet
 	sheet_Key := s.ProjectName + "/" + s.ID
@@ -2217,17 +2235,21 @@ func (s *Sheet) adjustScriptTagsOnDeleteRow(deleteRow int) {
 		}
 		sheet.mu.Unlock()
 
-		// Update dependencies for all modified scripts in this sheet
 		if modified {
+			type depUpd2 struct{ project, sheet, cellID, script, row, col string }
+			updList := make([]depUpd2, 0)
 			sheet.mu.RLock()
-			for _, rowMap := range sheet.Data {
-				for _, cell := range rowMap {
+			for rKey, rowMap := range sheet.Data {
+				for cKey, cell := range rowMap {
 					if cell.Script != "" {
-						globalSheetManager.UpdateScriptDependencies(sheet.ProjectName, sheet.ID, cell.CellID, cell.Script)
+						updList = append(updList, depUpd2{sheet.ProjectName, sheet.ID, cell.CellID, cell.Script, rKey, cKey})
 					}
 				}
 			}
 			sheet.mu.RUnlock()
+			for _, u := range updList {
+				globalSheetManager.UpdateScriptDependencies(u.project, u.sheet, u.cellID, u.script, u.row, u.col)
+			}
 		}
 	}
 }
@@ -2239,6 +2261,8 @@ func (s *Sheet) adjustScriptTagsOnMoveRow(fromRow, destIndex int) {
 	crossSheetPattern := regexp.MustCompile(`\{\{([^/\{\}]+)/([^/\{\}]+)/([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?\}\}`)
 	s.mu.Lock()
 	// Adjust same-sheet references in this sheet
+	type depUpd struct{ project, sheet, cellID, script, row, col string }
+	pending := make([]depUpd, 0)
 	for rowKey, rowMap := range s.Data {
 		for colKey, cell := range rowMap {
 			if cell.Script == "" {
@@ -2314,12 +2338,14 @@ func (s *Sheet) adjustScriptTagsOnMoveRow(fromRow, destIndex int) {
 			if newScript != cell.Script {
 				cell.Script = newScript
 				s.Data[rowKey][colKey] = cell
-				// Update dependencies for modified script
-				globalSheetManager.UpdateScriptDependencies(s.ProjectName, s.ID, cell.CellID, newScript)
+				pending = append(pending, depUpd{s.ProjectName, s.ID, cell.CellID, newScript, rowKey, colKey})
 			}
 		}
 	}
 	s.mu.Unlock()
+	for _, u := range pending {
+		globalSheetManager.UpdateScriptDependencies(u.project, u.sheet, u.cellID, u.script, u.row, u.col)
+	}
 	// Adjust cross-sheet references in sheets that reference this sheet
 	// Use scriptDeps to find which sheets have dependencies on this sheet
 	sheet_Key := s.ProjectName + "/" + s.ID
@@ -2438,17 +2464,21 @@ func (s *Sheet) adjustScriptTagsOnMoveRow(fromRow, destIndex int) {
 		}
 		sheet.mu.Unlock()
 
-		// Update dependencies for all modified scripts in this sheet
 		if modified {
+			type depUpd2 struct{ project, sheet, cellID, script, row, col string }
+			updList := make([]depUpd2, 0)
 			sheet.mu.RLock()
-			for _, rowMap := range sheet.Data {
-				for _, cell := range rowMap {
+			for rKey, rowMap := range sheet.Data {
+				for cKey, cell := range rowMap {
 					if cell.Script != "" {
-						globalSheetManager.UpdateScriptDependencies(sheet.ProjectName, sheet.ID, cell.CellID, cell.Script)
+						updList = append(updList, depUpd2{sheet.ProjectName, sheet.ID, cell.CellID, cell.Script, rKey, cKey})
 					}
 				}
 			}
 			sheet.mu.RUnlock()
+			for _, u := range updList {
+				globalSheetManager.UpdateScriptDependencies(u.project, u.sheet, u.cellID, u.script, u.row, u.col)
+			}
 		}
 	}
 }
@@ -2460,6 +2490,8 @@ func (s *Sheet) adjustScriptTagsOnInsertCol(insertIdx int) {
 	crossSheetPattern := regexp.MustCompile(`\{\{([^/\{\}]+)/([^/\{\}]+)/([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?\}\}`)
 	s.mu.Lock()
 	// Adjust same-sheet references in this sheet
+	type depUpd struct{ project, sheet, cellID, script, row, col string }
+	pending := make([]depUpd, 0)
 	for rowKey, rowMap := range s.Data {
 		for colKey, cell := range rowMap {
 			if cell.Script == "" {
@@ -2505,12 +2537,14 @@ func (s *Sheet) adjustScriptTagsOnInsertCol(insertIdx int) {
 			if newScript != cell.Script {
 				cell.Script = newScript
 				s.Data[rowKey][colKey] = cell
-				// Update dependencies for modified script
-				globalSheetManager.UpdateScriptDependencies(s.ProjectName, s.ID, cell.CellID, newScript)
+				pending = append(pending, depUpd{s.ProjectName, s.ID, cell.CellID, newScript, rowKey, colKey})
 			}
 		}
 	}
 	s.mu.Unlock()
+	for _, u := range pending {
+		globalSheetManager.UpdateScriptDependencies(u.project, u.sheet, u.cellID, u.script, u.row, u.col)
+	}
 	// Adjust cross-sheet references in sheets that reference this sheet
 	// Use scriptDeps to find which sheets have dependencies on this sheet
 	sheet_Key := s.ProjectName + "/" + s.ID
@@ -2599,17 +2633,21 @@ func (s *Sheet) adjustScriptTagsOnInsertCol(insertIdx int) {
 		}
 		sheet.mu.Unlock()
 
-		// Update dependencies for all modified scripts in this sheet
 		if modified {
+			type depUpd2 struct{ project, sheet, cellID, script, row, col string }
+			updList := make([]depUpd2, 0)
 			sheet.mu.RLock()
-			for _, rowMap := range sheet.Data {
-				for _, cell := range rowMap {
+			for rKey, rowMap := range sheet.Data {
+				for cKey, cell := range rowMap {
 					if cell.Script != "" {
-						globalSheetManager.UpdateScriptDependencies(sheet.ProjectName, sheet.ID, cell.CellID, cell.Script)
+						updList = append(updList, depUpd2{sheet.ProjectName, sheet.ID, cell.CellID, cell.Script, rKey, cKey})
 					}
 				}
 			}
 			sheet.mu.RUnlock()
+			for _, u := range updList {
+				globalSheetManager.UpdateScriptDependencies(u.project, u.sheet, u.cellID, u.script, u.row, u.col)
+			}
 		}
 	}
 }
@@ -2621,6 +2659,8 @@ func (s *Sheet) adjustScriptTagsOnDeleteCol(deleteIdx int) {
 	crossSheetPattern := regexp.MustCompile(`\{\{([^/\{\}]+)/([^/\{\}]+)/([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?\}\}`)
 	s.mu.Lock()
 	// Adjust same-sheet references in this sheet
+	type depUpd struct{ project, sheet, cellID, script, row, col string }
+	pending := make([]depUpd, 0)
 	for rowKey, rowMap := range s.Data {
 		for colKey, cell := range rowMap {
 			if cell.Script == "" {
@@ -2692,12 +2732,14 @@ func (s *Sheet) adjustScriptTagsOnDeleteCol(deleteIdx int) {
 			if newScript != cell.Script {
 				cell.Script = newScript
 				s.Data[rowKey][colKey] = cell
-				// Update dependencies for modified script
-				globalSheetManager.UpdateScriptDependencies(s.ProjectName, s.ID, cell.CellID, newScript)
+				pending = append(pending, depUpd{s.ProjectName, s.ID, cell.CellID, newScript, rowKey, colKey})
 			}
 		}
 	}
 	s.mu.Unlock()
+	for _, u := range pending {
+		globalSheetManager.UpdateScriptDependencies(u.project, u.sheet, u.cellID, u.script, u.row, u.col)
+	}
 	// Adjust cross-sheet references in sheets that reference this sheet
 	// Use scriptDeps to find which sheets have dependencies on this sheet
 	sheet_Key := s.ProjectName + "/" + s.ID
@@ -2812,17 +2854,21 @@ func (s *Sheet) adjustScriptTagsOnDeleteCol(deleteIdx int) {
 		}
 		sheet.mu.Unlock()
 
-		// Update dependencies for all modified scripts in this sheet
 		if modified {
+			type depUpd2 struct{ project, sheet, cellID, script, row, col string }
+			updList := make([]depUpd2, 0)
 			sheet.mu.RLock()
-			for _, rowMap := range sheet.Data {
-				for _, cell := range rowMap {
+			for rKey, rowMap := range sheet.Data {
+				for cKey, cell := range rowMap {
 					if cell.Script != "" {
-						globalSheetManager.UpdateScriptDependencies(sheet.ProjectName, sheet.ID, cell.CellID, cell.Script)
+						updList = append(updList, depUpd2{sheet.ProjectName, sheet.ID, cell.CellID, cell.Script, rKey, cKey})
 					}
 				}
 			}
 			sheet.mu.RUnlock()
+			for _, u := range updList {
+				globalSheetManager.UpdateScriptDependencies(u.project, u.sheet, u.cellID, u.script, u.row, u.col)
+			}
 		}
 	}
 }
@@ -2834,6 +2880,8 @@ func (s *Sheet) adjustScriptTagsOnMoveCol(fromIdx, destIdx int) {
 	crossSheetPattern := regexp.MustCompile(`\{\{([^/\{\}]+)/([^/\{\}]+)/([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?\}\}`)
 	s.mu.Lock()
 	// Adjust same-sheet references in this sheet
+	type depUpd struct{ project, sheet, cellID, script, row, col string }
+	pending := make([]depUpd, 0)
 	for rowKey, rowMap := range s.Data {
 		for colKey, cell := range rowMap {
 			if cell.Script == "" {
@@ -2926,12 +2974,14 @@ func (s *Sheet) adjustScriptTagsOnMoveCol(fromIdx, destIdx int) {
 			if newScript != cell.Script {
 				cell.Script = newScript
 				s.Data[rowKey][colKey] = cell
-				// Update dependencies for modified script
-				globalSheetManager.UpdateScriptDependencies(s.ProjectName, s.ID, cell.CellID, newScript)
+				pending = append(pending, depUpd{s.ProjectName, s.ID, cell.CellID, newScript, rowKey, colKey})
 			}
 		}
 	}
 	s.mu.Unlock()
+	for _, u := range pending {
+		globalSheetManager.UpdateScriptDependencies(u.project, u.sheet, u.cellID, u.script, u.row, u.col)
+	}
 	// Adjust cross-sheet references in sheets that reference this sheet
 	// Use scriptDeps to find which sheets have dependencies on this sheet
 	sheet_Key := s.ProjectName + "/" + s.ID
@@ -3067,17 +3117,21 @@ func (s *Sheet) adjustScriptTagsOnMoveCol(fromIdx, destIdx int) {
 		}
 		sheet.mu.Unlock()
 
-		// Update dependencies for all modified scripts in this sheet
 		if modified {
+			type depUpd2 struct{ project, sheet, cellID, script, row, col string }
+			updList := make([]depUpd2, 0)
 			sheet.mu.RLock()
-			for _, rowMap := range sheet.Data {
-				for _, cell := range rowMap {
+			for rKey, rowMap := range sheet.Data {
+				for cKey, cell := range rowMap {
 					if cell.Script != "" {
-						globalSheetManager.UpdateScriptDependencies(sheet.ProjectName, sheet.ID, cell.CellID, cell.Script)
+						updList = append(updList, depUpd2{sheet.ProjectName, sheet.ID, cell.CellID, cell.Script, rKey, cKey})
 					}
 				}
 			}
 			sheet.mu.RUnlock()
+			for _, u := range updList {
+				globalSheetManager.UpdateScriptDependencies(u.project, u.sheet, u.cellID, u.script, u.row, u.col)
+			}
 		}
 	}
 }
@@ -3394,15 +3448,23 @@ func (sm *SheetManager) rebuildScriptDependencies() {
 		projectName := sheet.ProjectName
 		sheetID := sheet.ID
 
-		for _, rowMap := range sheet.Data {
-			for _, cell := range rowMap {
+		// Iterate with keys to capture row and column labels
+		for rowLabel, rowMap := range sheet.Data {
+			for colLabel, cell := range rowMap {
 				if strings.TrimSpace(cell.Script) == "" {
 					continue
 				}
 
 				// Extract dependencies for this script
 				deps := ExtractScriptDependencies(cell.Script, projectName, sheetID)
-
+				if len(deps) == 0 {
+					// No explicit references found; add self cell as dependency
+					deps = append(deps, DependencyInfo{
+						Project: projectName,
+						Sheet:   sheetID,
+						Range:   colLabel + rowLabel,
+					})
+				}
 				// Add to dependency map
 				for _, dep := range deps {
 					sheetKey := dep.Project + "/" + dep.Sheet

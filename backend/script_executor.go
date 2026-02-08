@@ -135,7 +135,8 @@ func ExtractScriptDependencies(script, currentProject, currentSheet string) []De
 // script is the new script content (used to extract dependencies)
 // If script is empty, it will remove all dependencies for this script
 // Function is used when script is modified
-func (sm *SheetManager) UpdateScriptDependencies(scriptProjectName, scriptSheetID, scriptCellID, script string) {
+// eg:- scriptDeps["projectName/sheetID"] = [ScriptIdentifier{ScriptProjectName: projectName, ScriptSheetID: sheetID, ScriptCellID: cellID, ReferencedRange: "A2"})
+func (sm *SheetManager) UpdateScriptDependencies(scriptProjectName, scriptSheetID, scriptCellID, script, rowLabel, colLabel string) {
 	sm.scriptDepsMu.Lock()
 	defer sm.scriptDepsMu.Unlock()
 
@@ -162,6 +163,16 @@ func (sm *SheetManager) UpdateScriptDependencies(scriptProjectName, scriptSheetI
 
 	// Add new dependencies
 	deps := ExtractScriptDependencies(script, scriptProjectName, scriptSheetID)
+	if len(deps) == 0 {
+		// No explicit references found; add self cell as dependency
+		if strings.TrimSpace(colLabel) != "" && strings.TrimSpace(rowLabel) != "" {
+			deps = append(deps, DependencyInfo{
+				Project: scriptProjectName,
+				Sheet:   scriptSheetID,
+				Range:   colLabel + rowLabel,
+			})
+		}
+	}
 	for _, dep := range deps {
 		sheetKey := dep.Project + "/" + dep.Sheet
 		scriptIdent := ScriptIdentifier{
@@ -387,7 +398,7 @@ func (sm *SheetManager) RenameProjectInDependencies(oldProject, newProject strin
 }
 
 // on script change
-func ExecuteCellScriptonScriptChange(projectName, sheetID, row, col string) {
+func ExecuteCellScriptonChange(projectName, sheetID, row, col string) {
 	//find a cell addressed in the script and add it in globalSheetManager.CellsModifiedManuallyQueue so that we can trigger script execution for that cell
 	s := globalSheetManager.GetSheetBy(sheetID, projectName)
 	if s == nil {
@@ -403,7 +414,14 @@ func ExecuteCellScriptonScriptChange(projectName, sheetID, row, col string) {
 
 	// Extract all dependencies from the script
 	deps := ExtractScriptDependencies(cur.Script, projectName, sheetID)
-
+	if len(deps) == 0 {
+		// No explicit references found; add self cell as dependency
+		deps = append(deps, DependencyInfo{
+			Project: projectName,
+			Sheet:   sheetID,
+			Range:   col + row,
+		})
+	}
 	// Add only the first referenced cell to the manually modified queue
 	if len(deps) > 0 {
 		dep := deps[0]
@@ -437,6 +455,7 @@ func ExecuteCellScriptonScriptChange(projectName, sheetID, row, col string) {
 		}
 
 		if cellCol != "" && cellRow != "" {
+			//Add in the queue to execute other wise mutex will lock up
 			globalSheetManager.CellsModifiedManuallyQueueMu.Lock()
 			globalSheetManager.CellsModifiedManuallyQueue = append(
 				globalSheetManager.CellsModifiedManuallyQueue,
@@ -450,13 +469,6 @@ func ExecuteCellScriptonScriptChange(projectName, sheetID, row, col string) {
 			globalSheetManager.CellsModifiedManuallyQueueMu.Unlock()
 		}
 	}
-}
-
-// on row or column insert
-func RefillingValuesonInsert(projectName, sheetID, row, col string) {
-
-	WriteScriptOutputToCells(projectName, sheetID, row, col, false)
-
 }
 
 // ExecuteCellScript executes a Python script in a cell and updates the cell value
@@ -495,18 +507,18 @@ func ExecuteCellScript(projectName, sheetID, row, col string) {
 	// if globalSheetManager.scriptExecuted contains current script then return else add current script to globalSheetManager.scriptExecuted
 	// Build the string identifier for the current script cell: "project/sheet/cellID"
 	ident := projectName + "/" + sheetID + "/" + cellID
-
+	//fmt.Println("script for cell", cellID, "with content:", script)
 	// Check if already executed to prevent cycles
+	// Release sheet read lock before acquiring global scripts-executed lock to avoid nested locks
+	s.mu.RUnlock()
 	globalSheetManager.ScriptsExecutedMu.Lock()
 	indx := slices.Index(globalSheetManager.ScriptsExecuted, ident)
 
 	if indx > -1 {
 		//fmt.Println("Script already executed:", ident)
 		globalSheetManager.ScriptsExecutedMu.Unlock()
-		s.mu.RUnlock()
 		return
 	}
-	s.mu.RUnlock()
 	// Mark as executed for the duration of this call
 	globalSheetManager.ScriptsExecuted = append(globalSheetManager.ScriptsExecuted, ident)
 	globalSheetManager.ScriptsExecutedMu.Unlock()
@@ -537,6 +549,7 @@ func ExecuteCellScript(projectName, sheetID, row, col string) {
 		globalSheetManager.SaveSheet(s)
 		return
 	}
+
 	// executing replaces the tags with values of the cells
 	//example
 	//1. if value at A2 is '7' then replace {{A2}} with '7' in the script
@@ -574,14 +587,17 @@ func ExecuteCellScript(projectName, sheetID, row, col string) {
 
 			if rowData, ok := refSheet.Data[startRow]; ok {
 				if cell, ok := rowData[startCol]; ok {
-					// Return the cell value - quote only if not a number
+					// Return the cell value - numbers unquoted; strings properly escaped
 					val := cell.Value
+					if val == "" {
+						return `""`
+					}
 					if _, err := strconv.ParseFloat(val, 64); err == nil {
 						// It's a number, return unquoted
 						return val
 					}
-					// Not a number, return quoted
-					return fmt.Sprintf(`"%s"`, val)
+					// Not a number, return quoted with escapes safe for Python
+					return strconv.Quote(val)
 				}
 			}
 			return `""`
@@ -621,13 +637,11 @@ func ExecuteCellScript(projectName, sheetID, row, col string) {
 						val = cell.Value
 					}
 				}
-				// Quote only if not a number
+				// Numbers unquoted; strings properly escaped, empty as ""
 				if _, err := strconv.ParseFloat(val, 64); err == nil && val != "" {
-					// It's a number, use unquoted
 					cols = append(cols, val)
 				} else {
-					// Not a number or empty, use quoted
-					cols = append(cols, fmt.Sprintf(`"%s"`, val))
+					cols = append(cols, strconv.Quote(val))
 				}
 			}
 			rows = append(rows, "["+strings.Join(cols, ",")+"]")
@@ -650,17 +664,19 @@ func ExecuteCellScript(projectName, sheetID, row, col string) {
 		if submatches[3] == "" || submatches[4] == "" {
 			s.mu.RLock()
 			defer s.mu.RUnlock()
-			//cellKey := startRow + "-" + startCol
 			if rowData, ok := s.Data[startRow]; ok {
 				if cell, ok := rowData[startCol]; ok {
-					// Return the cell value - quote only if not a number
+					// Return the cell value - numbers unquoted; strings properly escaped
 					val := cell.Value
+					if val == "" {
+						return `""`
+					}
 					if _, err := strconv.ParseFloat(val, 64); err == nil {
 						// It's a number, return unquoted
 						return val
 					}
-					// Not a number, return quoted
-					return fmt.Sprintf(`"%s"`, val)
+					// Not a number, return quoted with escapes safe for Python
+					return strconv.Quote(val)
 				}
 			}
 			return `""`
@@ -698,13 +714,11 @@ func ExecuteCellScript(projectName, sheetID, row, col string) {
 						val = cell.Value
 					}
 				}
-				// Quote only if not a number
+				// Numbers unquoted; strings properly escaped, empty as ""
 				if _, err := strconv.ParseFloat(val, 64); err == nil && val != "" {
-					// It's a number, use unquoted
 					cols = append(cols, val)
 				} else {
-					// Not a number or empty, use quoted
-					cols = append(cols, fmt.Sprintf(`"%s"`, val))
+					cols = append(cols, strconv.Quote(val))
 				}
 			}
 			rows = append(rows, "["+strings.Join(cols, ",")+"]")
@@ -714,6 +728,7 @@ func ExecuteCellScript(projectName, sheetID, row, col string) {
 	})
 
 	cmd, err := ep.PythonCmd("-c", script)
+	//fmt.Println("Executing script ", script)
 	if err != nil {
 		s.mu.Lock()
 		cur := s.Data[row][col]
@@ -756,7 +771,7 @@ func ExecuteCellScript(projectName, sheetID, row, col string) {
 // broadcastRowColUpdated sends a ROW_COL_UPDATED message for the given sheet
 func broadcastRowColUpdated(s *Sheet, projectName, sheetID string) {
 	if globalHub != nil {
-		fmt.Println("Broadcasting ROW_COL_UPDATED for", projectName, sheetID, "after script execution")
+		//fmt.Println("Broadcasting ROW_COL_UPDATED for", projectName, sheetID, "after script execution")
 		s.mu.RLock()
 		payload, _ := json.Marshal(s.SnapshotForClient())
 		s.mu.RUnlock()
@@ -770,6 +785,7 @@ func broadcastRowColUpdated(s *Sheet, projectName, sheetID string) {
 	}
 }
 
+// This function causes mutex lockout when called concurrently (observed in tests) - needs refactor to avoid nested locks and long lock durations
 func WriteScriptOutputToCells(projectName, sheetID, row, col string, triggernext bool) {
 	s := globalSheetManager.GetSheetBy(sheetID, projectName)
 	if s == nil {
@@ -780,14 +796,32 @@ func WriteScriptOutputToCells(projectName, sheetID, row, col string, triggernext
 	//defer s.mu.Unlock()
 
 	if s.Data[row] == nil {
+		s.mu.Unlock()
 		return
 	}
 	cur, exists := s.Data[row][col]
 	if !exists {
+		s.mu.Unlock()
 		return
 	}
 
 	newVal := cur.ScriptOutput
+
+	// Helper: normalize Python-style lists (single quotes, True/False, None) to JSON
+	normalizePythonListToJSON := func(s string) string {
+		if strings.Contains(s, "[") && strings.Contains(s, "]") {
+			reTrue := regexp.MustCompile(`\bTrue\b`)
+			reFalse := regexp.MustCompile(`\bFalse\b`)
+			reNone := regexp.MustCompile(`\bNone\b`)
+			s = reTrue.ReplaceAllString(s, "true")
+			s = reFalse.ReplaceAllString(s, "false")
+			s = reNone.ReplaceAllString(s, "null")
+			// Replace single-quoted strings with double-quoted strings
+			reSingle := regexp.MustCompile(`'([^'\\]*)'`)
+			s = reSingle.ReplaceAllString(s, `"$1"`)
+		}
+		return s
+	}
 	rSpan := cur.ScriptOutput_RowSpan
 	cSpan := cur.ScriptOutput_ColSpan
 
@@ -868,12 +902,13 @@ func WriteScriptOutputToCells(projectName, sheetID, row, col string, triggernext
 	if rSpan == 1 && cSpan == 1 {
 		cur.Value = newVal
 		s.Data[row][col] = cur
+		s.mu.Unlock()
 		if triggernext {
 			globalSheetManager.CellsModifiedByScriptQueueMu.Lock()
 			globalSheetManager.CellsModifiedByScriptQueue = append(globalSheetManager.CellsModifiedByScriptQueue, CellIdentifier{projectName, sheetID, row, col})
 			globalSheetManager.CellsModifiedByScriptQueueMu.Unlock()
 		}
-		s.mu.Unlock()
+
 		globalSheetManager.SaveSheet(s)
 		broadcastRowColUpdated(s, projectName, sheetID)
 		return
@@ -885,13 +920,19 @@ func WriteScriptOutputToCells(projectName, sheetID, row, col string, triggernext
 	// If it's not a JSON array or matrix, just set the value to the base cell
 	var testInterface interface{}
 	if err := json.Unmarshal([]byte(newVal), &testInterface); err != nil {
-		// Not valid JSON, treat as plain string
-		cur.Value = newVal
-		s.Data[row][col] = cur
-		s.mu.Unlock()
-		globalSheetManager.SaveSheet(s)
-		broadcastRowColUpdated(s, projectName, sheetID)
-		return
+		// Try to normalize Python-like list syntax to JSON
+		tryVal := normalizePythonListToJSON(newVal)
+		if err2 := json.Unmarshal([]byte(tryVal), &testInterface); err2 != nil {
+			// Not parseable, treat as plain string
+			cur.Value = newVal
+			s.Data[row][col] = cur
+			s.mu.Unlock()
+			globalSheetManager.SaveSheet(s)
+			broadcastRowColUpdated(s, projectName, sheetID)
+			return
+		}
+		// Use normalized value for subsequent parsing
+		newVal = tryVal
 	}
 
 	// Check if it's a simple value (not array or object)
@@ -900,12 +941,13 @@ func WriteScriptOutputToCells(projectName, sheetID, row, col string, triggernext
 		// Simple value, set to base cell
 		cur.Value = newVal
 		s.Data[row][col] = cur
+		s.mu.Unlock()
 		if triggernext {
 			globalSheetManager.CellsModifiedByScriptQueueMu.Lock()
 			globalSheetManager.CellsModifiedByScriptQueue = append(globalSheetManager.CellsModifiedByScriptQueue, CellIdentifier{projectName, sheetID, row, col})
 			globalSheetManager.CellsModifiedByScriptQueueMu.Unlock()
 		}
-		s.mu.Unlock()
+
 		globalSheetManager.SaveSheet(s)
 		broadcastRowColUpdated(s, projectName, sheetID)
 		return
@@ -916,7 +958,16 @@ func WriteScriptOutputToCells(projectName, sheetID, row, col string, triggernext
 	MatrixParsed := false
 	if rSpan > 1 || cSpan > 1 {
 		var any interface{}
-		if err := json.Unmarshal([]byte(newVal), &any); err == nil {
+		tryVal := newVal
+		if err := json.Unmarshal([]byte(tryVal), &any); err != nil {
+			tryVal = normalizePythonListToJSON(tryVal)
+			if err2 := json.Unmarshal([]byte(tryVal), &any); err2 == nil {
+				newVal = tryVal
+			}
+		} else {
+			newVal = tryVal
+		}
+		if any != nil {
 			if arr, ok := any.([]interface{}); ok {
 				tmp := make([][]string, 0, len(arr))
 				for _, r := range arr {
@@ -935,7 +986,7 @@ func WriteScriptOutputToCells(projectName, sheetID, row, col string, triggernext
 			}
 		}
 	}
-
+	CellsModified := make([]CellIdentifier, 0)
 	if MatrixParsed {
 		// if matrix dimensions is more than ScriptOutput_RowSpan x ScriptOutput_ColSpan, we will simply fill cur.Value = scriptOutput
 		if len(matrix) > rSpan || (len(matrix) > 0 && len(matrix[0]) > cSpan) {
@@ -963,16 +1014,16 @@ func WriteScriptOutputToCells(projectName, sheetID, row, col string, triggernext
 				c.Value = val
 				s.Data[rKey][cLabel] = c
 				if triggernext {
-
-					globalSheetManager.CellsModifiedByScriptQueueMu.Lock()
-					globalSheetManager.CellsModifiedByScriptQueue = append(globalSheetManager.CellsModifiedByScriptQueue, CellIdentifier{projectName, sheetID, rKey, cLabel})
-					globalSheetManager.CellsModifiedByScriptQueueMu.Unlock()
+					CellsModified = append(CellsModified, CellIdentifier{projectName, sheetID, rKey, cLabel})
 
 				}
 			}
 		}
 
 		s.mu.Unlock()
+		globalSheetManager.CellsModifiedByScriptQueueMu.Lock()
+		globalSheetManager.CellsModifiedByScriptQueue = append(globalSheetManager.CellsModifiedByScriptQueue, CellsModified...)
+		globalSheetManager.CellsModifiedByScriptQueueMu.Unlock()
 		globalSheetManager.SaveSheet(s)
 		broadcastRowColUpdated(s, projectName, sheetID)
 		return
@@ -981,7 +1032,14 @@ func WriteScriptOutputToCells(projectName, sheetID, row, col string, triggernext
 	// handling array type [1,2,3,4]
 	// If output is a flat array and span is 1xN or Nx1, fill accordingly
 	var arrAny []interface{}
-	if err := json.Unmarshal([]byte(cur.ScriptOutput), &arrAny); err == nil {
+	tryArr := newVal
+	if err := json.Unmarshal([]byte(tryArr), &arrAny); err != nil {
+		tryArr = normalizePythonListToJSON(tryArr)
+		if err2 := json.Unmarshal([]byte(tryArr), &arrAny); err2 != nil {
+			// fall through to plain string handling below
+		}
+	}
+	if arrAny != nil {
 		if (rSpan == 1 && cSpan > 1 && len(arrAny) <= cSpan) || (cSpan == 1 && rSpan > 1 && len(arrAny) <= rSpan) {
 			for i, v := range arrAny {
 				if rSpan == 1 {
@@ -991,9 +1049,8 @@ func WriteScriptOutputToCells(projectName, sheetID, row, col string, triggernext
 					c.Value = fmt.Sprint(v)
 					s.Data[row][cLabel] = c
 					if triggernext {
-						globalSheetManager.CellsModifiedByScriptQueueMu.Lock()
-						globalSheetManager.CellsModifiedByScriptQueue = append(globalSheetManager.CellsModifiedByScriptQueue, CellIdentifier{projectName, sheetID, row, cLabel})
-						globalSheetManager.CellsModifiedByScriptQueueMu.Unlock()
+						CellsModified = append(CellsModified, CellIdentifier{projectName, sheetID, row, cLabel})
+
 					}
 
 				} else {
@@ -1003,9 +1060,8 @@ func WriteScriptOutputToCells(projectName, sheetID, row, col string, triggernext
 					c.Value = fmt.Sprint(v)
 					s.Data[rKey][col] = c
 					if triggernext {
-						globalSheetManager.CellsModifiedByScriptQueueMu.Lock()
-						globalSheetManager.CellsModifiedByScriptQueue = append(globalSheetManager.CellsModifiedByScriptQueue, CellIdentifier{projectName, sheetID, rKey, col})
-						globalSheetManager.CellsModifiedByScriptQueueMu.Unlock()
+						CellsModified = append(CellsModified, CellIdentifier{projectName, sheetID, rKey, col})
+
 					}
 				}
 			}
@@ -1013,13 +1069,15 @@ func WriteScriptOutputToCells(projectName, sheetID, row, col string, triggernext
 			cur.Value = cur.ScriptOutput
 			s.Data[row][col] = cur
 			if triggernext {
-				globalSheetManager.CellsModifiedByScriptQueueMu.Lock()
-				globalSheetManager.CellsModifiedByScriptQueue = append(globalSheetManager.CellsModifiedByScriptQueue, CellIdentifier{projectName, sheetID, row, col})
-				globalSheetManager.CellsModifiedByScriptQueueMu.Unlock()
+				CellsModified = append(CellsModified, CellIdentifier{projectName, sheetID, row, col})
+
 			}
 		}
 	}
 	s.mu.Unlock()
+	globalSheetManager.CellsModifiedByScriptQueueMu.Lock()
+	globalSheetManager.CellsModifiedByScriptQueue = append(globalSheetManager.CellsModifiedByScriptQueue, CellsModified...)
+	globalSheetManager.CellsModifiedByScriptQueueMu.Unlock()
 	globalSheetManager.SaveSheet(s)
 
 	broadcastRowColUpdated(s, projectName, sheetID)
