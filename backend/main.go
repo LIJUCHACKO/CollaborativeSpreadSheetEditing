@@ -17,12 +17,15 @@ import (
 
 var addr = flag.String("addr", ":8082", "http service address")
 
+// Global hub instance for WebSocket connections
+var globalHub *Hub
+
 func main() {
 	flag.Parse()
 
 	// Initialize Hub
-	hub := newHub()
-	go hub.run()
+	globalHub = newHub()
+	go globalHub.run()
 
 	globalProjectAuditManager.Load()
 	globalProjectMeta.Load()
@@ -30,6 +33,10 @@ func main() {
 	globalSheetManager.Load()
 	globalUserManager.Load()
 	globalChatManager.Load()
+
+	// Start SheetManager async saver & flusher after Hub is ready
+	// Ensures any broadcasts during script processing see a non-nil globalHub
+	globalSheetManager.initAsyncSaver()
 
 	http.HandleFunc("/api/export", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -425,7 +432,7 @@ func main() {
 	})
 
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-		serveWs(hub, w, r)
+		serveWs(globalHub, w, r)
 	})
 
 	http.HandleFunc("/api/register", func(w http.ResponseWriter, r *http.Request) {
@@ -790,6 +797,11 @@ func main() {
 				http.Error(w, "Forbidden: owner only", http.StatusForbidden)
 				return
 			}
+			// Check if any sheets in the project or its subfolders are currently open
+			if globalHub.HasActiveConnectionsForProject(req.OldName) {
+				http.Error(w, "Cannot rename: one or more sheets in this project are currently open by users", http.StatusConflict)
+				return
+			}
 			oldPath := filepath.Join(dataDir, req.OldName)
 			newPath := filepath.Join(dataDir, req.NewName)
 			if err := os.Rename(oldPath, newPath); err != nil {
@@ -807,6 +819,8 @@ func main() {
 					globalSheetManager.SaveSheet(s)
 				}
 			}
+			// Update script dependencies for the renamed project
+			globalSheetManager.RenameProjectInDependencies(req.OldName, req.NewName)
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]string{"message": "Project renamed"})
 			return
@@ -845,7 +859,7 @@ func main() {
 	// Folders API: list/create subfolders under a project path
 	http.HandleFunc("/api/folders", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 
 		token := r.Header.Get("Authorization")
@@ -906,6 +920,67 @@ func main() {
 			}
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]string{"name": req.Name})
+			return
+
+		case http.MethodPut:
+			// Rename a subfolder under the given parent project path
+			var req struct {
+				Parent  string `json:"parent"`
+				OldName string `json:"old_name"`
+				NewName string `json:"new_name"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Parent == "" || req.OldName == "" || req.NewName == "" {
+				http.Error(w, "parent, old_name, and new_name required", http.StatusBadRequest)
+				return
+			}
+			// Only allow rename under an existing top-level project owned by user
+			top := strings.Split(req.Parent, string(os.PathSeparator))[0]
+			owner := globalProjectMeta.GetOwner(top)
+			if owner != "" && owner != username {
+				http.Error(w, "Forbidden: owner only", http.StatusForbidden)
+				return
+			}
+			// Check if any sheets in the subfolder are currently open
+			fullOldPath := req.Parent
+			if fullOldPath != "" {
+				fullOldPath = fullOldPath + "/" + req.OldName
+			} else {
+				fullOldPath = req.OldName
+			}
+			if globalHub.HasActiveConnectionsForProject(fullOldPath) {
+				http.Error(w, "Cannot rename: one or more sheets in this folder are currently open by users", http.StatusConflict)
+				return
+			}
+			oldPath := filepath.Join(dataDir, req.Parent, req.OldName)
+			newPath := filepath.Join(dataDir, req.Parent, req.NewName)
+			if err := os.Rename(oldPath, newPath); err != nil {
+				http.Error(w, "Failed to rename folder", http.StatusInternalServerError)
+				return
+			}
+			// Update in-memory sheets' ProjectName for sheets in the renamed folder
+			fullNewPath := req.Parent
+			if fullNewPath != "" {
+				fullNewPath = fullNewPath + "/" + req.NewName
+			} else {
+				fullNewPath = req.NewName
+			}
+			for _, s := range globalSheetManager.ListSheets() {
+				if s.ProjectName == fullOldPath || strings.HasPrefix(s.ProjectName, fullOldPath+"/") {
+					s.mu.Lock()
+					// Replace the old prefix with the new prefix
+					if s.ProjectName == fullOldPath {
+						s.ProjectName = fullNewPath
+					} else {
+						s.ProjectName = fullNewPath + s.ProjectName[len(fullOldPath):]
+					}
+					s.mu.Unlock()
+					globalSheetManager.SaveSheet(s)
+				}
+			}
+			// Update script dependencies for the renamed subfolder
+			globalSheetManager.RenameProjectInDependencies(fullOldPath, fullNewPath)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{"name": req.NewName})
 			return
 
 		default:

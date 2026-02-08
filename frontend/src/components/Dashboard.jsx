@@ -44,6 +44,8 @@ export default function Dashboard() {
     const [currentPath, setCurrentPath] = useState(project || '');
     const [folders, setFolders] = useState([]);
     const [newFolderName, setNewFolderName] = useState('');
+    const [editingFolderName, setEditingFolderName] = useState(null);
+    const [editingFolderNewName, setEditingFolderNewName] = useState('');
 
     // Effects
     useEffect(() => {
@@ -284,6 +286,54 @@ export default function Dashboard() {
             }
         } catch (error) {
             console.error('Failed to create folder', error);
+        }
+    };
+
+    const startRenamingFolder = (name) => {
+        setEditingFolderName(name);
+        setEditingFolderNewName(name);
+    };
+
+    const cancelRenamingFolder = () => {
+        setEditingFolderName(null);
+        setEditingFolderNewName('');
+    };
+
+    const renameFolder = async (oldName) => {
+        const newName = editingFolderNewName.trim();
+        if (!newName || newName === oldName) {
+            cancelRenamingFolder();
+            return;
+        }
+        try {
+            const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
+            const body = { parent: currentPath || project || '', old_name: oldName, new_name: newName };
+            const res = await authenticatedFetch(`http://${host}:8082/api/folders`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+            if (res.status === 409) {
+                const errorText = await res.text();
+                alert(errorText || 'Cannot rename: one or more sheets in this folder are currently open by users.');
+                return;
+            }
+            if (res.ok) {
+                cancelRenamingFolder();
+                fetchFolders();
+            } else if (res.status === 401) {
+                clearAuth();
+                alert('Your session has expired. Please log in again.');
+                navigate('/');
+            } else if (res.status === 403) {
+                alert('Only the project owner can rename folders.');
+            } else {
+                const text = await res.text();
+                alert(text || 'Failed to rename folder');
+            }
+        } catch (error) {
+            console.error('Failed to rename folder', error);
+            alert('Error renaming folder');
         }
     };
 
@@ -764,9 +814,35 @@ export default function Dashboard() {
                             {folders.length > 0 ? (
                                 <div className="d-flex flex-wrap gap-2">
                                     {folders.map((name) => (
-                                        <button key={name} className="btn btn-sm btn-outline-primary" onClick={()=>goToFolder(name)}>
-                                            {name}
-                                        </button>
+                                        <div key={name} className="d-flex align-items-center gap-1">
+                                            {editingFolderName === name ? (
+                                                <>
+                                                    <input
+                                                        type="text"
+                                                        className="form-control form-control-sm"
+                                                        value={editingFolderNewName}
+                                                        onChange={(e) => setEditingFolderNewName(e.target.value)}
+                                                        onKeyDown={(e) => {
+                                                            if (e.key === 'Enter') renameFolder(name);
+                                                            if (e.key === 'Escape') cancelRenamingFolder();
+                                                        }}
+                                                        style={{ width: '150px' }}
+                                                        autoFocus
+                                                    />
+                                                    <button className="btn btn-sm btn-success" onClick={() => renameFolder(name)}>Save</button>
+                                                    <button className="btn btn-sm btn-secondary" onClick={cancelRenamingFolder}>Cancel</button>
+                                                </>
+                                            ) : (
+                                                <>
+                                                    <button className="btn btn-sm btn-outline-primary" onClick={() => goToFolder(name)}>
+                                                        {name}
+                                                    </button>
+                                                    <button className="btn btn-sm btn-outline-secondary" onClick={() => startRenamingFolder(name)} title="Rename folder">
+                                                        <Edit2 size={14} />
+                                                    </button>
+                                                </>
+                                            )}
+                                        </div>
                                     ))}
                                 </div>
                             ) : (

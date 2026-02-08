@@ -10,10 +10,14 @@ import (
 )
 
 type ChatMessage struct {
-	Timestamp time.Time `json:"timestamp"`
-	User      string    `json:"user"`
-	Text      string    `json:"text"`
-	To        string    `json:"to,omitempty"` // "all" or specific username
+	Timestamp   time.Time       `json:"timestamp"`
+	User        string          `json:"user"`
+	Text        string          `json:"text"`
+	To          string          `json:"to,omitempty"` // "all" or specific username
+	SheetID     string          `json:"sheet_id,omitempty"`
+	SheetName   string          `json:"sheet_name,omitempty"`
+	ProjectName string          `json:"project_name,omitempty"`
+	ReadBy      map[string]bool `json:"read_by,omitempty"` // username -> true
 }
 
 type ChatManager struct {
@@ -74,12 +78,23 @@ func (cm *ChatManager) Save() {
 	}
 }
 
-func (cm *ChatManager) Append(user, text, to string) ChatMessage {
+func (cm *ChatManager) Append(user, text, to, sheetID, sheetName, projectName string) ChatMessage {
 	cm.mu.Lock()
 	if to == "" {
 		to = "all"
 	}
-	msg := ChatMessage{Timestamp: time.Now(), User: user, Text: text, To: to}
+	msg := ChatMessage{
+		Timestamp:   time.Now(),
+		User:        user,
+		Text:        text,
+		To:          to,
+		SheetID:     sheetID,
+		SheetName:   sheetName,
+		ProjectName: projectName,
+		ReadBy:      make(map[string]bool),
+	}
+	// Mark as read by sender
+	msg.ReadBy[user] = true
 	cm.messages = append(cm.messages, msg)
 	cm.mu.Unlock()
 	go cm.Save()
@@ -109,4 +124,20 @@ func (cm *ChatManager) HistoryFor(user string) []ChatMessage {
 		}
 	}
 	return out
+}
+
+// MarkAsRead marks a message as read by a specific user
+func (cm *ChatManager) MarkAsRead(timestamp time.Time, user string) {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	for i := range cm.messages {
+		if cm.messages[i].Timestamp.Equal(timestamp) {
+			if cm.messages[i].ReadBy == nil {
+				cm.messages[i].ReadBy = make(map[string]bool)
+			}
+			cm.messages[i].ReadBy[user] = true
+			go cm.Save()
+			return
+		}
+	}
 }

@@ -166,6 +166,9 @@ export default function Sheet() {
 
         const noOfRows = uniqueRows.length;
         const noOfCols = uniqueCols.length;
+        const rangeText = getSelectedRange() 
+        // Combine projectName, sheet_id, and rangeText in the format {{projectname/sheet_id/rangeText}}
+        const combinedRangeText = rangeText ? `${projectName}/${id}/${rangeText}` : '';
         //console.log('Copied selection:',  values);
         // Send selection values to backend so other instances of the same user can paste
         if (ws.current && ws.current.readyState === WebSocket.OPEN) {
@@ -175,6 +178,7 @@ export default function Sheet() {
                 sheet_id: id,
                 values,
                 scripts,
+                rangeText: combinedRangeText,
             };
             ws.current.send(JSON.stringify({ type: 'SELECTION_COPIED', sheet_id: id, payload }));
         }
@@ -425,15 +429,14 @@ export default function Sheet() {
     };
     const closeScriptPopup = () => setScriptPopup({ visible: false, x: 0, y: 0, row: null, col: null });
 
-    // Insert selected range into script at cursor position
-    const insertSelectedRangeIntoScript = () => {
-        if (!selectedRange || selectedRange.length === 0) return;
+    const getSelectedRange = () => {
+         if (!selectedRange || selectedRange.length === 0) return "";
         
         let rangeText = '';
         if (selectedRange.length === 1) {
             // Single cell: {{A5}}
             const cell = selectedRange[0];
-            rangeText = `{{${cell.col}${cell.row}}}`;
+            rangeText = `${cell.col}${cell.row}`;
         } else {
             // Multiple cells: find top-left and bottom-right
             const rows = selectedRange.map(c => c.row).sort((a, b) => a - b);
@@ -445,8 +448,23 @@ export default function Sheet() {
             const leftCol = COL_HEADERS[colIndices[0]];
             const rightCol = COL_HEADERS[colIndices[colIndices.length - 1]];
             
-            rangeText = `{{${leftCol}${topRow}:${rightCol}${bottomRow}}}`;
+            rangeText = `${leftCol}${topRow}:${rightCol}${bottomRow}`;
         }
+        return rangeText
+    }
+    // Insert selected range into script at cursor position
+    const insertSelectedRangeIntoScript = () => {
+        let rangeText = '';
+        if (copiedBlock && copiedBlock.rangeText) {
+            rangeText = copiedBlock.rangeText || '';
+            copiedBlock.rangeText = ''; // clear after use
+        }else if (selectedRange && selectedRange.length > 0) {
+            rangeText = getSelectedRange()
+        }else  {
+            return
+        }
+        
+        
         
         // Insert at cursor position
         const textarea = scriptTextareaRef.current;
@@ -454,7 +472,7 @@ export default function Sheet() {
             const start = textarea.selectionStart;
             const end = textarea.selectionEnd;
             const currentText = scriptText;
-            const newText = currentText.substring(0, start) + rangeText + currentText.substring(end);
+            const newText = currentText.substring(0, start) + "{{"+rangeText + "}}" + currentText.substring(end);
             setScriptText(newText);
             
             // Set cursor position after inserted text
@@ -661,10 +679,18 @@ export default function Sheet() {
                         if (appended && appended.text) {
                             setChatMessages(prev => [...prev, appended]);
                         }
+                    } else if (msg.type === 'CHAT_UPDATED') {
+                        // Update existing chat message (e.g., read status changed)
+                        const updated = msg.payload;
+                        if (updated && updated.timestamp) {
+                            setChatMessages(prev => prev.map(m => 
+                                m.timestamp === updated.timestamp ? updated : m
+                            ));
+                        }
                     } else if (msg.type === 'SELECTION_SHARED') {
-                        const { Rows, Cols, sheet_id, values, scripts } = msg.payload || {};
+                        const { Rows, Cols, sheet_id, values, scripts, rangeText } = msg.payload || {};
                         if (Rows && Cols && Array.isArray(values)) {
-                            setCopiedBlock({ Rows, Cols, values, scripts: Array.isArray(scripts) ? scripts : undefined });
+                            setCopiedBlock({ Rows, Cols, values, scripts: Array.isArray(scripts) ? scripts : undefined, rangeText, }); 
                         }
                     } else if (msg.type === 'PONG') {
                         console.log("Received PONG from server");
@@ -1971,7 +1997,7 @@ export default function Sheet() {
                             <button
                                 className="px-2 py-1 text-sm rounded border border-gray-300 bg-white hover:bg-green-100 hover:shadow-md active:bg-green-200 active:scale-95 transition-all duration-100"
                                 onClick={insertSelectedRangeIntoScript}
-                                disabled={!canEdit || !selectedRange || selectedRange.length === 0}
+                                disabled={!canEdit }
                                 title="Insert selected range into script at cursor position"
                             >
                                 Insert Range
@@ -2790,7 +2816,10 @@ export default function Sheet() {
                                         {chatMessages.length === 0 && (
                                             <div className="text-muted small text-center py-2">No messages yet.</div>
                                         )}
-                                        {chatMessages.map((m, idx) => (
+                                        {chatMessages.map((m, idx) => {
+                                            const isRead = m.read_by && m.read_by[username];
+                                            const hasSheetInfo = m.sheet_id || m.sheet_name;
+                                            return (
                                             <div 
                                                 key={`${m.timestamp || idx}-${m.user}-${idx}`} 
                                                 className={`mb-2 d-flex ${m.user === username ? 'justify-content-end' : 'justify-content-start'}`}
@@ -2802,16 +2831,68 @@ export default function Sheet() {
                                                         borderRadius: '12px', 
                                                         padding: '8px 12px',
                                                         boxShadow: '0 1px 2px rgba(0,0,0,0.04)',
+                                                        cursor: hasSheetInfo ? 'pointer' : 'default'
+                                                    }}
+                                                    onClick={async () => {
+                                                        if (hasSheetInfo && m.sheet_id && m.project_name) {
+                                                            // Verify sheet exists before navigation
+                                                            try {
+                                                                const projQS = m.project_name ? `?project=${encodeURIComponent(m.project_name)}` : '';
+                                                                const res = await authenticatedFetch(apiUrl(`/api/sheet/${encodeURIComponent(m.sheet_id)}${projQS}`));
+                                                                
+                                                                if (res.status === 404) {
+                                                                    alert(`Sheet "${m.sheet_name || m.sheet_id}" no longer exists.`);
+                                                                    return;
+                                                                }
+                                                                
+                                                                if (res.status === 401) {
+                                                                    handleUnauthorized();
+                                                                    return;
+                                                                }
+                                                                
+                                                                if (!res.ok) {
+                                                                    alert('Unable to access sheet. Please try again.');
+                                                                    return;
+                                                                }
+                                                                
+                                                                // Mark as read
+                                                                if (ws.current && ws.current.readyState === WebSocket.OPEN && !isRead) {
+                                                                    ws.current.send(JSON.stringify({ 
+                                                                        type: 'CHAT_READ', 
+                                                                        sheet_id: id, 
+                                                                        payload: { timestamp: m.timestamp, user: username } 
+                                                                    }));
+                                                                }
+                                                                
+                                                                // Navigate to the sheet
+                                                                navigate(`/sheet/${m.sheet_id}?project=${encodeURIComponent(m.project_name)}`);
+                                                            } catch (err) {
+                                                                console.error('Error verifying sheet:', err);
+                                                                alert('Unable to verify sheet existence. Please try again.');
+                                                            }
+                                                        }
                                                     }}
                                                 >
                                                     <div className="d-flex justify-content-between align-items-center">
-                                                        <span className="fw-semibold small">{m.user === username ? 'me' : m.user}{m.to && m.to !== 'all' ? ` → ${m.to === username ? 'me' : m.to}` : ''}</span>
-                                                        <span className="text-muted" style={{ fontSize: '0.75em', marginLeft: 8 }}>{m.timestamp ? new Date(m.timestamp).toLocaleString() : ''}</span>
+                                                        <span className="fw-semibold small">
+                                                            {m.user === username ? 'me' : m.user}
+                                                            {m.to && m.to !== 'all' ? ` → ${m.to === username ? 'me' : m.to}` : ''}
+                                                        </span>
+                                                        <span className="text-muted" style={{ fontSize: '0.75em', marginLeft: 8 }}>
+                                                            {m.timestamp ? new Date(m.timestamp).toLocaleString() : ''}
+                                                        </span>
                                                     </div>
                                                     <div className="small">{m.text}</div>
+                                                    {hasSheetInfo && (
+                                                        <div className="text-muted" style={{ fontSize: '0.7em', marginTop: 4, fontStyle: 'italic' }}>
+                                                            📄 {m.sheet_name || 'Untitled'} ({m.project_name || 'Unknown Project'}){isRead ? '    ✓' : ''}
+                                                        </div>
+                                                    )}
+                                                    
+                                                    
                                                 </div>
                                             </div>
-                                        ))}
+                                        );})}
                                     </div>
                                 </div>
                                 <div className="card-footer p-2">

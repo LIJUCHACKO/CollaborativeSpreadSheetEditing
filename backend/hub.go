@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"log"
+	"time"
 )
 
 // Message defines the structure of data exchanged via WebSocket
@@ -516,7 +517,14 @@ func (h *Hub) run() {
 					To   string `json:"to"`
 				}
 				if err := json.Unmarshal(message.Payload, &chat); err == nil {
-					appended := globalChatManager.Append(message.User, chat.Text, chat.To)
+					// Get sheet information
+					sheet := globalSheetManager.GetSheetBy(message.SheetID, message.Project)
+					sheetName := ""
+					projectName := message.Project
+					if sheet != nil {
+						sheetName = sheet.Name
+					}
+					appended := globalChatManager.Append(message.User, chat.Text, chat.To, message.SheetID, sheetName, projectName)
 					payload, _ := json.Marshal(appended)
 					toSend = &Message{Type: "CHAT_APPENDED", SheetID: "", Payload: payload, User: message.User}
 					// Broadcast
@@ -552,6 +560,39 @@ func (h *Hub) run() {
 				} else {
 					log.Printf("Error unmarshalling CHAT_MESSAGE payload: %v", err)
 				}
+			} else if message.Type == "CHAT_READ" {
+				// Mark message as read
+				var req struct {
+					Timestamp string `json:"timestamp"`
+					User      string `json:"user"`
+				}
+				if err := json.Unmarshal(message.Payload, &req); err == nil {
+					if timestamp, err := time.Parse(time.RFC3339Nano, req.Timestamp); err == nil {
+						globalChatManager.MarkAsRead(timestamp, message.User)
+						// Broadcast updated message to all relevant users
+						history := globalChatManager.History()
+						for _, msg := range history {
+							if msg.Timestamp.Equal(timestamp) {
+								payload, _ := json.Marshal(msg)
+								toSend = &Message{Type: "CHAT_UPDATED", SheetID: "", Payload: payload, User: message.User}
+								for _, clients := range h.rooms {
+									for client := range clients {
+										select {
+										case client.send <- msgToBytes(toSend):
+										default:
+											close(client.send)
+											delete(clients, client)
+										}
+									}
+								}
+								break
+							}
+						}
+					}
+					continue
+				} else {
+					log.Printf("Error unmarshalling CHAT_READ payload: %v", err)
+				}
 			} else if message.Type == "PING" {
 				// Optional: reply with a PONG only to sender to confirm connectivity
 				toSend = &Message{
@@ -582,4 +623,28 @@ func (h *Hub) run() {
 func msgToBytes(msg *Message) []byte {
 	b, _ := json.Marshal(msg)
 	return b
+}
+
+// HasActiveConnectionsForProject checks if any sheets under the given project path have active connections.
+// projectPath should be the full project path (e.g., "project32" or "project32/subfolder").
+func (h *Hub) HasActiveConnectionsForProject(projectPath string) bool {
+	for roomID := range h.rooms {
+		if len(h.rooms[roomID]) > 0 {
+			// Parse the roomID to extract the project part
+			// roomID format is "project:sheetID"
+			// We need to check if the room's project starts with projectPath
+			for client := range h.rooms[roomID] {
+				if client.projectName == projectPath {
+					return true
+				}
+				// Also check if client.projectName starts with projectPath + "/"
+				// This handles subfolders under the project
+				if len(client.projectName) > len(projectPath) &&
+					client.projectName[:len(projectPath)+1] == projectPath+"/" {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }

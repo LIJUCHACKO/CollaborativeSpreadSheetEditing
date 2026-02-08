@@ -8,11 +8,9 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
-	"strconv"
 	"sync"
 	"time"
 
-	"bytes"
 	"strings"
 
 	"python-libs/data"
@@ -114,6 +112,31 @@ type SheetManager struct {
 	saveInterval time.Duration           // debounce duration
 	started      bool
 	stopCh       chan struct{}
+
+	// Script dependency tracking
+	// Maps sheet reference (e.g., "project/sheet")
+	// to a list of script identifiers that depend on it (with ReferencedRange storing the specific cells)
+	scriptDeps   map[string][]ScriptIdentifier // "project/sheet" -> []ScriptIdentifier
+	scriptDepsMu sync.RWMutex
+
+	lastExecutedTime time.Time
+	executeInterval  time.Duration
+
+	CellsModifiedManuallyQueue   []CellIdentifier // Queue of scripts to execute, protected by CellsModifiedQueueMu
+	CellsModifiedManuallyQueueMu sync.Mutex
+
+	CellsModifiedByScriptQueue   []CellIdentifier // Queue of scripts to execute, protected by CellsModifiedByScriptQueueMu
+	CellsModifiedByScriptQueueMu sync.Mutex
+
+	ScriptsExecuted   []string
+	ScriptsExecutedMu sync.Mutex
+}
+
+type CellIdentifier struct {
+	ProjectName string
+	sheetID     string
+	row         string
+	col         string
 }
 
 type pendingSave struct {
@@ -170,14 +193,19 @@ func (s *Sheet) MarshalJSON() ([]byte, error) {
 var globalSheetManager = &SheetManager{
 	sheets:  make(map[string]*Sheet),
 	pending: make(map[string]*pendingSave),
-	stopCh:  make(chan struct{}),
-	started: false,
 	// saveInterval will be set in initAsyncSaver
+	stopCh:                     make(chan struct{}),
+	started:                    false,
+	scriptDeps:                 make(map[string][]ScriptIdentifier),
+	lastExecutedTime:           time.Time{},
+	executeInterval:            2 * time.Second, // default execute interval
+	ScriptsExecuted:            []string{},
+	CellsModifiedManuallyQueue: []CellIdentifier{},
+	CellsModifiedByScriptQueue: []CellIdentifier{},
 }
 
 // Initialize async saver once during startup
 func init() {
-	globalSheetManager.initAsyncSaver()
 	// Initialize embedded Python once at startup
 	if _, err := getEmbeddedPython(); err != nil {
 		log.Printf("Embedded Python init failed: %v", err)
@@ -240,6 +268,39 @@ func (sm *SheetManager) flusher() {
 		select {
 		case <-ticker.C:
 			now := time.Now()
+
+			sm.CellsModifiedByScriptQueueMu.Lock()
+
+			if len(sm.CellsModifiedByScriptQueue) == 0 {
+				sm.CellsModifiedByScriptQueueMu.Unlock()
+
+				// Process script execution queue
+				sm.CellsModifiedManuallyQueueMu.Lock()
+				if len(sm.CellsModifiedManuallyQueue) > 0 {
+					//clearing ScriptsExecuted list
+					sm.ScriptsExecutedMu.Lock()
+					//fmt.Println("scripts executed(flusher)", sm.ScriptsExecuted)
+					clear(sm.ScriptsExecuted)
+					//fmt.Println("scripts executed after clear(flusher)", sm.ScriptsExecuted)
+					sm.ScriptsExecutedMu.Unlock()
+					toExec := sm.CellsModifiedManuallyQueue[0]
+					//pop from queue
+					sm.CellsModifiedManuallyQueue = sm.CellsModifiedManuallyQueue[1:]
+					sm.CellsModifiedManuallyQueueMu.Unlock()
+					//fmt.Println("Executing scripts for manually modified cell:", toExec)
+					ExecuteDependentScripts(toExec.ProjectName, toExec.sheetID, toExec.row, toExec.col, true)
+				} else {
+					sm.CellsModifiedManuallyQueueMu.Unlock()
+				}
+			} else {
+				toExec := sm.CellsModifiedByScriptQueue[0]
+				//pop from queue
+				sm.CellsModifiedByScriptQueue = sm.CellsModifiedByScriptQueue[1:]
+				sm.CellsModifiedByScriptQueueMu.Unlock()
+				//fmt.Println("Executing scripts for script modified cell:", toExec)
+				ExecuteDependentScripts(toExec.ProjectName, toExec.sheetID, toExec.row, toExec.col, false)
+			}
+
 			// collect due items without holding lock during disk IO
 			var toFlush []*Sheet
 			sm.mu.Lock()
@@ -258,6 +319,7 @@ func (sm *SheetManager) flusher() {
 				}
 				sm.mu.RUnlock()
 			}
+
 		case <-sm.stopCh:
 			return
 		}
@@ -403,6 +465,16 @@ func (s *Sheet) SetCell(row, col, value, user string, reverted bool) {
 		s.mu.Unlock()
 		return
 	}
+	// Enqueue for script execution if value is changed manually
+	globalSheetManager.CellsModifiedManuallyQueueMu.Lock()
+
+	globalSheetManager.CellsModifiedManuallyQueue = append(globalSheetManager.CellsModifiedManuallyQueue, CellIdentifier{
+		ProjectName: s.ProjectName,
+		sheetID:     s.ID,
+		row:         row,
+		col:         col,
+	})
+	globalSheetManager.CellsModifiedManuallyQueueMu.Unlock()
 	// Preserve existing metadata on write (including script)
 	s.Data[row][col] = Cell{Value: value, Script: currentVal.Script, User: user, Locked: currentVal.Locked, LockedBy: currentVal.LockedBy, Background: currentVal.Background, Bold: currentVal.Bold, Italic: currentVal.Italic}
 	if reverted {
@@ -453,6 +525,7 @@ func (s *Sheet) SetCell(row, col, value, user string, reverted bool) {
 				NewValue:       value,
 				ChangeReversed: false,
 			})
+
 		}
 	}
 
@@ -543,342 +616,17 @@ func (s *Sheet) SetCellScript(row, col, script, user string, reverted bool, rowS
 	updated.ScriptOutput_ColSpan = colSpan
 	s.Data[row][col] = updated
 
-	// Done updating script; release lock before running Python
+	// Update script dependencies
+	cellID := updated.CellID
 	s.mu.Unlock()
+
+	// Update dependency map for this script
+	globalSheetManager.UpdateScriptDependencies(s.ProjectName, s.ID, cellID, script)
+
+	// Done updating script; save and execute
 	globalSheetManager.SaveSheet(s)
-	s.ExecuteCellScript(row, col)
+	ExecuteCellScriptonScriptChange(s.ProjectName, s.ID, row, col)
 	//s.FillValueFromScriptOutput(row, col)
-}
-func (s *Sheet) ExecuteCellScript(row, col string) {
-	if s.Data[row] == nil {
-		return
-	}
-	cur, exists := s.Data[row][col]
-	if !exists {
-		return
-	}
-	script := cur.Script
-	rSpan := cur.ScriptOutput_RowSpan
-	cSpan := cur.ScriptOutput_ColSpan
-	lockedbyScriptAt := "script-span " + cur.CellID // 'script-span B5' means locked by script span starting at B5
-	if rSpan < 1 {
-		rSpan = 1
-	}
-	if cSpan < 1 {
-		cSpan = 1
-	}
-	s.mu.Lock()
-	// Reseting value and lock if cell is locked by lockedbyScriptAt
-	cur.Value = ""
-	for rKey, rowMap := range s.Data {
-		for cKey, cell := range rowMap {
-			if cell.Locked && cell.LockedBy == lockedbyScriptAt {
-				cell.Value = ""
-				cell.Locked = false
-				cell.LockedBy = ""
-				s.Data[rKey][cKey] = cell
-			}
-		}
-	}
-	// Validate emptiness for spanned area (excluding top-left)
-	if rSpan > 1 || cSpan > 1 {
-		baseIdx := colLabelToIndex(col)
-		baseRow := atoiSafe(row)
-		blocked := false
-		for dr := 0; dr < rSpan && !blocked; dr++ {
-			rKey := itoa(baseRow + dr)
-			for dc := 0; dc < cSpan; dc++ {
-				if dr == 0 && dc == 0 {
-					continue
-				}
-				cLabel := indexToColLabel(baseIdx + dc)
-				cell, ok := s.Data[rKey][cLabel]
-				if ok && (strings.TrimSpace(cell.Value) != "" || strings.TrimSpace(cell.Script) != "") {
-					blocked = true
-					break
-				}
-			}
-		}
-		if blocked {
-			// Keep spans at 1x1 if area is blocked
-			rSpan = 1
-			cSpan = 1
-		}
-		// Apply spans on top-left cell now that area is clear
-		cur.ScriptOutput_RowSpan = rSpan
-		cur.ScriptOutput_ColSpan = cSpan
-		// Lock covered cells
-		for dr := 0; dr < rSpan; dr++ {
-			rKey := itoa(baseRow + dr)
-			if s.Data[rKey] == nil {
-				s.Data[rKey] = make(map[string]Cell)
-			}
-			for dc := 0; dc < cSpan; dc++ {
-				if dr == 0 && dc == 0 {
-					continue
-				}
-				cLabel := indexToColLabel(baseIdx + dc)
-				c := s.Data[rKey][cLabel]
-				c.Locked = true
-				c.LockedBy = lockedbyScriptAt
-				s.Data[rKey][cLabel] = c
-			}
-		}
-	}
-	s.mu.Unlock()
-	if strings.TrimSpace(script) == "" {
-		s.mu.Lock()
-		cur.ScriptOutput = ""
-		s.Data[row][col] = cur
-		s.mu.Unlock()
-
-		globalSheetManager.SaveSheet(s)
-		return
-	}
-	// Execute the script and update the cell value without logging EDIT_CELL
-	ep := embeddedPy
-	if ep == nil {
-		// Store init error in the cell value
-		s.mu.Lock()
-		cur := s.Data[row][col]
-		if embeddedPyInitErr != nil {
-			cur.Value = "Error: " + embeddedPyInitErr.Error()
-		} else {
-			cur.Value = "Error: Embedded Python not initialized"
-		}
-		s.Data[row][col] = cur
-		s.mu.Unlock()
-		globalSheetManager.SaveSheet(s)
-		return
-	}
-	// executing replaces the tags with values of the cells
-	//example
-	//1. if value at A2 is '7' then replace {{A2}} with '7' in the script
-	//2. if tag is like {{A2:B3}} then replace with a 2D array string like [[7,8],[9,10]] from the cell values
-
-	// Pattern to match {{A2}} or {{A2:B3}}
-	tagPattern := regexp.MustCompile(`\{\{([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?\}\}`)
-	s.mu.RLock()
-	script = tagPattern.ReplaceAllStringFunc(script, func(match string) string {
-		submatches := tagPattern.FindStringSubmatch(match)
-		if len(submatches) < 3 {
-			return match
-		}
-
-		startCol := submatches[1]
-		startRow := submatches[2]
-
-		// Single cell reference {{A2}}
-		if submatches[3] == "" || submatches[4] == "" {
-			//cellKey := startRow + "-" + startCol
-			if rowData, ok := s.Data[startRow]; ok {
-				if cell, ok := rowData[startCol]; ok {
-					// Return the cell value - quote only if not a number
-					val := cell.Value
-					if _, err := strconv.ParseFloat(val, 64); err == nil {
-						// It's a number, return unquoted
-						return val
-					}
-					// Not a number, return quoted
-					return fmt.Sprintf(`"%s"`, val)
-				}
-			}
-			return `""`
-		}
-
-		// Range reference {{A2:B3}}
-		endCol := submatches[3]
-		endRow := submatches[4]
-
-		startColIdx := colLabelToIndex(startCol)
-		endColIdx := colLabelToIndex(endCol)
-		startRowNum := atoiSafe(startRow)
-		endRowNum := atoiSafe(endRow)
-
-		// Ensure proper order
-		if startRowNum > endRowNum {
-			startRowNum, endRowNum = endRowNum, startRowNum
-		}
-		if startColIdx > endColIdx {
-			startColIdx, endColIdx = endColIdx, startColIdx
-		}
-
-		// Build 2D array
-		var rows []string
-		for r := startRowNum; r <= endRowNum; r++ {
-			var cols []string
-			for c := startColIdx; c <= endColIdx; c++ {
-				rowKey := itoa(r)
-				colLabel := indexToColLabel(c)
-
-				val := ""
-				if rowData, ok := s.Data[rowKey]; ok {
-					if cell, ok := rowData[colLabel]; ok {
-						val = cell.Value
-					}
-				}
-				// Quote only if not a number
-				if _, err := strconv.ParseFloat(val, 64); err == nil && val != "" {
-					// It's a number, use unquoted
-					cols = append(cols, val)
-				} else {
-					// Not a number or empty, use quoted
-					cols = append(cols, fmt.Sprintf(`"%s"`, val))
-				}
-			}
-			rows = append(rows, "["+strings.Join(cols, ",")+"]")
-		}
-
-		return "[" + strings.Join(rows, ",") + "]"
-	})
-	s.mu.RUnlock()
-
-	cmd, err := ep.PythonCmd("-c", script)
-	if err != nil {
-		s.mu.Lock()
-		cur := s.Data[row][col]
-		cur.Value = "Error: " + err.Error()
-		s.Data[row][col] = cur
-		s.mu.Unlock()
-		globalSheetManager.SaveSheet(s)
-		return
-	}
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	runErr := cmd.Run()
-	var newVal string
-	if runErr != nil {
-		errOut := strings.TrimRight(stderr.String(), "\r\n")
-		if errOut == "" {
-			errOut = runErr.Error()
-		}
-		newVal = "Error: " + errOut
-	} else {
-		newVal = strings.TrimRight(stdout.String(), "\r\n")
-	}
-	// Write value(s) back without audit
-	s.mu.Lock()
-	cur.ScriptOutput = newVal
-	s.Data[row][col] = cur
-
-	// If no span, simply set value
-	if rSpan == 1 && cSpan == 1 {
-		cur.Value = newVal
-		s.Data[row][col] = cur
-		s.mu.Unlock()
-		globalSheetManager.SaveSheet(s)
-		return
-	}
-	baseIdx := colLabelToIndex(col)
-	baseRow := atoiSafe(row)
-	//handling single matrix nor a array
-
-	// Try to parse as single value (string, number, boolean)
-	// If it's not a JSON array or matrix, just set the value to the base cell
-	var testInterface interface{}
-	if err := json.Unmarshal([]byte(newVal), &testInterface); err != nil {
-		// Not valid JSON, treat as plain string
-		cur.Value = newVal
-		s.Data[row][col] = cur
-		s.mu.Unlock()
-		globalSheetManager.SaveSheet(s)
-		return
-	}
-	// Check if it's a simple value (not array or object)
-	switch testInterface.(type) {
-	case string, float64, bool, nil:
-		// Simple value, set to base cell
-		cur.Value = newVal
-		s.Data[row][col] = cur
-		s.mu.Unlock()
-		globalSheetManager.SaveSheet(s)
-		return
-	}
-
-	//handling matrix type  [[1,2],[3,4]]
-	var matrix [][]string
-	MatrixParsed := false
-	if rSpan > 1 || cSpan > 1 {
-		var any interface{}
-		if err := json.Unmarshal([]byte(newVal), &any); err == nil {
-			if arr, ok := any.([]interface{}); ok {
-				tmp := make([][]string, 0, len(arr))
-				for _, r := range arr {
-					if rowArr, ok := r.([]interface{}); ok {
-						rowVals := make([]string, 0, len(rowArr))
-						for _, v := range rowArr {
-							rowVals = append(rowVals, fmt.Sprint(v))
-						}
-						tmp = append(tmp, rowVals)
-					}
-				}
-				if len(tmp) > 0 {
-					matrix = tmp
-					MatrixParsed = true
-				}
-			}
-		}
-	}
-	if MatrixParsed {
-		// if matrix dimensions is more than ScriptOutput_RowSpan x ScriptOutput_ColSpan, we will simply fill cur.Value = scriptOutput
-		if len(matrix) > rSpan || (len(matrix) > 0 && len(matrix[0]) > cSpan) {
-			cur.Value = cur.ScriptOutput
-			s.Data[row][col] = cur
-			s.mu.Unlock()
-			globalSheetManager.SaveSheet(s)
-			return
-		}
-		//else
-
-		for dr := 0; dr < rSpan; dr++ {
-			rKey := itoa(baseRow + dr)
-			if s.Data[rKey] == nil {
-				s.Data[rKey] = make(map[string]Cell)
-			}
-			for dc := 0; dc < cSpan; dc++ {
-				cLabel := indexToColLabel(baseIdx + dc)
-				var val string
-				if dr < len(matrix) && dc < len(matrix[dr]) {
-					val = matrix[dr][dc]
-				}
-				c := s.Data[rKey][cLabel]
-				c.Value = val
-				s.Data[rKey][cLabel] = c
-			}
-		}
-		s.mu.Unlock()
-		globalSheetManager.SaveSheet(s)
-		return
-	}
-
-	// handling array type [1,2,3,4]
-	// If output is a flat array and span is 1xN or Nx1, fill accordingly
-	var arrAny []interface{}
-	if err := json.Unmarshal([]byte(cur.ScriptOutput), &arrAny); err == nil {
-		if (rSpan == 1 && cSpan > 1 && len(arrAny) <= cSpan) || (cSpan == 1 && rSpan > 1 && len(arrAny) <= rSpan) {
-			for i, v := range arrAny {
-				if rSpan == 1 {
-					// Fill row left to right
-					cLabel := indexToColLabel(baseIdx + i)
-					c := s.Data[row][cLabel]
-					c.Value = fmt.Sprint(v)
-					s.Data[row][cLabel] = c
-				} else {
-					// Fill column top to bottom
-					rKey := itoa(baseRow + i)
-					c := s.Data[rKey][col]
-					c.Value = fmt.Sprint(v)
-					s.Data[rKey][col] = c
-				}
-			}
-		} else {
-			cur.Value = cur.ScriptOutput
-			s.Data[row][col] = cur
-		}
-	}
-	s.mu.Unlock()
-	globalSheetManager.SaveSheet(s)
 }
 
 // SetCellStyle updates style attributes for a cell while preserving value and lock metadata.
@@ -1166,8 +914,6 @@ func (s *Sheet) InsertRowBelow(targetRowStr, user string) bool {
 	}
 	// Adjust audit log row references for rows at or below the inserted position
 	s.adjustAuditRowsOnInsert(insertRow)
-	// Adjust script tags in cells for row insertion
-	s.adjustScriptTagsOnInsertRow(insertRow)
 
 	s.AuditLog = append(s.AuditLog, AuditEntry{
 		Timestamp: time.Now(),
@@ -1176,6 +922,8 @@ func (s *Sheet) InsertRowBelow(targetRowStr, user string) bool {
 		Row1:      insertRow,
 	})
 	s.mu.Unlock()
+	// Adjust script tags in cells for row insertion
+	s.adjustScriptTagsOnInsertRow(insertRow)
 	// If the target row contains cells locked by a script span, re-run those scripts
 	if rowMap, ok := s.Data[targetRowStr]; ok {
 		lockedIDs := []string{}
@@ -1205,7 +953,7 @@ func (s *Sheet) InsertRowBelow(targetRowStr, user string) bool {
 				}
 			}
 			if startRow != "" && startCol != "" {
-				s.ExecuteCellScript(startRow, startCol)
+				RefillingValuesonInsert(s.ProjectName, s.ID, startRow, startCol)
 			}
 		}
 	}
@@ -1270,8 +1018,7 @@ func (s *Sheet) DeleteRowAt(rowStr, user string) bool {
 	}
 	// Adjust audit logs for deletion
 	s.adjustAuditRowsOnDelete(row)
-	// Adjust script tags in cells for row deletion
-	s.adjustScriptTagsOnDeleteRow(row)
+
 	s.AuditLog = append(s.AuditLog, AuditEntry{
 		Timestamp: time.Now(),
 		User:      user,
@@ -1280,6 +1027,8 @@ func (s *Sheet) DeleteRowAt(rowStr, user string) bool {
 	})
 
 	s.mu.Unlock()
+	// Adjust script tags in cells for row deletion
+	s.adjustScriptTagsOnDeleteRow(row)
 	globalSheetManager.SaveSheet(s)
 	return true
 }
@@ -1408,7 +1157,8 @@ func (s *Sheet) MoveRowBelow(fromRowStr, targetRowStr, user string) bool {
 		newHeights[itoa(destIndex)] = s.RowHeights[itoa(fromRow)]
 	}
 	s.RowHeights = newHeights
-
+	// Adjust audit log rows according to move mapping
+	s.adjustAuditRowsOnMove(fromRow, destIndex)
 	// Audit entry
 	s.AuditLog = append(s.AuditLog, AuditEntry{
 		Timestamp: time.Now(),
@@ -1417,13 +1167,10 @@ func (s *Sheet) MoveRowBelow(fromRowStr, targetRowStr, user string) bool {
 		Row1:      fromRow,
 		Row2:      destIndex,
 	})
+	s.mu.Unlock()
 
-	// Adjust audit log rows according to move mapping
-	s.adjustAuditRowsOnMove(fromRow, destIndex)
 	// Adjust script tags in cells for row move
 	s.adjustScriptTagsOnMoveRow(fromRow, destIndex)
-
-	s.mu.Unlock()
 
 	// Save after unlock
 	globalSheetManager.SaveSheet(s)
@@ -1570,7 +1317,8 @@ func (s *Sheet) MoveColumnRight(fromColStr, targetColStr, user string) bool {
 		newWidths[toColLabel(destIdx)] = s.ColWidths[toColLabel(fromIdx)]
 	}
 	s.ColWidths = newWidths
-
+	// Adjust audit log columns according to move mapping
+	s.adjustAuditColsOnMove(fromIdx, destIdx)
 	// Audit entry
 	s.AuditLog = append(s.AuditLog, AuditEntry{
 		Timestamp: time.Now(),
@@ -1580,12 +1328,9 @@ func (s *Sheet) MoveColumnRight(fromColStr, targetColStr, user string) bool {
 		Col2:      toColLabel(destIdx),
 	})
 
-	// Adjust audit log columns according to move mapping
-	s.adjustAuditColsOnMove(fromIdx, destIdx)
+	s.mu.Unlock()
 	// Adjust script tags in cells for column move
 	s.adjustScriptTagsOnMoveCol(fromIdx, destIdx)
-
-	s.mu.Unlock()
 
 	// Save after unlock
 	globalSheetManager.SaveSheet(s)
@@ -1694,8 +1439,6 @@ func (s *Sheet) InsertColumnRight(targetColStr, user string) bool {
 	}
 	// Adjust audit log column references for columns at or beyond the inserted position
 	s.adjustAuditColsOnInsert(insertIdx)
-	// Adjust script tags in cells for column insertion
-	s.adjustScriptTagsOnInsertCol(insertIdx)
 
 	s.AuditLog = append(s.AuditLog, AuditEntry{
 		Timestamp:      time.Now(),
@@ -1705,40 +1448,41 @@ func (s *Sheet) InsertColumnRight(targetColStr, user string) bool {
 		ChangeReversed: false,
 	})
 	s.mu.Unlock()
+	// Adjust script tags in cells for column insertion
+	s.adjustScriptTagsOnInsertCol(insertIdx)
 	// If the target column contains cells locked by a script span, re-run those scripts
-	{
-		lockedIDs := []string{}
-		for _, rowMap := range s.Data {
-			if cell, ok := rowMap[targetColStr]; ok {
-				if cell.Locked && strings.HasPrefix(cell.LockedBy, "script-span ") {
-					id := strings.TrimSpace(strings.TrimPrefix(cell.LockedBy, "script-span "))
-					if id != "" {
-						index := slices.Index(lockedIDs, id)
-						if index == -1 {
 
-							lockedIDs = append(lockedIDs, id)
-						}
+	lockedIDs := []string{}
+	for _, rowMap := range s.Data {
+		if cell, ok := rowMap[targetColStr]; ok {
+			if cell.Locked && strings.HasPrefix(cell.LockedBy, "script-span ") {
+				id := strings.TrimSpace(strings.TrimPrefix(cell.LockedBy, "script-span "))
+				if id != "" {
+					index := slices.Index(lockedIDs, id)
+					if index == -1 {
+
+						lockedIDs = append(lockedIDs, id)
 					}
 				}
 			}
 		}
-		for _, id := range lockedIDs {
-			startRow, startCol := "", ""
-			for rKey, cols := range s.Data {
-				for cKey, c := range cols {
-					if strings.TrimSpace(c.CellID) == id {
-						startRow = rKey
-						startCol = cKey
-						break
-					}
-				}
-				if startRow != "" {
+	}
+	for _, id := range lockedIDs {
+		startRow, startCol := "", ""
+		for rKey, cols := range s.Data {
+			for cKey, c := range cols {
+				if strings.TrimSpace(c.CellID) == id {
+					startRow = rKey
+					startCol = cKey
 					break
 				}
 			}
-			if startRow != "" && startCol != "" {
-				s.ExecuteCellScript(startRow, startCol)
+			if startRow != "" {
+				break
 			}
+		}
+		if startRow != "" && startCol != "" {
+			RefillingValuesonInsert(s.ProjectName, s.ID, startRow, startCol)
 		}
 	}
 
@@ -1805,8 +1549,7 @@ func (s *Sheet) DeleteColumnAt(colStr, user string) bool {
 	}
 	// Adjust audit logs for deletion
 	s.adjustAuditColsOnDelete(insertIdx)
-	// Adjust script tags in cells for column deletion
-	s.adjustScriptTagsOnDeleteCol(insertIdx)
+
 	s.AuditLog = append(s.AuditLog, AuditEntry{
 		Timestamp:      time.Now(),
 		User:           user,
@@ -1816,6 +1559,8 @@ func (s *Sheet) DeleteColumnAt(colStr, user string) bool {
 	})
 
 	s.mu.Unlock()
+	// Adjust script tags in cells for column deletion
+	s.adjustScriptTagsOnDeleteCol(insertIdx)
 	globalSheetManager.SaveSheet(s)
 	return true
 }
@@ -2140,17 +1885,20 @@ func (s *Sheet) adjustAuditColsOnDelete(deleteIdx int) {
 }
 
 // adjustScriptTagsOnInsertRow increments row references in script tags for rows at or below insertRow
+// This function updates both same-sheet references and cross-sheet references, and updates scriptDeps
 func (s *Sheet) adjustScriptTagsOnInsertRow(insertRow int) {
-	tagPattern := regexp.MustCompile(`\{\{([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?\}\}`)
-
+	sameSheetPattern := regexp.MustCompile(`\{\{([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?\}\}`)
+	crossSheetPattern := regexp.MustCompile(`\{\{([^/\{\}]+)/([^/\{\}]+)/([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?\}\}`)
+	s.mu.Lock()
+	// Adjust same-sheet references in this sheet
 	for rowKey, rowMap := range s.Data {
 		for colKey, cell := range rowMap {
 			if cell.Script == "" {
 				continue
 			}
 
-			newScript := tagPattern.ReplaceAllStringFunc(cell.Script, func(match string) string {
-				submatches := tagPattern.FindStringSubmatch(match)
+			newScript := sameSheetPattern.ReplaceAllStringFunc(cell.Script, func(match string) string {
+				submatches := sameSheetPattern.FindStringSubmatch(match)
 				if len(submatches) < 3 {
 					return match
 				}
@@ -2183,23 +1931,125 @@ func (s *Sheet) adjustScriptTagsOnInsertRow(insertRow int) {
 			if newScript != cell.Script {
 				cell.Script = newScript
 				s.Data[rowKey][colKey] = cell
+				// Update dependencies for modified script
+				globalSheetManager.UpdateScriptDependencies(s.ProjectName, s.ID, cell.CellID, newScript)
 			}
+		}
+	}
+	s.mu.Unlock()
+	// Adjust cross-sheet references in sheets that reference this sheet
+	// Use scriptDeps to find which sheets have dependencies on this sheet
+	sheet_Key := s.ProjectName + "/" + s.ID
+	globalSheetManager.scriptDepsMu.RLock()
+	scriptIdentifiers, hasRefs := globalSheetManager.scriptDeps[sheet_Key]
+	globalSheetManager.scriptDepsMu.RUnlock()
+
+	if !hasRefs {
+		return // No cross-sheet references to this sheet
+	}
+
+	// Collect unique sheets that reference this sheet
+	seenSheets := make(map[string]bool)
+	sheetsToUpdate := make([]*Sheet, 0)
+	globalSheetManager.mu.RLock()
+	for _, si := range scriptIdentifiers {
+		key := sheetKey(si.ScriptProjectName, si.ScriptSheetID)
+		if !seenSheets[key] {
+			if sheet, ok := globalSheetManager.sheets[key]; ok && sheet != nil {
+				sheetsToUpdate = append(sheetsToUpdate, sheet)
+				seenSheets[key] = true
+			}
+		}
+	}
+	globalSheetManager.mu.RUnlock()
+
+	for _, sheet := range sheetsToUpdate {
+		sheet.mu.Lock()
+		modified := false
+		for rowKey, rowMap := range sheet.Data {
+			for colKey, cell := range rowMap {
+				if cell.Script == "" {
+					continue
+				}
+
+				newScript := crossSheetPattern.ReplaceAllStringFunc(cell.Script, func(match string) string {
+					submatches := crossSheetPattern.FindStringSubmatch(match)
+					if len(submatches) < 5 {
+						return match
+					}
+
+					refProject := submatches[1]
+					refSheet := submatches[2]
+
+					// Only adjust if referencing the current sheet
+					if refProject != s.ProjectName || refSheet != s.ID {
+						return match
+					}
+
+					col1 := submatches[3]
+					row1 := atoiSafe(submatches[4])
+
+					// Single cell reference {{project/sheet/A2}}
+					if submatches[5] == "" || submatches[6] == "" {
+						if row1 >= insertRow && row1 > 0 {
+							row1++
+						}
+						return fmt.Sprintf("{{%s/%s/%s%d}}", refProject, refSheet, col1, row1)
+					}
+
+					// Range reference {{project/sheet/A2:B3}}
+					col2 := submatches[5]
+					row2 := atoiSafe(submatches[6])
+
+					if row1 >= insertRow && row1 > 0 {
+						row1++
+					}
+					if row2 >= insertRow && row2 > 0 {
+						row2++
+					}
+
+					return fmt.Sprintf("{{%s/%s/%s%d:%s%d}}", refProject, refSheet, col1, row1, col2, row2)
+				})
+
+				if newScript != cell.Script {
+					cell.Script = newScript
+					sheet.Data[rowKey][colKey] = cell
+					modified = true
+				}
+			}
+		}
+		sheet.mu.Unlock()
+
+		// Update dependencies for all modified scripts in this sheet
+		if modified {
+			sheet.mu.RLock()
+			for _, rowMap := range sheet.Data {
+				for _, cell := range rowMap {
+					if cell.Script != "" {
+						globalSheetManager.UpdateScriptDependencies(sheet.ProjectName, sheet.ID, cell.CellID, cell.Script)
+					}
+				}
+			}
+			sheet.mu.RUnlock()
 		}
 	}
 }
 
 // adjustScriptTagsOnDeleteRow decrements row references in script tags for rows strictly above deleted row
+// This function updates both same-sheet references and cross-sheet references, and updates scriptDeps
 func (s *Sheet) adjustScriptTagsOnDeleteRow(deleteRow int) {
-	tagPattern := regexp.MustCompile(`\{\{([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?\}\}`)
-
+	sameSheetPattern := regexp.MustCompile(`\{\{([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?\}\}`)
+	crossSheetPattern := regexp.MustCompile(`\{\{([^/\{\}]+)/([^/\{\}]+)/([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?\}\}`)
+	s.mu.Lock()
+	// Adjust same-sheet references in this sheet
 	for rowKey, rowMap := range s.Data {
 		for colKey, cell := range rowMap {
 			if cell.Script == "" {
 				continue
 			}
 
-			newScript := tagPattern.ReplaceAllStringFunc(cell.Script, func(match string) string {
-				submatches := tagPattern.FindStringSubmatch(match)
+			newScript := sameSheetPattern.ReplaceAllStringFunc(cell.Script, func(match string) string {
+				submatches := sameSheetPattern.FindStringSubmatch(match)
 				if len(submatches) < 3 {
 					return match
 				}
@@ -2255,23 +2105,148 @@ func (s *Sheet) adjustScriptTagsOnDeleteRow(deleteRow int) {
 			if newScript != cell.Script {
 				cell.Script = newScript
 				s.Data[rowKey][colKey] = cell
+				// Update dependencies for modified script
+				globalSheetManager.UpdateScriptDependencies(s.ProjectName, s.ID, cell.CellID, newScript)
 			}
+		}
+	}
+	s.mu.Unlock()
+	// Adjust cross-sheet references in sheets that reference this sheet
+	// Use scriptDeps to find which sheets have dependencies on this sheet
+	sheet_Key := s.ProjectName + "/" + s.ID
+	globalSheetManager.scriptDepsMu.RLock()
+	scriptIdentifiers, hasRefs := globalSheetManager.scriptDeps[sheet_Key]
+	globalSheetManager.scriptDepsMu.RUnlock()
+
+	if !hasRefs {
+		return // No cross-sheet references to this sheet
+	}
+
+	// Collect unique sheets that reference this sheet
+	seenSheets := make(map[string]bool)
+	sheetsToUpdate := make([]*Sheet, 0)
+	globalSheetManager.mu.RLock()
+	for _, si := range scriptIdentifiers {
+		key := sheetKey(si.ScriptProjectName, si.ScriptSheetID)
+		if !seenSheets[key] {
+			if sheet, ok := globalSheetManager.sheets[key]; ok && sheet != nil {
+				sheetsToUpdate = append(sheetsToUpdate, sheet)
+				seenSheets[key] = true
+			}
+		}
+	}
+	globalSheetManager.mu.RUnlock()
+
+	for _, sheet := range sheetsToUpdate {
+		sheet.mu.Lock()
+		modified := false
+		for rowKey, rowMap := range sheet.Data {
+			for colKey, cell := range rowMap {
+				if cell.Script == "" {
+					continue
+				}
+
+				newScript := crossSheetPattern.ReplaceAllStringFunc(cell.Script, func(match string) string {
+					submatches := crossSheetPattern.FindStringSubmatch(match)
+					if len(submatches) < 5 {
+						return match
+					}
+
+					refProject := submatches[1]
+					refSheet := submatches[2]
+
+					// Only adjust if referencing the current sheet
+					if refProject != s.ProjectName || refSheet != s.ID {
+						return match
+					}
+
+					col1 := submatches[3]
+					row1 := atoiSafe(submatches[4])
+
+					// Single cell reference {{project/sheet/A2}}
+					if submatches[5] == "" || submatches[6] == "" {
+						if row1 == deleteRow {
+							// Reference to deleted row becomes invalid - keep as is
+							return match
+						}
+						if row1 > deleteRow {
+							row1--
+						}
+						return fmt.Sprintf("{{%s/%s/%s%d}}", refProject, refSheet, col1, row1)
+					}
+
+					// Range reference {{project/sheet/A2:B3}}
+					col2 := submatches[5]
+					row2 := atoiSafe(submatches[6])
+
+					// Handle deleted row in range
+					if deleteRow >= row1 && deleteRow <= row2 {
+						// Row is within range - shrink the range
+						if row1 == row2 {
+							// Single row range that got deleted - keep as invalid reference
+							return match
+						}
+						if deleteRow == row1 {
+							row1++
+						} else if deleteRow == row2 {
+							row2--
+						}
+						// If deleteRow is in the middle, just adjust the end
+						if row2 > deleteRow {
+							row2--
+						}
+					} else {
+						// Adjust if above deleted row
+						if row1 > deleteRow {
+							row1--
+						}
+						if row2 > deleteRow {
+							row2--
+						}
+					}
+
+					return fmt.Sprintf("{{%s/%s/%s%d:%s%d}}", refProject, refSheet, col1, row1, col2, row2)
+				})
+
+				if newScript != cell.Script {
+					cell.Script = newScript
+					sheet.Data[rowKey][colKey] = cell
+					modified = true
+				}
+			}
+		}
+		sheet.mu.Unlock()
+
+		// Update dependencies for all modified scripts in this sheet
+		if modified {
+			sheet.mu.RLock()
+			for _, rowMap := range sheet.Data {
+				for _, cell := range rowMap {
+					if cell.Script != "" {
+						globalSheetManager.UpdateScriptDependencies(sheet.ProjectName, sheet.ID, cell.CellID, cell.Script)
+					}
+				}
+			}
+			sheet.mu.RUnlock()
 		}
 	}
 }
 
 // adjustScriptTagsOnMoveRow adjusts row references in script tags for a row move from fromRow to destIndex
+// This function updates both same-sheet references and cross-sheet references, and updates scriptDeps
 func (s *Sheet) adjustScriptTagsOnMoveRow(fromRow, destIndex int) {
-	tagPattern := regexp.MustCompile(`\{\{([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?\}\}`)
-
+	sameSheetPattern := regexp.MustCompile(`\{\{([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?\}\}`)
+	crossSheetPattern := regexp.MustCompile(`\{\{([^/\{\}]+)/([^/\{\}]+)/([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?\}\}`)
+	s.mu.Lock()
+	// Adjust same-sheet references in this sheet
 	for rowKey, rowMap := range s.Data {
 		for colKey, cell := range rowMap {
 			if cell.Script == "" {
 				continue
 			}
 
-			newScript := tagPattern.ReplaceAllStringFunc(cell.Script, func(match string) string {
-				submatches := tagPattern.FindStringSubmatch(match)
+			newScript := sameSheetPattern.ReplaceAllStringFunc(cell.Script, func(match string) string {
+				submatches := sameSheetPattern.FindStringSubmatch(match)
 				if len(submatches) < 3 {
 					return match
 				}
@@ -2339,23 +2314,160 @@ func (s *Sheet) adjustScriptTagsOnMoveRow(fromRow, destIndex int) {
 			if newScript != cell.Script {
 				cell.Script = newScript
 				s.Data[rowKey][colKey] = cell
+				// Update dependencies for modified script
+				globalSheetManager.UpdateScriptDependencies(s.ProjectName, s.ID, cell.CellID, newScript)
 			}
+		}
+	}
+	s.mu.Unlock()
+	// Adjust cross-sheet references in sheets that reference this sheet
+	// Use scriptDeps to find which sheets have dependencies on this sheet
+	sheet_Key := s.ProjectName + "/" + s.ID
+	globalSheetManager.scriptDepsMu.RLock()
+	scriptIdentifiers, hasRefs := globalSheetManager.scriptDeps[sheet_Key]
+	globalSheetManager.scriptDepsMu.RUnlock()
+
+	if !hasRefs {
+		return // No cross-sheet references to this sheet
+	}
+
+	// Collect unique sheets that reference this sheet
+	seenSheets := make(map[string]bool)
+	sheetsToUpdate := make([]*Sheet, 0)
+	globalSheetManager.mu.RLock()
+	for _, si := range scriptIdentifiers {
+		key := sheetKey(si.ScriptProjectName, si.ScriptSheetID)
+		if !seenSheets[key] {
+			if sheet, ok := globalSheetManager.sheets[key]; ok && sheet != nil {
+				sheetsToUpdate = append(sheetsToUpdate, sheet)
+				seenSheets[key] = true
+			}
+		}
+	}
+	globalSheetManager.mu.RUnlock()
+
+	for _, sheet := range sheetsToUpdate {
+		sheet.mu.Lock()
+		modified := false
+		for rowKey, rowMap := range sheet.Data {
+			for colKey, cell := range rowMap {
+				if cell.Script == "" {
+					continue
+				}
+
+				newScript := crossSheetPattern.ReplaceAllStringFunc(cell.Script, func(match string) string {
+					submatches := crossSheetPattern.FindStringSubmatch(match)
+					if len(submatches) < 5 {
+						return match
+					}
+
+					refProject := submatches[1]
+					refSheet := submatches[2]
+
+					// Only adjust if referencing the current sheet
+					if refProject != s.ProjectName || refSheet != s.ID {
+						return match
+					}
+
+					col1 := submatches[3]
+					row1 := atoiSafe(submatches[4])
+
+					// Single cell reference {{project/sheet/A2}}
+					if submatches[5] == "" || submatches[6] == "" {
+						if row1 == 0 {
+							return match
+						}
+
+						if fromRow < destIndex {
+							if row1 == fromRow {
+								row1 = destIndex
+							} else if row1 > fromRow && row1 <= destIndex {
+								row1--
+							}
+						} else if fromRow > destIndex {
+							if row1 == fromRow {
+								row1 = destIndex
+							} else if row1 >= destIndex && row1 < fromRow {
+								row1++
+							}
+						}
+						return fmt.Sprintf("{{%s/%s/%s%d}}", refProject, refSheet, col1, row1)
+					}
+
+					// Range reference {{project/sheet/A2:B3}}
+					col2 := submatches[5]
+					row2 := atoiSafe(submatches[6])
+
+					if row1 == 0 || row2 == 0 {
+						return match
+					}
+
+					if fromRow < destIndex {
+						if row1 == fromRow {
+							row1 = destIndex
+						} else if row1 > fromRow && row1 <= destIndex {
+							row1--
+						}
+						if row2 == fromRow {
+							row2 = destIndex
+						} else if row2 > fromRow && row2 <= destIndex {
+							row2--
+						}
+					} else if fromRow > destIndex {
+						if row1 == fromRow {
+							row1 = destIndex
+						} else if row1 >= destIndex && row1 < fromRow {
+							row1++
+						}
+						if row2 == fromRow {
+							row2 = destIndex
+						} else if row2 >= destIndex && row2 < fromRow {
+							row2++
+						}
+					}
+
+					return fmt.Sprintf("{{%s/%s/%s%d:%s%d}}", refProject, refSheet, col1, row1, col2, row2)
+				})
+
+				if newScript != cell.Script {
+					cell.Script = newScript
+					sheet.Data[rowKey][colKey] = cell
+					modified = true
+				}
+			}
+		}
+		sheet.mu.Unlock()
+
+		// Update dependencies for all modified scripts in this sheet
+		if modified {
+			sheet.mu.RLock()
+			for _, rowMap := range sheet.Data {
+				for _, cell := range rowMap {
+					if cell.Script != "" {
+						globalSheetManager.UpdateScriptDependencies(sheet.ProjectName, sheet.ID, cell.CellID, cell.Script)
+					}
+				}
+			}
+			sheet.mu.RUnlock()
 		}
 	}
 }
 
 // adjustScriptTagsOnInsertCol increments column references in script tags for columns at or beyond insertIdx
+// This function updates both same-sheet references and cross-sheet references, and updates scriptDeps
 func (s *Sheet) adjustScriptTagsOnInsertCol(insertIdx int) {
-	tagPattern := regexp.MustCompile(`\{\{([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?\}\}`)
-
+	sameSheetPattern := regexp.MustCompile(`\{\{([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?\}\}`)
+	crossSheetPattern := regexp.MustCompile(`\{\{([^/\{\}]+)/([^/\{\}]+)/([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?\}\}`)
+	s.mu.Lock()
+	// Adjust same-sheet references in this sheet
 	for rowKey, rowMap := range s.Data {
 		for colKey, cell := range rowMap {
 			if cell.Script == "" {
 				continue
 			}
 
-			newScript := tagPattern.ReplaceAllStringFunc(cell.Script, func(match string) string {
-				submatches := tagPattern.FindStringSubmatch(match)
+			newScript := sameSheetPattern.ReplaceAllStringFunc(cell.Script, func(match string) string {
+				submatches := sameSheetPattern.FindStringSubmatch(match)
 				if len(submatches) < 3 {
 					return match
 				}
@@ -2393,23 +2505,130 @@ func (s *Sheet) adjustScriptTagsOnInsertCol(insertIdx int) {
 			if newScript != cell.Script {
 				cell.Script = newScript
 				s.Data[rowKey][colKey] = cell
+				// Update dependencies for modified script
+				globalSheetManager.UpdateScriptDependencies(s.ProjectName, s.ID, cell.CellID, newScript)
 			}
+		}
+	}
+	s.mu.Unlock()
+	// Adjust cross-sheet references in sheets that reference this sheet
+	// Use scriptDeps to find which sheets have dependencies on this sheet
+	sheet_Key := s.ProjectName + "/" + s.ID
+	globalSheetManager.scriptDepsMu.RLock()
+	scriptIdentifiers, hasRefs := globalSheetManager.scriptDeps[sheet_Key]
+	globalSheetManager.scriptDepsMu.RUnlock()
+
+	if !hasRefs {
+		return // No cross-sheet references to this sheet
+	}
+
+	// Collect unique sheets that reference this sheet
+	seenSheets := make(map[string]bool)
+	sheetsToUpdate := make([]*Sheet, 0)
+	globalSheetManager.mu.RLock()
+	for _, si := range scriptIdentifiers {
+		key := sheetKey(si.ScriptProjectName, si.ScriptSheetID)
+		if !seenSheets[key] {
+			if sheet, ok := globalSheetManager.sheets[key]; ok && sheet != nil {
+				sheetsToUpdate = append(sheetsToUpdate, sheet)
+				seenSheets[key] = true
+			}
+		}
+	}
+	globalSheetManager.mu.RUnlock()
+
+	for _, sheet := range sheetsToUpdate {
+		sheet.mu.Lock()
+		modified := false
+		for rowKey, rowMap := range sheet.Data {
+			for colKey, cell := range rowMap {
+				if cell.Script == "" {
+					continue
+				}
+
+				newScript := crossSheetPattern.ReplaceAllStringFunc(cell.Script, func(match string) string {
+					submatches := crossSheetPattern.FindStringSubmatch(match)
+					if len(submatches) < 5 {
+						return match
+					}
+
+					refProject := submatches[1]
+					refSheet := submatches[2]
+
+					// Only adjust if referencing the current sheet
+					if refProject != s.ProjectName || refSheet != s.ID {
+						return match
+					}
+
+					col1 := submatches[3]
+					row1 := submatches[4]
+					col1Idx := colLabelToIndex(col1)
+
+					// Single cell reference {{project/sheet/A2}}
+					if submatches[5] == "" || submatches[6] == "" {
+						if col1Idx >= insertIdx && col1Idx > 0 {
+							col1Idx++
+							col1 = indexToColLabel(col1Idx)
+						}
+						return fmt.Sprintf("{{%s/%s/%s%s}}", refProject, refSheet, col1, row1)
+					}
+
+					// Range reference {{project/sheet/A2:B3}}
+					col2 := submatches[5]
+					row2 := submatches[6]
+					col2Idx := colLabelToIndex(col2)
+
+					if col1Idx >= insertIdx && col1Idx > 0 {
+						col1Idx++
+						col1 = indexToColLabel(col1Idx)
+					}
+					if col2Idx >= insertIdx && col2Idx > 0 {
+						col2Idx++
+						col2 = indexToColLabel(col2Idx)
+					}
+
+					return fmt.Sprintf("{{%s/%s/%s%s:%s%s}}", refProject, refSheet, col1, row1, col2, row2)
+				})
+
+				if newScript != cell.Script {
+					cell.Script = newScript
+					sheet.Data[rowKey][colKey] = cell
+					modified = true
+				}
+			}
+		}
+		sheet.mu.Unlock()
+
+		// Update dependencies for all modified scripts in this sheet
+		if modified {
+			sheet.mu.RLock()
+			for _, rowMap := range sheet.Data {
+				for _, cell := range rowMap {
+					if cell.Script != "" {
+						globalSheetManager.UpdateScriptDependencies(sheet.ProjectName, sheet.ID, cell.CellID, cell.Script)
+					}
+				}
+			}
+			sheet.mu.RUnlock()
 		}
 	}
 }
 
 // adjustScriptTagsOnDeleteCol decrements column references in script tags for columns strictly right of deleted column
+// This function updates both same-sheet references and cross-sheet references, and updates scriptDeps
 func (s *Sheet) adjustScriptTagsOnDeleteCol(deleteIdx int) {
-	tagPattern := regexp.MustCompile(`\{\{([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?\}\}`)
-
+	sameSheetPattern := regexp.MustCompile(`\{\{([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?\}\}`)
+	crossSheetPattern := regexp.MustCompile(`\{\{([^/\{\}]+)/([^/\{\}]+)/([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?\}\}`)
+	s.mu.Lock()
+	// Adjust same-sheet references in this sheet
 	for rowKey, rowMap := range s.Data {
 		for colKey, cell := range rowMap {
 			if cell.Script == "" {
 				continue
 			}
 
-			newScript := tagPattern.ReplaceAllStringFunc(cell.Script, func(match string) string {
-				submatches := tagPattern.FindStringSubmatch(match)
+			newScript := sameSheetPattern.ReplaceAllStringFunc(cell.Script, func(match string) string {
+				submatches := sameSheetPattern.FindStringSubmatch(match)
 				if len(submatches) < 3 {
 					return match
 				}
@@ -2473,23 +2692,156 @@ func (s *Sheet) adjustScriptTagsOnDeleteCol(deleteIdx int) {
 			if newScript != cell.Script {
 				cell.Script = newScript
 				s.Data[rowKey][colKey] = cell
+				// Update dependencies for modified script
+				globalSheetManager.UpdateScriptDependencies(s.ProjectName, s.ID, cell.CellID, newScript)
 			}
+		}
+	}
+	s.mu.Unlock()
+	// Adjust cross-sheet references in sheets that reference this sheet
+	// Use scriptDeps to find which sheets have dependencies on this sheet
+	sheet_Key := s.ProjectName + "/" + s.ID
+	globalSheetManager.scriptDepsMu.RLock()
+	scriptIdentifiers, hasRefs := globalSheetManager.scriptDeps[sheet_Key]
+	globalSheetManager.scriptDepsMu.RUnlock()
+
+	if !hasRefs {
+		return // No cross-sheet references to this sheet
+	}
+
+	// Collect unique sheets that reference this sheet
+	seenSheets := make(map[string]bool)
+	sheetsToUpdate := make([]*Sheet, 0)
+	globalSheetManager.mu.RLock()
+	for _, si := range scriptIdentifiers {
+		key := sheetKey(si.ScriptProjectName, si.ScriptSheetID)
+		if !seenSheets[key] {
+			if sheet, ok := globalSheetManager.sheets[key]; ok && sheet != nil {
+				sheetsToUpdate = append(sheetsToUpdate, sheet)
+				seenSheets[key] = true
+			}
+		}
+	}
+	globalSheetManager.mu.RUnlock()
+
+	for _, sheet := range sheetsToUpdate {
+		sheet.mu.Lock()
+		modified := false
+		for rowKey, rowMap := range sheet.Data {
+			for colKey, cell := range rowMap {
+				if cell.Script == "" {
+					continue
+				}
+
+				newScript := crossSheetPattern.ReplaceAllStringFunc(cell.Script, func(match string) string {
+					submatches := crossSheetPattern.FindStringSubmatch(match)
+					if len(submatches) < 5 {
+						return match
+					}
+
+					refProject := submatches[1]
+					refSheet := submatches[2]
+
+					// Only adjust if referencing the current sheet
+					if refProject != s.ProjectName || refSheet != s.ID {
+						return match
+					}
+
+					col1 := submatches[3]
+					row1 := submatches[4]
+					col1Idx := colLabelToIndex(col1)
+
+					// Single cell reference {{project/sheet/A2}}
+					if submatches[5] == "" || submatches[6] == "" {
+						if col1Idx == deleteIdx {
+							// Reference to deleted column becomes invalid - keep as is
+							return match
+						}
+						if col1Idx > deleteIdx {
+							col1Idx--
+							col1 = indexToColLabel(col1Idx)
+						}
+						return fmt.Sprintf("{{%s/%s/%s%s}}", refProject, refSheet, col1, row1)
+					}
+
+					// Range reference {{project/sheet/A2:B3}}
+					col2 := submatches[5]
+					row2 := submatches[6]
+					col2Idx := colLabelToIndex(col2)
+
+					// Handle deleted column in range
+					if deleteIdx >= col1Idx && deleteIdx <= col2Idx {
+						// Column is within range - shrink the range
+						if col1Idx == col2Idx {
+							// Single column range that got deleted - keep as invalid reference
+							return match
+						}
+						if deleteIdx == col1Idx {
+							col1Idx++
+							col1 = indexToColLabel(col1Idx)
+						} else if deleteIdx == col2Idx {
+							col2Idx--
+							col2 = indexToColLabel(col2Idx)
+						}
+						// If deleteIdx is in the middle, just adjust the end
+						if col2Idx > deleteIdx {
+							col2Idx--
+							col2 = indexToColLabel(col2Idx)
+						}
+					} else {
+						// Adjust if to the right of deleted column
+						if col1Idx > deleteIdx {
+							col1Idx--
+							col1 = indexToColLabel(col1Idx)
+						}
+						if col2Idx > deleteIdx {
+							col2Idx--
+							col2 = indexToColLabel(col2Idx)
+						}
+					}
+
+					return fmt.Sprintf("{{%s/%s/%s%s:%s%s}}", refProject, refSheet, col1, row1, col2, row2)
+				})
+
+				if newScript != cell.Script {
+					cell.Script = newScript
+					sheet.Data[rowKey][colKey] = cell
+					modified = true
+				}
+			}
+		}
+		sheet.mu.Unlock()
+
+		// Update dependencies for all modified scripts in this sheet
+		if modified {
+			sheet.mu.RLock()
+			for _, rowMap := range sheet.Data {
+				for _, cell := range rowMap {
+					if cell.Script != "" {
+						globalSheetManager.UpdateScriptDependencies(sheet.ProjectName, sheet.ID, cell.CellID, cell.Script)
+					}
+				}
+			}
+			sheet.mu.RUnlock()
 		}
 	}
 }
 
 // adjustScriptTagsOnMoveCol adjusts column references in script tags for a column move from fromIdx to destIdx
+// This function updates both same-sheet references and cross-sheet references, and updates scriptDeps
 func (s *Sheet) adjustScriptTagsOnMoveCol(fromIdx, destIdx int) {
-	tagPattern := regexp.MustCompile(`\{\{([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?\}\}`)
-
+	sameSheetPattern := regexp.MustCompile(`\{\{([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?\}\}`)
+	crossSheetPattern := regexp.MustCompile(`\{\{([^/\{\}]+)/([^/\{\}]+)/([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?\}\}`)
+	s.mu.Lock()
+	// Adjust same-sheet references in this sheet
 	for rowKey, rowMap := range s.Data {
 		for colKey, cell := range rowMap {
 			if cell.Script == "" {
 				continue
 			}
 
-			newScript := tagPattern.ReplaceAllStringFunc(cell.Script, func(match string) string {
-				submatches := tagPattern.FindStringSubmatch(match)
+			newScript := sameSheetPattern.ReplaceAllStringFunc(cell.Script, func(match string) string {
+				submatches := sameSheetPattern.FindStringSubmatch(match)
 				if len(submatches) < 3 {
 					return match
 				}
@@ -2574,7 +2926,158 @@ func (s *Sheet) adjustScriptTagsOnMoveCol(fromIdx, destIdx int) {
 			if newScript != cell.Script {
 				cell.Script = newScript
 				s.Data[rowKey][colKey] = cell
+				// Update dependencies for modified script
+				globalSheetManager.UpdateScriptDependencies(s.ProjectName, s.ID, cell.CellID, newScript)
 			}
+		}
+	}
+	s.mu.Unlock()
+	// Adjust cross-sheet references in sheets that reference this sheet
+	// Use scriptDeps to find which sheets have dependencies on this sheet
+	sheet_Key := s.ProjectName + "/" + s.ID
+	globalSheetManager.scriptDepsMu.RLock()
+	scriptIdentifiers, hasRefs := globalSheetManager.scriptDeps[sheet_Key]
+	globalSheetManager.scriptDepsMu.RUnlock()
+
+	if !hasRefs {
+		return // No cross-sheet references to this sheet
+	}
+
+	// Collect unique sheets that reference this sheet
+	seenSheets := make(map[string]bool)
+	sheetsToUpdate := make([]*Sheet, 0)
+	globalSheetManager.mu.RLock()
+	for _, si := range scriptIdentifiers {
+		key := sheetKey(si.ScriptProjectName, si.ScriptSheetID)
+		if !seenSheets[key] {
+			if sheet, ok := globalSheetManager.sheets[key]; ok && sheet != nil {
+				sheetsToUpdate = append(sheetsToUpdate, sheet)
+				seenSheets[key] = true
+			}
+		}
+	}
+	globalSheetManager.mu.RUnlock()
+
+	for _, sheet := range sheetsToUpdate {
+		sheet.mu.Lock()
+		modified := false
+		for rowKey, rowMap := range sheet.Data {
+			for colKey, cell := range rowMap {
+				if cell.Script == "" {
+					continue
+				}
+
+				newScript := crossSheetPattern.ReplaceAllStringFunc(cell.Script, func(match string) string {
+					submatches := crossSheetPattern.FindStringSubmatch(match)
+					if len(submatches) < 5 {
+						return match
+					}
+
+					refProject := submatches[1]
+					refSheet := submatches[2]
+
+					// Only adjust if referencing the current sheet
+					if refProject != s.ProjectName || refSheet != s.ID {
+						return match
+					}
+
+					col1 := submatches[3]
+					row1 := submatches[4]
+					col1Idx := colLabelToIndex(col1)
+
+					// Single cell reference {{project/sheet/A2}}
+					if submatches[5] == "" || submatches[6] == "" {
+						if col1Idx == 0 {
+							return match
+						}
+
+						oldIdx := col1Idx
+						if fromIdx < destIdx {
+							if col1Idx == fromIdx {
+								col1Idx = destIdx
+							} else if col1Idx > fromIdx && col1Idx <= destIdx {
+								col1Idx--
+							}
+						} else if fromIdx > destIdx {
+							if col1Idx == fromIdx {
+								col1Idx = destIdx
+							} else if col1Idx >= destIdx && col1Idx < fromIdx {
+								col1Idx++
+							}
+						}
+
+						if col1Idx != oldIdx {
+							col1 = indexToColLabel(col1Idx)
+						}
+						return fmt.Sprintf("{{%s/%s/%s%s}}", refProject, refSheet, col1, row1)
+					}
+
+					// Range reference {{project/sheet/A2:B3}}
+					col2 := submatches[5]
+					row2 := submatches[6]
+					col2Idx := colLabelToIndex(col2)
+
+					if col1Idx == 0 || col2Idx == 0 {
+						return match
+					}
+
+					oldIdx1 := col1Idx
+					oldIdx2 := col2Idx
+
+					if fromIdx < destIdx {
+						if col1Idx == fromIdx {
+							col1Idx = destIdx
+						} else if col1Idx > fromIdx && col1Idx <= destIdx {
+							col1Idx--
+						}
+						if col2Idx == fromIdx {
+							col2Idx = destIdx
+						} else if col2Idx > fromIdx && col2Idx <= destIdx {
+							col2Idx--
+						}
+					} else if fromIdx > destIdx {
+						if col1Idx == fromIdx {
+							col1Idx = destIdx
+						} else if col1Idx >= destIdx && col1Idx < fromIdx {
+							col1Idx++
+						}
+						if col2Idx == fromIdx {
+							col2Idx = destIdx
+						} else if col2Idx >= destIdx && col2Idx < fromIdx {
+							col2Idx++
+						}
+					}
+
+					if col1Idx != oldIdx1 {
+						col1 = indexToColLabel(col1Idx)
+					}
+					if col2Idx != oldIdx2 {
+						col2 = indexToColLabel(col2Idx)
+					}
+
+					return fmt.Sprintf("{{%s/%s/%s%s:%s%s}}", refProject, refSheet, col1, row1, col2, row2)
+				})
+
+				if newScript != cell.Script {
+					cell.Script = newScript
+					sheet.Data[rowKey][colKey] = cell
+					modified = true
+				}
+			}
+		}
+		sheet.mu.Unlock()
+
+		// Update dependencies for all modified scripts in this sheet
+		if modified {
+			sheet.mu.RLock()
+			for _, rowMap := range sheet.Data {
+				for _, cell := range rowMap {
+					if cell.Script != "" {
+						globalSheetManager.UpdateScriptDependencies(sheet.ProjectName, sheet.ID, cell.CellID, cell.Script)
+					}
+				}
+			}
+			sheet.mu.RUnlock()
 		}
 	}
 }
@@ -2867,6 +3370,56 @@ func (sm *SheetManager) Load() {
 	}
 
 	log.Printf("Loaded %d sheets from disk", loadedCount)
+
+	// Rebuild script dependency map from loaded sheets
+	sm.rebuildScriptDependencies()
+}
+
+// rebuildScriptDependencies rebuilds the script dependency map from all loaded sheets
+// This should be called after loading sheets from disk on startup
+func (sm *SheetManager) rebuildScriptDependencies() {
+	sm.scriptDepsMu.Lock()
+	defer sm.scriptDepsMu.Unlock()
+
+	// Clear existing dependencies
+	sm.scriptDeps = make(map[string][]ScriptIdentifier)
+
+	// Iterate through all sheets and extract dependencies from scripts
+	for _, sheet := range sm.sheets {
+		if sheet == nil {
+			continue
+		}
+
+		sheet.mu.RLock()
+		projectName := sheet.ProjectName
+		sheetID := sheet.ID
+
+		for _, rowMap := range sheet.Data {
+			for _, cell := range rowMap {
+				if strings.TrimSpace(cell.Script) == "" {
+					continue
+				}
+
+				// Extract dependencies for this script
+				deps := ExtractScriptDependencies(cell.Script, projectName, sheetID)
+
+				// Add to dependency map
+				for _, dep := range deps {
+					sheetKey := dep.Project + "/" + dep.Sheet
+					scriptIdent := ScriptIdentifier{
+						ScriptProjectName: projectName,
+						ScriptSheetID:     sheetID,
+						ScriptCellID:      cell.CellID,
+						ReferencedRange:   dep.Range,
+					}
+					sm.scriptDeps[sheetKey] = append(sm.scriptDeps[sheetKey], scriptIdent)
+				}
+			}
+		}
+		sheet.mu.RUnlock()
+	}
+
+	log.Printf("Rebuilt script dependency map with %d referenced sheets", len(sm.scriptDeps))
 }
 
 // DuplicateProject duplicates all sheets in source project into a new project name.

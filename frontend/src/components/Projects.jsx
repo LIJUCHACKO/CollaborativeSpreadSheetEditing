@@ -9,10 +9,10 @@ export default function Projects() {
   const [search, setSearch] = useState('');
   const [newProject, setNewProject] = useState('');
   const [editingName, setEditingName] = useState('');
-  const [editingIdx, setEditingIdx] = useState(null);
-  const [deleteIdx, setDeleteIdx] = useState(null);
+  const [editingProject, setEditingProject] = useState(null);
+  const [deleteProject, setDeleteProject] = useState(null);
   const [deleteConfirm, setDeleteConfirm] = useState('');
-  const [duplicateIdx, setDuplicateIdx] = useState(null);
+  const [duplicateProject, setDuplicateProject] = useState(null);
   const [duplicateName, setDuplicateName] = useState('');
   // ...existing code...
   const navigate = useNavigate();
@@ -85,18 +85,18 @@ export default function Projects() {
     }
   };
 
-  const startRename = (idx) => {
-    setEditingIdx(idx);
-    setEditingName(projects[idx]?.name || '');
+  const startRename = (projectName) => {
+    setEditingProject(projectName);
+    setEditingName(projectName || '');
   };
 
   const cancelRename = () => {
-    setEditingIdx(null);
+    setEditingProject(null);
     setEditingName('');
   };
 
-  const renameProject = async (idx) => {
-    const oldName = projects[idx]?.name;
+  const renameProject = async () => {
+    const oldName = editingProject;
     const newName = editingName.trim();
     if (!oldName || !newName) return;
     try {
@@ -109,8 +109,13 @@ export default function Projects() {
         alert('Only the project owner can rename this project.');
         return;
       }
+      if (res.status === 409) {
+        const errorText = await res.text();
+        alert(errorText || 'Cannot rename: one or more sheets in this project are currently open by users.');
+        return;
+      }
       if (res.ok) {
-        setEditingIdx(null);
+        setEditingProject(null);
         setEditingName('');
         fetchProjects();
       } else if (res.status === 401) {
@@ -123,28 +128,28 @@ export default function Projects() {
     }
   };
 
-  const requestDelete = (idx) => {
-    setDeleteIdx(idx);
+  const requestDelete = (projectName) => {
+    setDeleteProject(projectName);
     setDeleteConfirm('');
   };
 
   const cancelDelete = () => {
-    setDeleteIdx(null);
+    setDeleteProject(null);
     setDeleteConfirm('');
   };
 
-  const startDuplicate = (idx) => {
-    setDuplicateIdx(idx);
-    setDuplicateName(projects[idx]?.name ? projects[idx].name + '_copy' : '');
+  const startDuplicate = (projectName) => {
+    setDuplicateProject(projectName);
+    setDuplicateName(projectName ? projectName + '_copy' : '');
   };
 
   const cancelDuplicate = () => {
-    setDuplicateIdx(null);
+    setDuplicateProject(null);
     setDuplicateName('');
   };
 
-  const duplicateProject = async (idx) => {
-    const source = projects[idx]?.name;
+  const confirmDuplicate = async () => {
+    const source = duplicateProject;
     const newName = duplicateName.trim();
     if (!source || !newName) return;
     try {
@@ -175,8 +180,8 @@ export default function Projects() {
 
   // ...existing code...
 
-  const deleteProject = async (idx) => {
-    const name = projects[idx]?.name;
+  const confirmDelete = async () => {
+    const name = deleteProject;
     if (!name) return;
     if (deleteConfirm.trim() !== name) return; // require exact match
     try {
@@ -273,44 +278,44 @@ export default function Projects() {
               {displayed.map((p, idx) => (
                 <tr key={p.name} style={{ cursor: 'pointer' }}>
                   <td onClick={() => navigate(`/project/${encodeURIComponent(p.name)}`)}>
-                    {editingIdx === idx ? (
-                      <input type="text" className="form-control form-control-sm" value={editingName} onChange={(e)=>setEditingName(e.target.value)} onClick={(e)=>e.stopPropagation()} onKeyDown={(e)=>{ if (e.key==='Enter') renameProject(idx); if (e.key==='Escape') cancelRename(); }} autoFocus />
+                    {editingProject === p.name ? (
+                      <input type="text" className="form-control form-control-sm" value={editingName} onChange={(e)=>setEditingName(e.target.value)} onClick={(e)=>e.stopPropagation()} onKeyDown={(e)=>{ if (e.key==='Enter') renameProject(); if (e.key==='Escape') cancelRename(); }} autoFocus />
                     ) : p.name}
                   </td>
                   <td>
                     {p.owner || ''}
                   </td>
                   <td className="text-end">
-                    {editingIdx === idx ? (
+                    {editingProject === p.name ? (
                       <>
-                        <button className="btn btn-sm btn-success me-2" onClick={(ev)=>{ev.stopPropagation(); renameProject(idx);}}>Save</button>
+                        <button className="btn btn-sm btn-success me-2" onClick={(ev)=>{ev.stopPropagation(); renameProject();}}>Save</button>
                         <button className="btn btn-sm btn-secondary" onClick={(ev)=>{ev.stopPropagation(); cancelRename();}}>Cancel</button>
                       </>
-                    ) : deleteIdx === idx ? (
+                    ) : deleteProject === p.name ? (
                       <div className="d-inline-flex align-items-center gap-2">
                         <input type="text" className="form-control form-control-sm" placeholder={`Type '${p.name}'`} value={deleteConfirm} onChange={(e)=>setDeleteConfirm(e.target.value)} style={{ maxWidth: 200 }} />
-                        <button className="btn btn-sm btn-danger" disabled={deleteConfirm.trim()!==p.name} onClick={(ev)=>{ev.stopPropagation(); deleteProject(idx);}}>Confirm</button>
+                        <button className="btn btn-sm btn-danger" disabled={deleteConfirm.trim()!==p.name} onClick={(ev)=>{ev.stopPropagation(); confirmDelete();}}>Confirm</button>
                         <button className="btn btn-sm btn-secondary" onClick={(ev)=>{ev.stopPropagation(); cancelDelete();}}>Cancel</button>
                       </div>
-                    ) : duplicateIdx === idx ? (
+                    ) : duplicateProject === p.name ? (
                       <div className="d-inline-flex align-items-center gap-2">
                         <input type="text" className="form-control form-control-sm" placeholder={`New project name`} value={duplicateName} onChange={(e)=>setDuplicateName(e.target.value)} style={{ maxWidth: 220 }} />
-                        <button className="btn btn-sm btn-success" disabled={!duplicateName.trim()} onClick={(ev)=>{ev.stopPropagation(); duplicateProject(idx);}}>Duplicate</button>
+                        <button className="btn btn-sm btn-success" disabled={!duplicateName.trim()} onClick={(ev)=>{ev.stopPropagation(); confirmDuplicate();}}>Duplicate</button>
                         <button className="btn btn-sm btn-secondary" onClick={(ev)=>{ev.stopPropagation(); cancelDuplicate();}}>Cancel</button>
                       </div>
                     ) : (
                       <>
                         {p.owner === username && (
-                          <button className="btn btn-sm btn-outline-primary me-2" onClick={(ev)=>{ev.stopPropagation(); startRename(idx);}}>
+                          <button className="btn btn-sm btn-outline-primary me-2" onClick={(ev)=>{ev.stopPropagation(); startRename(p.name);}}>
                             <Edit2 size={14} className="me-1"/> Rename
                           </button>
                         )}
-                        <button className="btn btn-sm btn-outline-primary me-2" onClick={(ev)=>{ev.stopPropagation(); startDuplicate(idx);}}>
+                        <button className="btn btn-sm btn-outline-primary me-2" onClick={(ev)=>{ev.stopPropagation(); startDuplicate(p.name);}}>
                           <FolderPlus size={14} className="me-1"/> Duplicate
                         </button>
                         {/* Audit button removed */}
                         {p.owner === username && (
-                          <button className="btn btn-sm btn-outline-danger" onClick={(ev)=>{ev.stopPropagation(); requestDelete(idx);}}>
+                          <button className="btn btn-sm btn-outline-danger" onClick={(ev)=>{ev.stopPropagation(); requestDelete(p.name);}}>
                             <Trash2 size={14} className="me-1"/> Delete
                           </button>
                         )}
