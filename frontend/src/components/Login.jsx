@@ -21,6 +21,12 @@ export default function Login() {
       return;
     }
 
+    // Prevent registration with reserved username 'system'
+    if (isRegistering && username.trim().toLowerCase() === 'system') {
+      setError("'system' is a reserved username. Please choose another.");
+      return;
+    }
+
     // Removed Terms & Privacy Policy checkbox and related validation
 
     setLoading(true);

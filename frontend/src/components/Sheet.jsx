@@ -42,17 +42,27 @@ export default function Sheet() {
     const [isEditing, setIsEditing] = useState(false);
     const [isDoubleClicked, setIsDoubleClicked] = useState(false);
     const [isSidebarOpen, setSidebarOpen] = useState(false);
+    const [isChatOpen, setChatOpen] = useState(true);
     const [showFilters, setShowFilters] = useState(false);
     const [filters, setFilters] = useState({});
     const [sortConfig, setSortConfig] = useState({ col: null, direction: null });
     const [focusedCell, setFocusedCell] = useState({ row: 1, col: 'A' });
 
     // Grid dimensions and labels
-    const ROW_HEADERS = useMemo(() => Array.from({ length: 100 }, (_, i) => i + 1), []);
+    const ROW_HEADERS = useMemo(() => Array.from({ length: 2000 }, (_, i) => i + 1), []);
     const ROWS = ROW_HEADERS.length;
     const COL_HEADERS = useMemo(() => {
         const letters = [];
-        for (let i = 0; i < 26; i++) letters.push(String.fromCharCode(65 + i));
+        // Generate A-Z, AA-AZ, BA-BZ, ... ZZ (702 columns total)
+        for (let i = 0; i < 102; i++) {
+            if (i < 26) {
+                letters.push(String.fromCharCode(65 + i));
+            } else {
+                const first = Math.floor((i - 26) / 26);
+                const second = (i - 26) % 26;
+                letters.push(String.fromCharCode(65 + first) + String.fromCharCode(65 + second));
+            }
+        }
         return letters;
     }, []);
     const COLS = COL_HEADERS.length;
@@ -112,6 +122,10 @@ export default function Sheet() {
     const auditLogScrollTopRef = useRef(0);
     const editingOriginalValueRef = useRef(null);
     const editingOriginalScriptRef = useRef(null);
+
+    // Touch state for swipe gestures
+    const [touchStart, setTouchStart] = useState({ x: 0, y: 0 });
+    const [touchEnd, setTouchEnd] = useState({ x: 0, y: 0 });
 
     const colIndexMap = useMemo(() => {
         const map = {};
@@ -884,6 +898,7 @@ export default function Sheet() {
 
     const doUndo = () => {
         if (undoStack.length === 0 || !canEdit) return;
+        closeScriptPopup();
         const last = undoStack[undoStack.length - 1];
         if (last.type === 'cell_edit') {
             const { row, col, oldValue, newValue } = last;
@@ -990,6 +1005,7 @@ export default function Sheet() {
 
     const doRedo = () => {
         if (redoStack.length === 0 || !canEdit) return;
+        closeScriptPopup();
         const last = redoStack[redoStack.length - 1];
         if (last.type === 'cell_edit') {
             const { row, col, oldValue, newValue } = last;
@@ -1151,6 +1167,7 @@ export default function Sheet() {
 
     const applyStyleToSelectedRange = () => {
         if (!selectedRange || selectedRange.length === 0 || !canEdit) return;
+        closeScriptPopup();
 
         for (const sel of selectedRange) {
             const r = sel.row;
@@ -1478,6 +1495,10 @@ export default function Sheet() {
         }
     };
 
+    const toggleChat = () => {
+        setChatOpen(prev => !prev);
+    };
+
     // Navigate to a specific cell and ensure it's visible, then focus it
     const navigateToCell = (targetRow, targetColLabel) => {
         if (!targetRow || !targetColLabel) return;
@@ -1491,7 +1512,7 @@ export default function Sheet() {
                 if (targetRow <= freezeRowsCount) return; // frozen rows are always visible
                 const maxRowStart = Math.max(1, filteredRowHeaders.length - nonFrozenVisibleRowsCount + 1);
                 const desiredStart = Math.max(freezeRowsCount + 1, Math.min(maxRowStart, rowIdx + 1));
-                setRowStart(desiredStart);
+                setRowStart(desiredStart-1);
             }
         }
         // Adjust colStart only if targetCol is not already within the visible window
@@ -1502,7 +1523,7 @@ export default function Sheet() {
             if (!colVisible) {
                 const maxColStart = Math.max(1, COLS - nonFrozenVisibleColsCount + 1);
                 const desiredColStart = Math.max(1, Math.min(maxColStart, colNumber));
-                setColStart(desiredColStart);
+                setColStart(desiredColStart-1);
             }
         }
         // Set focus state and focus the element after re-render
@@ -1666,6 +1687,12 @@ export default function Sheet() {
                         >
                             <History className="me-1" />Activity
                         </button>
+                        <button
+                            onClick={toggleChat}
+                            className={`btn btn-outline-primary btn-sm d-flex align-items-center ${isChatOpen ? 'active' : ''}`}
+                        >
+                            <MessageSquare className="me-1" />Chat
+                        </button>
                     </span>
                     <div className="d-flex align-items-center ms-auto">
                         <span className="navbar-text me-4 d-flex align-items-center">
@@ -1795,13 +1822,13 @@ export default function Sheet() {
                             <input
                                 type="color"
                                 value={styleBg || '#ffffff'}
-                                onChange={(e) => setStyleBg(e.target.value)}
+                                onChange={(e) => { closeScriptPopup(); setStyleBg(e.target.value); }}
                                 disabled={!canEdit}
                                 title="Background color"
                             />
                             <button
                                 className={`px-2 py-1 text-sm rounded border ${styleBold ? 'bg-indigo-100 border-indigo-300' : 'border-gray-300 bg-white'} hover:bg-gray-100`}
-                                onClick={() => setStyleBold(v => !v)}
+                                onClick={() => { closeScriptPopup(); setStyleBold(v => !v); }}
                                 disabled={!canEdit}
                                 title="Bold"
                             >
@@ -1809,7 +1836,7 @@ export default function Sheet() {
                             </button>
                             <button
                                 className={`px-2 py-1 text-sm rounded border ${styleItalic ? 'bg-indigo-100 border-indigo-300' : 'border-gray-300 bg-white'} hover:bg-gray-100`}
-                                onClick={() => setStyleItalic(v => !v)}
+                                onClick={() => { closeScriptPopup(); setStyleItalic(v => !v); }}
                                 disabled={!canEdit}
                                 title="Italic"
                             >
@@ -1865,7 +1892,7 @@ export default function Sheet() {
                                 const isSelected = selectedAuditId === entryId;
                                 const canRevert = (
                                     isOwner && 
-                                    entry && username !== entry.user && entry.action === 'EDIT_CELL' &&
+                                    entry && username !== entry.user && entry.action === 'EDIT_CELL' && entry.user !== 'system' &&
                                     Number.isInteger(entry.row) && entry.row > 0 && typeof entry.col === 'string' && entry.col &&
                                     (data[`${entry.row}-${entry.col}`]?.value ?? '')?.toString() === (entry.new_value ?? '')?.toString() &&
                                     (data[`${entry.row}-${entry.col}`]?.locked !== true)
@@ -2040,7 +2067,6 @@ export default function Sheet() {
                         <div style={{ gridColumn: '2 / span 1', gridRow: '1 / span 1' }}
                              onWheel={(e) => {
                                  e.preventDefault();
-                                 // Commit edit and exit editing mode on scroll
                                  setIsEditing(false);
                                  setIsDoubleClicked(false);
                                  const { row, col } = focusedCell;
@@ -2051,14 +2077,14 @@ export default function Sheet() {
                                  const step = e.deltaY > 0 ? 1 : -1;
                                  const maxStart = Math.max(1, COLS - nonFrozenVisibleColsCount + 1);
                                  setColStart(prev => Math.max(1, Math.min(maxStart, prev + step)));
-                             }}>
+                             }}
+                             className="flex items-stretch">
                             <input
                                 type="range"
                                 min={1}
                                 max={Math.max(1, COLS - nonFrozenVisibleColsCount + 1)}
                                 value={colStart}
-                                onChange={(e) =>{ 
-                                    // Commit edit and exit editing mode on scroll
+                                onChange={(e) =>{
                                     setIsEditing(false);
                                     setIsDoubleClicked(false);
                                     const { row, col } = focusedCell;
@@ -2086,6 +2112,7 @@ export default function Sheet() {
                                  const maxStart = Math.max(freezeRowsCount + 1, ROWS - nonFrozenVisibleRowsCount + 1);
                                  setRowStart(prev => Math.max(freezeRowsCount + 1, Math.min(maxStart, prev + step)));
                              }}
+                           
                              className="flex items-stretch">
                             <input
                                 type="range"
@@ -2133,6 +2160,65 @@ export default function Sheet() {
 
                                  if ((step < 0 && atTop) || (step > 0 && atBottom)) {
                                    setRowStart(prev => Math.max(1, Math.min(maxStart, prev + step)));
+                                 }
+                             }}
+                             onTouchStart={(e) => {
+                                 e.preventDefault();
+                                 const touch = e.touches[0];
+                                 setTouchStart({ x: touch.clientX, y: touch.clientY });
+                             }}
+                             onTouchMove={(e) => {
+                                 e.preventDefault();
+                                 const touch = e.touches[0];
+                                 setTouchEnd({ x: touch.clientX, y: touch.clientY });
+                             }}
+                             onTouchEnd={(e) => {
+                                 e.preventDefault();
+                                 const deltaY = touchStart.y - touchEnd.y;
+                                 const deltaX = touchStart.x - touchEnd.x;
+                                 const minSwipeDistance = 50;
+                                 
+                                 // Determine if horizontal or vertical swipe is dominant
+                                 const isVerticalSwipe = Math.abs(deltaY) > Math.abs(deltaX);
+                                 
+                                 if (isVerticalSwipe && Math.abs(deltaY) > minSwipeDistance) {
+                                     // Handle vertical swipe (rows)
+                                     
+                                     setIsEditing(false);
+                                     setIsDoubleClicked(false);
+                                     const { row, col } = focusedCell;
+                                     const key = `${row}-${col}`;
+                                     if (data[key]) {
+                                         handleCellChange(row, col, data[key].value);
+                                     }
+                                     const step = deltaY > 0 ? 1 : -1; // swipe up = scroll down, swipe down = scroll up
+                                     const maxStart = Math.max(1, ROWS - visibleRowsCount + 1);
+                                     // Use browser window scroll position instead of container scroll
+                                     const winScrollY = typeof window !== 'undefined' ? window.scrollY : 0;
+                                     const docEl = typeof document !== 'undefined' ? document.documentElement : null;
+                                     const docScrollTop = docEl ? docEl.scrollTop : 0;
+                                     const scrollTop = winScrollY || docScrollTop || 0;
+                                     const viewportBottom = scrollTop + (typeof window !== 'undefined' ? window.innerHeight : 0);
+                                     const docScrollHeight = docEl ? docEl.scrollHeight : 0;
+                                     const atTop = scrollTop <= 0;
+                                     const atBottom = Math.ceil(viewportBottom) >= docScrollHeight;
+
+                                     if ((step < 0 && atTop) || (step > 0 && atBottom)) {
+                                         setRowStart(prev => Math.max(1, Math.min(maxStart, prev + step)));
+                                     }
+                                 } else if (!isVerticalSwipe && Math.abs(deltaX) > minSwipeDistance) {
+                                     // Handle horizontal swipe (columns)
+                                     
+                                     setIsEditing(false);
+                                     setIsDoubleClicked(false);
+                                     const { row, col } = focusedCell;
+                                     const key = `${row}-${col}`;
+                                     if (data[key]) {
+                                         handleCellChange(row, col, data[key].value);
+                                     }
+                                     const step = deltaX > 0 ? 1 : -1; // swipe left = scroll right, swipe right = scroll left
+                                     const maxStart = Math.max(1, COLS - nonFrozenVisibleColsCount + 1);
+                                     setColStart(prev => Math.max(1, Math.min(maxStart, prev + step)));
                                  }
                              }}
                             tabIndex={0}
@@ -2494,6 +2580,7 @@ export default function Sheet() {
                                                             e.preventDefault();
                                                             e.target.focus();
                                                             if (connected) {
+                                                                closeScriptPopup();
                                                                 setIsEditing(true);
                                                                 setIsDoubleClicked(true);
                                                                 setCutRow(null);
@@ -2535,7 +2622,7 @@ export default function Sheet() {
                                                                 if (cell.locked) return;
                                                                 // If cell has a script, do not enter value edit mode
                                                                 if ((cell.script ?? '').toString().length > 0) return;
-                                                                if (connected) setIsEditing(true);
+                                                                if (connected) { closeScriptPopup(); setIsEditing(true); }
                                                                 return;
                                                             }
                                                             // In edit mode, allow default arrow behavior inside textarea and disable cell navigation if multiline without Shift
@@ -2805,6 +2892,7 @@ export default function Sheet() {
                         </div>
 
                         {/* Chat panel (fixed bottom-right) */}
+                        {isChatOpen && (
                         <div style={{ position: 'fixed', right: 16, bottom: 16, width: 360, zIndex: 1100 }}>
                             <div className="card shadow-sm">
                                 <div className="card-header py-2 d-flex align-items-center justify-content-between">
@@ -2941,6 +3029,7 @@ export default function Sheet() {
                                 </div>
                             </div>
                         </div>
+                        )}
                     </div>
                 </div>
 

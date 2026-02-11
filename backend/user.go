@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -50,6 +51,11 @@ var globalUserManager = &UserManager{
 func (um *UserManager) Register(username, password string) error {
 	um.mu.Lock()
 	defer um.mu.Unlock()
+
+	// Disallow reserved username "system" (case-insensitive)
+	if strings.EqualFold(strings.TrimSpace(username), "system") {
+		return errors.New("reserved username")
+	}
 
 	if _, exists := um.users[username]; exists {
 		return errors.New("user already exists")

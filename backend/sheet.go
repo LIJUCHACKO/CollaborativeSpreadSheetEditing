@@ -28,12 +28,10 @@ func firstNChar(s string, n int) string {
 	return s[:n] + "..."
 }
 
-// getSheetFilePath returns the file path for a sheet
 func getSheetFilePath(sheetID string) string {
 	return filepath.Join(dataDir, sheetID+".json")
 }
 
-// ensureDataDir creates the DATA directory if it doesn't exist
 func ensureDataDir() error {
 	return os.MkdirAll(dataDir, 0755)
 }
@@ -84,7 +82,6 @@ type Sheet struct {
 	mu          sync.RWMutex
 }
 
-// IsEditor returns true if user is the owner or listed as an editor.
 func (s *Sheet) IsEditor(user string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -103,19 +100,14 @@ func (s *Sheet) IsEditor(user string) bool {
 }
 
 type SheetManager struct {
-	// Keyed by composite key of project+id
 	sheets map[string]*Sheet
 	mu     sync.RWMutex
 
-	// Async save queue (debounced per sheet)
 	pending      map[string]*pendingSave // key -> pending info
 	saveInterval time.Duration           // debounce duration
 	started      bool
 	stopCh       chan struct{}
 
-	// Script dependency tracking
-	// Maps sheet reference (e.g., "project/sheet")
-	// to a list of script identifiers that depend on it (with ReferencedRange storing the specific cells)
 	scriptDeps   map[string][]ScriptIdentifier // "project/sheet" -> []ScriptIdentifier
 	scriptDepsMu sync.RWMutex
 
@@ -130,6 +122,15 @@ type SheetManager struct {
 
 	ScriptsExecuted   []string
 	ScriptsExecutedMu sync.Mutex
+
+	// ROW_COL_UPDATE broadcast queue
+	RowColUpdateQueue   []RowColUpdateItem // Queue of sheets to broadcast ROW_COL_UPDATED messages
+	RowColUpdateQueueMu sync.Mutex
+}
+
+type RowColUpdateItem struct {
+	ProjectName string
+	SheetID     string
 }
 
 type CellIdentifier struct {
@@ -175,6 +176,7 @@ func (sm *SheetManager) saveSheetLocked(sheet *Sheet) {
 	if err := encoder.Encode(sheet); err != nil {
 		log.Printf("Error encoding sheet %s: %v", sheet.ID, err)
 	}
+	fmt.Printf("Sheet %s saved successfully at %s\n", sheet.ID, filePath)
 }
 
 // MarshalJSON implementation for Sheet to ensure thread-safe encoding
@@ -202,6 +204,7 @@ var globalSheetManager = &SheetManager{
 	ScriptsExecuted:            []string{},
 	CellsModifiedManuallyQueue: []CellIdentifier{},
 	CellsModifiedByScriptQueue: []CellIdentifier{},
+	RowColUpdateQueue:          []RowColUpdateItem{},
 }
 
 // Initialize async saver once during startup
@@ -289,6 +292,7 @@ func (sm *SheetManager) flusher() {
 					sm.CellsModifiedManuallyQueueMu.Unlock()
 					//fmt.Println("Executing scripts for manually modified cell:", toExec)
 					ExecuteDependentScripts(toExec.ProjectName, toExec.sheetID, toExec.row, toExec.col, true)
+					continue
 				} else {
 					sm.CellsModifiedManuallyQueueMu.Unlock()
 				}
@@ -299,6 +303,7 @@ func (sm *SheetManager) flusher() {
 				sm.CellsModifiedByScriptQueueMu.Unlock()
 				//fmt.Println("Executing scripts for script modified cell:", toExec)
 				ExecuteDependentScripts(toExec.ProjectName, toExec.sheetID, toExec.row, toExec.col, false)
+				continue
 			}
 
 			// collect due items without holding lock during disk IO
@@ -320,10 +325,65 @@ func (sm *SheetManager) flusher() {
 				sm.mu.RUnlock()
 			}
 
+			// Process ROW_COL_UPDATE broadcast queue
+			sm.RowColUpdateQueueMu.Lock()
+			if len(sm.RowColUpdateQueue) > 0 {
+				// Deduplicate sheets in queue - only keep unique project/sheet combinations
+				seenSheets := make(map[string]bool)
+				uniqueUpdates := make([]RowColUpdateItem, 0)
+
+				for _, item := range sm.RowColUpdateQueue {
+					key := item.ProjectName + "::" + item.SheetID
+					if !seenSheets[key] {
+						seenSheets[key] = true
+						uniqueUpdates = append(uniqueUpdates, item)
+					}
+				}
+
+				// Clear the queue
+				sm.RowColUpdateQueue = []RowColUpdateItem{}
+				sm.RowColUpdateQueueMu.Unlock()
+
+				// Send ROW_COL_UPDATED messages for each unique sheet
+				if globalHub != nil {
+					for _, item := range uniqueUpdates {
+						sheet := sm.GetSheetBy(item.SheetID, item.ProjectName)
+						if sheet != nil {
+							payload, _ := json.Marshal(sheet.SnapshotForClient())
+							globalHub.broadcast <- &Message{
+								Type:    "ROW_COL_UPDATED",
+								SheetID: item.SheetID,
+								Project: item.ProjectName,
+								Payload: payload,
+								User:    "system",
+							}
+						}
+					}
+				}
+			} else {
+				sm.RowColUpdateQueueMu.Unlock()
+			}
+
 		case <-sm.stopCh:
 			return
 		}
 	}
+}
+
+// QueueRowColUpdate adds a sheet to the ROW_COL_UPDATE broadcast queue
+func (sm *SheetManager) QueueRowColUpdate(projectName, sheetID string) {
+	sm.RowColUpdateQueueMu.Lock()
+	defer sm.RowColUpdateQueueMu.Unlock()
+	// Check if this sheet is already queued to avoid duplicates
+	for _, item := range sm.RowColUpdateQueue {
+		if item.ProjectName == projectName && item.SheetID == sheetID {
+			return
+		}
+	}
+	sm.RowColUpdateQueue = append(sm.RowColUpdateQueue, RowColUpdateItem{
+		ProjectName: projectName,
+		SheetID:     sheetID,
+	})
 }
 
 // sheetKey builds a unique key combining project and sheet id.
@@ -365,8 +425,6 @@ func (sm *SheetManager) CreateSheet(name, owner, projectName string) *Sheet {
 	return sheet
 }
 
-// GetSheet finds a sheet by id only. If multiple projects contain the same id,
-// the returned sheet is undefined. Prefer GetSheetBy.
 func (sm *SheetManager) GetSheet(id string) *Sheet {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
@@ -1945,6 +2003,13 @@ func (s *Sheet) adjustScriptTagsOnInsertRow(insertRow int) {
 	for _, u := range pending {
 		globalSheetManager.UpdateScriptDependencies(u.project, u.sheet, u.cellID, u.script, u.row, u.col)
 	}
+	if len(pending) > 0 {
+		globalSheetManager.SaveSheet(s)
+	}
+	// Send ROW_COL_UPDATED message to clients if any scripts were modified in this sheet
+	if len(pending) > 0 && globalHub != nil {
+		globalSheetManager.QueueRowColUpdate(s.ProjectName, s.ID)
+	}
 	// Adjust cross-sheet references in sheets that reference this sheet
 	// Use scriptDeps to find which sheets have dependencies on this sheet
 	sheet_Key := s.ProjectName + "/" + s.ID
@@ -2045,6 +2110,11 @@ func (s *Sheet) adjustScriptTagsOnInsertRow(insertRow int) {
 			for _, u := range updList {
 				globalSheetManager.UpdateScriptDependencies(u.project, u.sheet, u.cellID, u.script, u.row, u.col)
 			}
+			globalSheetManager.SaveSheet(sheet)
+			// Send ROW_COL_UPDATED message to clients for this modified sheet
+			if globalHub != nil {
+				globalSheetManager.QueueRowColUpdate(sheet.ProjectName, sheet.ID)
+			}
 		}
 	}
 }
@@ -2128,6 +2198,13 @@ func (s *Sheet) adjustScriptTagsOnDeleteRow(deleteRow int) {
 	s.mu.Unlock()
 	for _, u := range pending {
 		globalSheetManager.UpdateScriptDependencies(u.project, u.sheet, u.cellID, u.script, u.row, u.col)
+	}
+	if len(pending) > 0 {
+		globalSheetManager.SaveSheet(s)
+	}
+	// Send ROW_COL_UPDATED message to clients if any scripts were modified in this sheet
+	if len(pending) > 0 && globalHub != nil {
+		globalSheetManager.QueueRowColUpdate(s.ProjectName, s.ID)
 	}
 	// Adjust cross-sheet references in sheets that reference this sheet
 	// Use scriptDeps to find which sheets have dependencies on this sheet
@@ -2250,6 +2327,12 @@ func (s *Sheet) adjustScriptTagsOnDeleteRow(deleteRow int) {
 			for _, u := range updList {
 				globalSheetManager.UpdateScriptDependencies(u.project, u.sheet, u.cellID, u.script, u.row, u.col)
 			}
+			globalSheetManager.SaveSheet(sheet)
+			// Send ROW_COL_UPDATED m
+			// essage to clients for this modified sheet
+			if globalHub != nil {
+				globalSheetManager.QueueRowColUpdate(sheet.ProjectName, sheet.ID)
+			}
 		}
 	}
 }
@@ -2345,6 +2428,16 @@ func (s *Sheet) adjustScriptTagsOnMoveRow(fromRow, destIndex int) {
 	s.mu.Unlock()
 	for _, u := range pending {
 		globalSheetManager.UpdateScriptDependencies(u.project, u.sheet, u.cellID, u.script, u.row, u.col)
+	}
+	if len(pending) > 0 {
+		globalSheetManager.SaveSheet(s) // persist the row move before clients fetch updated sheet
+	}
+	if len(pending) > 0 {
+		globalSheetManager.SaveSheet(s)
+	}
+	// Send ROW_COL_UPDATED message to clients if any scripts were modified in this sheet
+	if len(pending) > 0 && globalHub != nil {
+		globalSheetManager.QueueRowColUpdate(s.ProjectName, s.ID)
 	}
 	// Adjust cross-sheet references in sheets that reference this sheet
 	// Use scriptDeps to find which sheets have dependencies on this sheet
@@ -2479,6 +2572,11 @@ func (s *Sheet) adjustScriptTagsOnMoveRow(fromRow, destIndex int) {
 			for _, u := range updList {
 				globalSheetManager.UpdateScriptDependencies(u.project, u.sheet, u.cellID, u.script, u.row, u.col)
 			}
+			globalSheetManager.SaveSheet(sheet) // persist the row move before clients fetch updated sheet
+			// Send ROW_COL_UPDATED message to clients for this modified sheet
+			if globalHub != nil {
+				globalSheetManager.QueueRowColUpdate(sheet.ProjectName, sheet.ID)
+			}
 		}
 	}
 }
@@ -2544,6 +2642,13 @@ func (s *Sheet) adjustScriptTagsOnInsertCol(insertIdx int) {
 	s.mu.Unlock()
 	for _, u := range pending {
 		globalSheetManager.UpdateScriptDependencies(u.project, u.sheet, u.cellID, u.script, u.row, u.col)
+	}
+	if len(pending) > 0 {
+		globalSheetManager.SaveSheet(s) // persist the column insert before clients fetch updated sheet
+	}
+	// Send ROW_COL_UPDATED message to clients if any scripts were modified in this sheet
+	if len(pending) > 0 && globalHub != nil {
+		globalSheetManager.QueueRowColUpdate(s.ProjectName, s.ID)
 	}
 	// Adjust cross-sheet references in sheets that reference this sheet
 	// Use scriptDeps to find which sheets have dependencies on this sheet
@@ -2648,6 +2753,11 @@ func (s *Sheet) adjustScriptTagsOnInsertCol(insertIdx int) {
 			for _, u := range updList {
 				globalSheetManager.UpdateScriptDependencies(u.project, u.sheet, u.cellID, u.script, u.row, u.col)
 			}
+			globalSheetManager.SaveSheet(sheet) // persist the column insert before clients fetch updated sheet
+			// Send ROW_COL_UPDATED message to clients for this modified sheet
+			if globalHub != nil {
+				globalSheetManager.QueueRowColUpdate(sheet.ProjectName, sheet.ID)
+			}
 		}
 	}
 }
@@ -2739,6 +2849,13 @@ func (s *Sheet) adjustScriptTagsOnDeleteCol(deleteIdx int) {
 	s.mu.Unlock()
 	for _, u := range pending {
 		globalSheetManager.UpdateScriptDependencies(u.project, u.sheet, u.cellID, u.script, u.row, u.col)
+	}
+	if len(pending) > 0 {
+		globalSheetManager.SaveSheet(s) // persist the column delete before clients fetch updated sheet
+	}
+	// Send ROW_COL_UPDATED message to clients if any scripts were modified in this sheet
+	if len(pending) > 0 && globalHub != nil {
+		globalSheetManager.QueueRowColUpdate(s.ProjectName, s.ID)
 	}
 	// Adjust cross-sheet references in sheets that reference this sheet
 	// Use scriptDeps to find which sheets have dependencies on this sheet
@@ -2869,6 +2986,11 @@ func (s *Sheet) adjustScriptTagsOnDeleteCol(deleteIdx int) {
 			for _, u := range updList {
 				globalSheetManager.UpdateScriptDependencies(u.project, u.sheet, u.cellID, u.script, u.row, u.col)
 			}
+			globalSheetManager.SaveSheet(sheet) // persist the column delete before clients fetch updated sheet
+			// Send ROW_COL_UPDATED message to clients for this modified sheet
+			if globalHub != nil {
+				globalSheetManager.QueueRowColUpdate(sheet.ProjectName, sheet.ID)
+			}
 		}
 	}
 }
@@ -2981,6 +3103,13 @@ func (s *Sheet) adjustScriptTagsOnMoveCol(fromIdx, destIdx int) {
 	s.mu.Unlock()
 	for _, u := range pending {
 		globalSheetManager.UpdateScriptDependencies(u.project, u.sheet, u.cellID, u.script, u.row, u.col)
+	}
+	if len(pending) > 0 {
+		globalSheetManager.SaveSheet(s) // persist the column move before clients fetch updated sheet
+	}
+	// Send ROW_COL_UPDATED message to clients if any scripts were modified in this sheet
+	if len(pending) > 0 && globalHub != nil {
+		globalSheetManager.QueueRowColUpdate(s.ProjectName, s.ID)
 	}
 	// Adjust cross-sheet references in sheets that reference this sheet
 	// Use scriptDeps to find which sheets have dependencies on this sheet
@@ -3131,6 +3260,11 @@ func (s *Sheet) adjustScriptTagsOnMoveCol(fromIdx, destIdx int) {
 			sheet.mu.RUnlock()
 			for _, u := range updList {
 				globalSheetManager.UpdateScriptDependencies(u.project, u.sheet, u.cellID, u.script, u.row, u.col)
+			}
+			globalSheetManager.SaveSheet(sheet) // persist the column move before clients fetch updated sheet
+			// Send ROW_COL_UPDATED message to clients for this modified sheet
+			if globalHub != nil {
+				globalSheetManager.QueueRowColUpdate(sheet.ProjectName, sheet.ID)
 			}
 		}
 	}

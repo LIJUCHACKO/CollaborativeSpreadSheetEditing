@@ -101,7 +101,8 @@ export function apiUrl(path) {
   const raw = import.meta?.env?.VITE_BACKEND_HOST;
   let base;
   if (!raw || raw.trim() === '') {
-    base = 'http://localhost:8082';
+    const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
+    base = `http://${host}:8082`;
   } else if (raw.startsWith('http://') || raw.startsWith('https://')) {
     base = raw.replace(/\/$/, '');
   } else {

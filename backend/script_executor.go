@@ -8,38 +8,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 )
-
-// Script Dependency Tracking System
-//
-// This system maintains a mapping between sheets and the scripts that depend on them.
-// When a cell value changes, you can query which scripts need to be re-executed.
-
-//
-// Key Components:
-// 1. ScriptIdentifier: Uniquely identifies a script and stores the referenced range
-// 2. Dependency Map (in SheetManager): Maps sheet references to scripts that depend on them
-//    - Example: "project1/sheet1" -> [{ScriptProjectName: "project1", ScriptSheetID: "sheet1", ScriptCellID: "B5cellid", ReferencedRange: "A2"}, ...]
-//
-// Usage Example:
-//   // When a script is modified:
-//   globalSheetManager.UpdateScriptDependencies(projectName, sheetID, cellID, script)
-//
-//   // When a cell value changes, get scripts that need re-execution:
-//   dependents := globalSheetManager.GetDependentScripts(projectName, sheetID, row, col)
-//   for _, dep := range dependents {
-//       ExecuteCellScript(dep.ProjectName, dep.SheetID, depRow, depCol)
-//   }
-//
-//   // Or use the helper function to execute all dependents:
-//   ExecuteDependentScripts(projectName, sheetID, row, col)
-//
-// The system automatically updates dependencies when:
-//   - Scripts are modified (via SetCellScript)
-//   - Projects are renamed (via RenameProjectInDependencies)
-//   - Sheets are loaded from disk (via rebuildScriptDependencies)
-//   - Projects are renamed (via RenameProjectInDependencies)
-//   - Sheets are loaded from disk (via rebuildScriptDependencies)
 
 // ScriptIdentifier represents a unique script location
 type ScriptIdentifier struct {
@@ -381,18 +351,20 @@ func (sm *SheetManager) RenameProjectInDependencies(oldProject, newProject strin
 		// Save the sheet if any scripts were modified
 		if modified {
 			sm.SaveSheet(sheet)
-
+			globalSheetManager.QueueRowColUpdate(sheet.ProjectName, sheet.ID)
 			// Send ROW_COL_UPDATED message to clients if sheet is opened
-			if globalHub != nil {
-				payload, _ := json.Marshal(sheet.SnapshotForClient())
-				globalHub.broadcast <- &Message{
-					Type:    "ROW_COL_UPDATED",
-					SheetID: sheet.ID,
-					Project: sheet.ProjectName,
-					Payload: payload,
-					User:    "system", // System update for project rename
+			/*
+				if globalHub != nil {
+					payload, _ := json.Marshal(sheet.SnapshotForClient())
+					globalHub.broadcast <- &Message{
+						Type:    "ROW_COL_UPDATED",
+						SheetID: sheet.ID,
+						Project: sheet.ProjectName,
+						Payload: payload,
+						User:    "system", // System update for project rename
+					}
 				}
-			}
+			*/
 		}
 	}
 }
@@ -533,7 +505,7 @@ func ExecuteCellScript(projectName, sheetID, row, col string) {
 		WriteScriptOutputToCells(projectName, sheetID, row, col, true)
 		return
 	}
-	// Execute the script and update the cell value without logging EDIT_CELL
+	// Execute the script and update the cell value
 	ep := embeddedPy
 	if ep == nil {
 		// Store init error in the cell value
@@ -765,23 +737,46 @@ func ExecuteCellScript(projectName, sheetID, row, col string) {
 	WriteScriptOutputToCells(projectName, sheetID, row, col, true)
 }
 
-// WriteScriptOutputToCells writes the ScriptOutput to cell values
-// Handles single values, arrays, and matrices based on the cell's span configuration
-// triggernext will trigger script execution which depends on the cells being updated
-// broadcastRowColUpdated sends a ROW_COL_UPDATED message for the given sheet
-func broadcastRowColUpdated(s *Sheet, projectName, sheetID string) {
-	if globalHub != nil {
-		//fmt.Println("Broadcasting ROW_COL_UPDATED for", projectName, sheetID, "after script execution")
-		s.mu.RLock()
-		payload, _ := json.Marshal(s.SnapshotForClient())
-		s.mu.RUnlock()
-		globalHub.broadcast <- &Message{
-			Type:    "ROW_COL_UPDATED",
-			SheetID: sheetID,
-			Project: projectName,
-			Payload: payload,
-			User:    "system",
+// addMergedAuditEntries adds audit entries for cell changes, merging with existing entries from the same user within 24 hours
+func addMergedAuditEntries(s *Sheet, cellChanges map[string]struct {
+	rowNum int
+	colStr string
+	oldVal string
+	newVal string
+}) {
+	now := time.Now()
+	for _, change := range cellChanges {
+		// Find the latest matching edit for this cell by user "system"
+		prevIdx := -1
+		for i := len(s.AuditLog) - 1; i >= 0; i-- {
+			entry := s.AuditLog[i]
+			if entry.Action == "EDIT_CELL" && entry.Row1 == change.rowNum && entry.Col1 == change.colStr {
+				if entry.User == "system" && !entry.ChangeReversed {
+					prevIdx = i
+				}
+				break
+			}
 		}
+
+		oldValForNew := change.oldVal
+		if prevIdx >= 0 {
+			// Only merge if previous log is within 24 hours
+			if time.Since(s.AuditLog[prevIdx].Timestamp) < 24*time.Hour {
+				oldValForNew = s.AuditLog[prevIdx].OldValue
+				s.AuditLog = append(s.AuditLog[:prevIdx], s.AuditLog[prevIdx+1:]...)
+			}
+		}
+
+		s.AuditLog = append(s.AuditLog, AuditEntry{
+			Timestamp:      now,
+			User:           "system",
+			Action:         "EDIT_CELL",
+			Row1:           change.rowNum,
+			Col1:           change.colStr,
+			OldValue:       oldValForNew,
+			NewValue:       change.newVal,
+			ChangeReversed: false,
+		})
 	}
 }
 
@@ -827,11 +822,17 @@ func WriteScriptOutputToCells(projectName, sheetID, row, col string, triggernext
 
 	// Prepare area: reset previous locked cells and validate target span area
 	lockedbyScriptAt := "script-span " + cur.CellID
+
+	// Capture all previous values before clearing (map key: "row-col")
+	previousValues := make(map[string]string)
+	previousValues[row+"-"+col] = cur.Value
+
 	// Resetting value and unlock previously locked cells belonging to this script-span
 	cur.Value = ""
 	for rKey, rowMap := range s.Data {
 		for cKey, cell := range rowMap {
 			if cell.Locked && cell.LockedBy == lockedbyScriptAt {
+				previousValues[rKey+"-"+cKey] = cell.Value
 				cell.Value = ""
 				cell.Locked = false
 				cell.LockedBy = ""
@@ -898,10 +899,38 @@ func WriteScriptOutputToCells(projectName, sheetID, row, col string, triggernext
 	// Persist any updates to the top-left cell
 	s.Data[row][col] = cur
 
+	// Track all cell changes for audit logging - map key: "row-col"
+	cellChanges := make(map[string]struct {
+		rowNum int
+		colStr string
+		oldVal string
+		newVal string
+	})
+
+	// Helper to record a cell change
+	recordChange := func(rKey, cLabel, oldValue, newValue string) {
+		if oldValue != newValue {
+			key := rKey + "-" + cLabel
+			cellChanges[key] = struct {
+				rowNum int
+				colStr string
+				oldVal string
+				newVal string
+			}{
+				rowNum: atoiSafe(rKey),
+				colStr: cLabel,
+				oldVal: oldValue,
+				newVal: newValue,
+			}
+		}
+	}
+
 	// If no span, simply set value
 	if rSpan == 1 && cSpan == 1 {
+		oldVal := previousValues[row+"-"+col]
 		cur.Value = newVal
 		s.Data[row][col] = cur
+		recordChange(row, col, oldVal, newVal)
 		s.mu.Unlock()
 		if triggernext {
 			globalSheetManager.CellsModifiedByScriptQueueMu.Lock()
@@ -909,8 +938,11 @@ func WriteScriptOutputToCells(projectName, sheetID, row, col string, triggernext
 			globalSheetManager.CellsModifiedByScriptQueueMu.Unlock()
 		}
 
+		// Add merged audit entries before save
+		addMergedAuditEntries(s, cellChanges)
 		globalSheetManager.SaveSheet(s)
-		broadcastRowColUpdated(s, projectName, sheetID)
+		//broadcastRowColUpdated(s, projectName, sheetID)
+		globalSheetManager.QueueRowColUpdate(s.ProjectName, s.ID)
 		return
 	}
 
@@ -924,11 +956,15 @@ func WriteScriptOutputToCells(projectName, sheetID, row, col string, triggernext
 		tryVal := normalizePythonListToJSON(newVal)
 		if err2 := json.Unmarshal([]byte(tryVal), &testInterface); err2 != nil {
 			// Not parseable, treat as plain string
+			oldVal := previousValues[row+"-"+col]
 			cur.Value = newVal
 			s.Data[row][col] = cur
+			recordChange(row, col, oldVal, newVal)
 			s.mu.Unlock()
+			addMergedAuditEntries(s, cellChanges)
 			globalSheetManager.SaveSheet(s)
-			broadcastRowColUpdated(s, projectName, sheetID)
+			//broadcastRowColUpdated(s, projectName, sheetID)
+			globalSheetManager.QueueRowColUpdate(s.ProjectName, s.ID)
 			return
 		}
 		// Use normalized value for subsequent parsing
@@ -939,8 +975,10 @@ func WriteScriptOutputToCells(projectName, sheetID, row, col string, triggernext
 	switch testInterface.(type) {
 	case string, float64, bool, nil:
 		// Simple value, set to base cell
+		oldVal := previousValues[row+"-"+col]
 		cur.Value = newVal
 		s.Data[row][col] = cur
+		recordChange(row, col, oldVal, newVal)
 		s.mu.Unlock()
 		if triggernext {
 			globalSheetManager.CellsModifiedByScriptQueueMu.Lock()
@@ -948,8 +986,10 @@ func WriteScriptOutputToCells(projectName, sheetID, row, col string, triggernext
 			globalSheetManager.CellsModifiedByScriptQueueMu.Unlock()
 		}
 
+		addMergedAuditEntries(s, cellChanges)
 		globalSheetManager.SaveSheet(s)
-		broadcastRowColUpdated(s, projectName, sheetID)
+		//broadcastRowColUpdated(s, projectName, sheetID)
+		globalSheetManager.QueueRowColUpdate(s.ProjectName, s.ID)
 		return
 	}
 
@@ -990,11 +1030,15 @@ func WriteScriptOutputToCells(projectName, sheetID, row, col string, triggernext
 	if MatrixParsed {
 		// if matrix dimensions is more than ScriptOutput_RowSpan x ScriptOutput_ColSpan, we will simply fill cur.Value = scriptOutput
 		if len(matrix) > rSpan || (len(matrix) > 0 && len(matrix[0]) > cSpan) {
+			oldVal := previousValues[row+"-"+col]
 			cur.Value = cur.ScriptOutput
 			s.Data[row][col] = cur
+			recordChange(row, col, oldVal, cur.ScriptOutput)
 			s.mu.Unlock()
+			addMergedAuditEntries(s, cellChanges)
 			globalSheetManager.SaveSheet(s)
-			broadcastRowColUpdated(s, projectName, sheetID)
+			//broadcastRowColUpdated(s, projectName, sheetID)
+			globalSheetManager.QueueRowColUpdate(s.ProjectName, s.ID)
 			return
 		}
 		//else
@@ -1011,11 +1055,12 @@ func WriteScriptOutputToCells(projectName, sheetID, row, col string, triggernext
 					val = matrix[dr][dc]
 				}
 				c := s.Data[rKey][cLabel]
+				oldVal := previousValues[rKey+"-"+cLabel]
 				c.Value = val
 				s.Data[rKey][cLabel] = c
+				recordChange(rKey, cLabel, oldVal, val)
 				if triggernext {
 					CellsModified = append(CellsModified, CellIdentifier{projectName, sheetID, rKey, cLabel})
-
 				}
 			}
 		}
@@ -1024,8 +1069,10 @@ func WriteScriptOutputToCells(projectName, sheetID, row, col string, triggernext
 		globalSheetManager.CellsModifiedByScriptQueueMu.Lock()
 		globalSheetManager.CellsModifiedByScriptQueue = append(globalSheetManager.CellsModifiedByScriptQueue, CellsModified...)
 		globalSheetManager.CellsModifiedByScriptQueueMu.Unlock()
+		addMergedAuditEntries(s, cellChanges)
 		globalSheetManager.SaveSheet(s)
-		broadcastRowColUpdated(s, projectName, sheetID)
+		//broadcastRowColUpdated(s, projectName, sheetID)
+		globalSheetManager.QueueRowColUpdate(s.ProjectName, s.ID)
 		return
 	}
 
@@ -1046,31 +1093,36 @@ func WriteScriptOutputToCells(projectName, sheetID, row, col string, triggernext
 					// Fill row left to right
 					cLabel := indexToColLabel(baseIdx + i)
 					c := s.Data[row][cLabel]
-					c.Value = fmt.Sprint(v)
+					oldVal := previousValues[row+"-"+cLabel]
+					valStr := fmt.Sprint(v)
+					c.Value = valStr
 					s.Data[row][cLabel] = c
+					recordChange(row, cLabel, oldVal, valStr)
 					if triggernext {
 						CellsModified = append(CellsModified, CellIdentifier{projectName, sheetID, row, cLabel})
-
 					}
 
 				} else {
 					// Fill column top to bottom
 					rKey := itoa(baseRow + i)
 					c := s.Data[rKey][col]
-					c.Value = fmt.Sprint(v)
+					oldVal := previousValues[rKey+"-"+col]
+					valStr := fmt.Sprint(v)
+					c.Value = valStr
 					s.Data[rKey][col] = c
+					recordChange(rKey, col, oldVal, valStr)
 					if triggernext {
 						CellsModified = append(CellsModified, CellIdentifier{projectName, sheetID, rKey, col})
-
 					}
 				}
 			}
 		} else {
+			oldVal := previousValues[row+"-"+col]
 			cur.Value = cur.ScriptOutput
 			s.Data[row][col] = cur
+			recordChange(row, col, oldVal, cur.ScriptOutput)
 			if triggernext {
 				CellsModified = append(CellsModified, CellIdentifier{projectName, sheetID, row, col})
-
 			}
 		}
 	}
@@ -1078,9 +1130,11 @@ func WriteScriptOutputToCells(projectName, sheetID, row, col string, triggernext
 	globalSheetManager.CellsModifiedByScriptQueueMu.Lock()
 	globalSheetManager.CellsModifiedByScriptQueue = append(globalSheetManager.CellsModifiedByScriptQueue, CellsModified...)
 	globalSheetManager.CellsModifiedByScriptQueueMu.Unlock()
+	addMergedAuditEntries(s, cellChanges)
 	globalSheetManager.SaveSheet(s)
 
-	broadcastRowColUpdated(s, projectName, sheetID)
+	//broadcastRowColUpdated(s, projectName, sheetID)
+	globalSheetManager.QueueRowColUpdate(s.ProjectName, s.ID)
 }
 
 // ExecuteDependentScripts executes all scripts that depend on the given cell
