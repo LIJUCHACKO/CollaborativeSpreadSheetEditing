@@ -55,6 +55,9 @@ func (h *Hub) run() {
 			// In a real app, this should be handled safely with a mutex on the sheet
 			sheet := globalSheetManager.GetSheetBy(client.sheetID, client.projectName)
 			if sheet != nil {
+				// Clean up zombie script locks before sending sheet to client
+				removeLocksWithMissingCellID(sheet)
+
 				payload, _ := json.Marshal(sheet.SnapshotForClient())
 
 				msg := &Message{

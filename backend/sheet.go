@@ -37,18 +37,19 @@ func ensureDataDir() error {
 }
 
 type Cell struct {
-	Value                string `json:"value"`
-	ScriptOutput         string `json:"script_output,omitempty"`
-	ScriptOutput_RowSpan int    `json:"script_output_row_span,omitempty"`
-	ScriptOutput_ColSpan int    `json:"script_output_col_span,omitempty"`
-	Script               string `json:"script,omitempty"` //python script
-	User                 string `json:"user,omitempty"`   // Last edited by
-	CellID               string `json:"cell_id,omitempty"`
-	Locked               bool   `json:"locked,omitempty"`
-	LockedBy             string `json:"locked_by,omitempty"`
-	Background           string `json:"background,omitempty"`
-	Bold                 bool   `json:"bold,omitempty"`
-	Italic               bool   `json:"italic,omitempty"`
+	Value                   string `json:"value,omitempty"`
+	Value_FromNonSelfScript string `json:"value_from_non_self_script,omitempty"` // used to track value changes from scripts other than the cell's own script for audit purposes
+	ScriptOutput            string `json:"script_output,omitempty"`
+	ScriptOutput_RowSpan    int    `json:"script_output_row_span,omitempty"`
+	ScriptOutput_ColSpan    int    `json:"script_output_col_span,omitempty"`
+	Script                  string `json:"script,omitempty"` //python script
+	User                    string `json:"user,omitempty"`   // Last edited by
+	CellID                  string `json:"cell_id,omitempty"`
+	Locked                  bool   `json:"locked,omitempty"`
+	LockedBy                string `json:"locked_by,omitempty"`
+	Background              string `json:"background,omitempty"`
+	Bold                    bool   `json:"bold,omitempty"`
+	Italic                  bool   `json:"italic,omitempty"`
 }
 
 type AuditEntry struct {
@@ -291,7 +292,7 @@ func (sm *SheetManager) flusher() {
 					sm.CellsModifiedManuallyQueue = sm.CellsModifiedManuallyQueue[1:]
 					sm.CellsModifiedManuallyQueueMu.Unlock()
 					//fmt.Println("Executing scripts for manually modified cell:", toExec)
-					ExecuteDependentScripts(toExec.ProjectName, toExec.sheetID, toExec.row, toExec.col, true)
+					ExecuteDependentScripts(toExec.ProjectName, toExec.sheetID, toExec.row, toExec.col)
 					continue
 				} else {
 					sm.CellsModifiedManuallyQueueMu.Unlock()
@@ -302,7 +303,7 @@ func (sm *SheetManager) flusher() {
 				sm.CellsModifiedByScriptQueue = sm.CellsModifiedByScriptQueue[1:]
 				sm.CellsModifiedByScriptQueueMu.Unlock()
 				//fmt.Println("Executing scripts for script modified cell:", toExec)
-				ExecuteDependentScripts(toExec.ProjectName, toExec.sheetID, toExec.row, toExec.col, false)
+				ExecuteDependentScripts(toExec.ProjectName, toExec.sheetID, toExec.row, toExec.col)
 				continue
 			}
 

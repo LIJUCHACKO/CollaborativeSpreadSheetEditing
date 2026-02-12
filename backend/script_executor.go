@@ -128,6 +128,20 @@ func (sm *SheetManager) UpdateScriptDependencies(scriptProjectName, scriptSheetI
 
 	// If script is empty, we're done (dependencies removed)
 	if strings.TrimSpace(script) == "" {
+		s := globalSheetManager.GetSheetBy(scriptSheetID, scriptProjectName)
+		lockedbyScriptAt := "script-span " + scriptCellID
+		for rKey, rowMap := range s.Data {
+			for cKey, cell := range rowMap {
+				if cell.Locked && cell.LockedBy == lockedbyScriptAt {
+					cell.Value = ""
+					cell.Value_FromNonSelfScript = ""
+					cell.Locked = false
+					cell.LockedBy = ""
+					s.Data[rKey][cKey] = cell
+				}
+			}
+		}
+		globalSheetManager.SaveSheet(s)
 		return
 	}
 
@@ -135,6 +149,7 @@ func (sm *SheetManager) UpdateScriptDependencies(scriptProjectName, scriptSheetI
 	deps := ExtractScriptDependencies(script, scriptProjectName, scriptSheetID)
 	if len(deps) == 0 {
 		// No explicit references found; add self cell as dependency
+		//fmt.Println("No explicit references found in script, adding self reference for cell ", scriptCellID)
 		if strings.TrimSpace(colLabel) != "" && strings.TrimSpace(rowLabel) != "" {
 			deps = append(deps, DependencyInfo{
 				Project: scriptProjectName,
@@ -158,7 +173,7 @@ func (sm *SheetManager) UpdateScriptDependencies(scriptProjectName, scriptSheetI
 // GetDependentScripts returns all scripts that depend on the given cell
 // Checks if the cell matches any exact references or falls within range references
 // If a script in the same cell depends on itself, it will be placed first in the result
-func (sm *SheetManager) GetDependentScripts(projectName, sheetID, row, col string, skipSelf bool) []ScriptIdentifier {
+func (sm *SheetManager) GetDependentScripts(projectName, sheetID, row, col string) []ScriptIdentifier {
 	sm.scriptDepsMu.RLock()
 	defer sm.scriptDepsMu.RUnlock()
 
@@ -186,7 +201,7 @@ func (sm *SheetManager) GetDependentScripts(projectName, sheetID, row, col strin
 		if seen[scriptKey] {
 			continue
 		}
-
+		//fmt.Println("Checking script at ", si.ScriptProjectName, "/", si.ScriptSheetID, " cell ", si.ScriptCellID, " with reference ", si.ReferencedRange, " against changed cell ", projectName, "/", sheetID, " cell ", col+row)
 		refRange := si.ReferencedRange
 		matches := false
 
@@ -250,10 +265,9 @@ func (sm *SheetManager) GetDependentScripts(projectName, sheetID, row, col strin
 	}
 
 	// If there's a script in the same cell, prepend it to the result
-	if sameCell != nil && !skipSelf {
+	if sameCell != nil {
 		result = append([]ScriptIdentifier{*sameCell}, result...)
 	}
-
 	return result
 }
 
@@ -443,6 +457,74 @@ func ExecuteCellScriptonChange(projectName, sheetID, row, col string) {
 	}
 }
 
+// CheckIfScriptReferencesSelf checks if a script references its own cell
+// Returns true if the script depends on the cell where it's located
+func CheckIfScriptReferencesSelf(script, projectName, sheetID, cellID string) bool {
+	deps := ExtractScriptDependencies(script, projectName, sheetID)
+	for _, dep := range deps {
+		if dep.Project == projectName && dep.Sheet == sheetID {
+			// Check if the reference matches the cell ID
+			if strings.Contains(dep.Range, ":") {
+				// Range reference - check if cellID falls within range
+				rangeParts := strings.Split(dep.Range, ":")
+				if len(rangeParts) == 2 {
+					startCell := rangeParts[0]
+					endCell := rangeParts[1]
+
+					// Parse cellID
+					var cellCol string
+					var cellRow int
+					for i, ch := range cellID {
+						if ch >= '0' && ch <= '9' {
+							cellCol = cellID[:i]
+							cellRow = atoiSafe(cellID[i:])
+							break
+						}
+					}
+
+					// Parse start cell
+					var startCol string
+					var startRow int
+					for i, ch := range startCell {
+						if ch >= '0' && ch <= '9' {
+							startCol = startCell[:i]
+							startRow = atoiSafe(startCell[i:])
+							break
+						}
+					}
+
+					// Parse end cell
+					var endCol string
+					var endRow int
+					for i, ch := range endCell {
+						if ch >= '0' && ch <= '9' {
+							endCol = endCell[:i]
+							endRow = atoiSafe(endCell[i:])
+							break
+						}
+					}
+
+					cellColIdx := colLabelToIndex(cellCol)
+					startColIdx := colLabelToIndex(startCol)
+					endColIdx := colLabelToIndex(endCol)
+
+					// Check if cell is within range
+					if cellRow >= startRow && cellRow <= endRow &&
+						cellColIdx >= startColIdx && cellColIdx <= endColIdx {
+						return true
+					}
+				}
+			} else {
+				// Single cell reference
+				if dep.Range == cellID {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 // ExecuteCellScript executes a Python script in a cell and updates the cell value
 // with the script output. It handles tag replacement (e.g., {{A2}} or {{A2:B3}}),
 // script execution, and populates cell spans if defined.
@@ -494,15 +576,17 @@ func ExecuteCellScript(projectName, sheetID, row, col string) {
 	// Mark as executed for the duration of this call
 	globalSheetManager.ScriptsExecuted = append(globalSheetManager.ScriptsExecuted, ident)
 	globalSheetManager.ScriptsExecutedMu.Unlock()
-
+	//fmt.Println("executing cell script:", ident)
 	if strings.TrimSpace(script) == "" {
 		s.mu.Lock()
 		cur := s.Data[row][col]
 		cur.ScriptOutput = ""
+		cur.ScriptOutput_RowSpan = 1
+		cur.ScriptOutput_ColSpan = 1
 		s.Data[row][col] = cur
 		s.mu.Unlock()
 		globalSheetManager.SaveSheet(s)
-		WriteScriptOutputToCells(projectName, sheetID, row, col, true)
+		WriteScriptOutputToCells(projectName, sheetID, row, col, true, false)
 		return
 	}
 	// Execute the script and update the cell value
@@ -515,6 +599,8 @@ func ExecuteCellScript(projectName, sheetID, row, col string) {
 		} else {
 			cur.Value = "Error: Embedded Python not initialized"
 		}
+		cur.ScriptOutput_RowSpan = 1
+		cur.ScriptOutput_ColSpan = 1
 		s.mu.Lock()
 		s.Data[row][col] = cur
 		s.mu.Unlock()
@@ -638,8 +724,16 @@ func ExecuteCellScript(projectName, sheetID, row, col string) {
 			defer s.mu.RUnlock()
 			if rowData, ok := s.Data[startRow]; ok {
 				if cell, ok := rowData[startCol]; ok {
-					// Return the cell value - numbers unquoted; strings properly escaped
-					val := cell.Value
+					// Check if this reference is to the same cell as the script location
+					refCellID := startCol + startRow
+					var val string
+					if refCellID == cellID {
+						// Self-reference: use Value_FromNonSelfScript
+						val = cell.Value_FromNonSelfScript
+					} else {
+						// Different cell: use Value
+						val = cell.Value
+					}
 					if val == "" {
 						return `""`
 					}
@@ -683,7 +777,15 @@ func ExecuteCellScript(projectName, sheetID, row, col string) {
 				val := ""
 				if rowData, ok := s.Data[rowKey]; ok {
 					if cell, ok := rowData[colLabel]; ok {
-						val = cell.Value
+						// Check if this cell in the range is the same as the script location
+						refCellID := colLabel + rowKey
+						if refCellID == cellID {
+							// Self-reference: use Value_FromNonSelfScript
+							val = cell.Value_FromNonSelfScript
+						} else {
+							// Different cell: use Value
+							val = cell.Value
+						}
 					}
 				}
 				// Numbers unquoted; strings properly escaped, empty as ""
@@ -705,9 +807,12 @@ func ExecuteCellScript(projectName, sheetID, row, col string) {
 		s.mu.Lock()
 		cur := s.Data[row][col]
 		cur.Value = "Error: " + err.Error()
+		cur.ScriptOutput_RowSpan = 1
+		cur.ScriptOutput_ColSpan = 1
 		s.Data[row][col] = cur
 		s.mu.Unlock()
 		globalSheetManager.SaveSheet(s)
+		WriteScriptOutputToCells(projectName, sheetID, row, col, true, true)
 		return
 	}
 	var stdout, stderr bytes.Buffer
@@ -733,8 +838,11 @@ func ExecuteCellScript(projectName, sheetID, row, col string) {
 	s.mu.Unlock()
 	globalSheetManager.SaveSheet(s)
 
+	// Check if script references its own cell
+	isSelfReferencing := CheckIfScriptReferencesSelf(script, projectName, sheetID, cellID)
+
 	// Call second function to write output to cell values
-	WriteScriptOutputToCells(projectName, sheetID, row, col, true)
+	WriteScriptOutputToCells(projectName, sheetID, row, col, true, isSelfReferencing)
 }
 
 // addMergedAuditEntries adds audit entries for cell changes, merging with existing entries from the same user within 24 hours
@@ -781,7 +889,7 @@ func addMergedAuditEntries(s *Sheet, cellChanges map[string]struct {
 }
 
 // This function causes mutex lockout when called concurrently (observed in tests) - needs refactor to avoid nested locks and long lock durations
-func WriteScriptOutputToCells(projectName, sheetID, row, col string, triggernext bool) {
+func WriteScriptOutputToCells(projectName, sheetID, row, col string, triggernext bool, isSelfReferencing bool) {
 	s := globalSheetManager.GetSheetBy(sheetID, projectName)
 	if s == nil {
 		return
@@ -829,11 +937,15 @@ func WriteScriptOutputToCells(projectName, sheetID, row, col string, triggernext
 
 	// Resetting value and unlock previously locked cells belonging to this script-span
 	cur.Value = ""
+	if !isSelfReferencing {
+		cur.Value_FromNonSelfScript = ""
+	}
 	for rKey, rowMap := range s.Data {
 		for cKey, cell := range rowMap {
 			if cell.Locked && cell.LockedBy == lockedbyScriptAt {
 				previousValues[rKey+"-"+cKey] = cell.Value
 				cell.Value = ""
+				cell.Value_FromNonSelfScript = ""
 				cell.Locked = false
 				cell.LockedBy = ""
 				s.Data[rKey][cKey] = cell
@@ -928,9 +1040,16 @@ func WriteScriptOutputToCells(projectName, sheetID, row, col string, triggernext
 	// If no span, simply set value
 	if rSpan == 1 && cSpan == 1 {
 		oldVal := previousValues[row+"-"+col]
-		cur.Value = newVal
+		if isSelfReferencing {
+			// Script references itself - use Value_FromNonSelfScript in the script
+			cur.Value = cur.Value_FromNonSelfScript
+		} else {
+			// Script doesn't reference itself - update both Value and Value_FromNonSelfScript
+			cur.Value = newVal
+			cur.Value_FromNonSelfScript = newVal
+		}
 		s.Data[row][col] = cur
-		recordChange(row, col, oldVal, newVal)
+		recordChange(row, col, oldVal, cur.Value)
 		s.mu.Unlock()
 		if triggernext {
 			globalSheetManager.CellsModifiedByScriptQueueMu.Lock()
@@ -957,9 +1076,14 @@ func WriteScriptOutputToCells(projectName, sheetID, row, col string, triggernext
 		if err2 := json.Unmarshal([]byte(tryVal), &testInterface); err2 != nil {
 			// Not parseable, treat as plain string
 			oldVal := previousValues[row+"-"+col]
-			cur.Value = newVal
+			if isSelfReferencing {
+				cur.Value = cur.Value_FromNonSelfScript
+			} else {
+				cur.Value = newVal
+				cur.Value_FromNonSelfScript = newVal
+			}
 			s.Data[row][col] = cur
-			recordChange(row, col, oldVal, newVal)
+			recordChange(row, col, oldVal, cur.Value)
 			s.mu.Unlock()
 			addMergedAuditEntries(s, cellChanges)
 			globalSheetManager.SaveSheet(s)
@@ -976,9 +1100,14 @@ func WriteScriptOutputToCells(projectName, sheetID, row, col string, triggernext
 	case string, float64, bool, nil:
 		// Simple value, set to base cell
 		oldVal := previousValues[row+"-"+col]
-		cur.Value = newVal
+		if isSelfReferencing {
+			cur.Value = cur.Value_FromNonSelfScript
+		} else {
+			cur.Value = newVal
+			cur.Value_FromNonSelfScript = newVal
+		}
 		s.Data[row][col] = cur
-		recordChange(row, col, oldVal, newVal)
+		recordChange(row, col, oldVal, cur.Value)
 		s.mu.Unlock()
 		if triggernext {
 			globalSheetManager.CellsModifiedByScriptQueueMu.Lock()
@@ -991,9 +1120,7 @@ func WriteScriptOutputToCells(projectName, sheetID, row, col string, triggernext
 		//broadcastRowColUpdated(s, projectName, sheetID)
 		globalSheetManager.QueueRowColUpdate(s.ProjectName, s.ID)
 		return
-	}
-
-	// handling matrix type [[1,2],[3,4]]
+	} // handling matrix type [[1,2],[3,4]]
 	var matrix [][]string
 	MatrixParsed := false
 	if rSpan > 1 || cSpan > 1 {
@@ -1031,9 +1158,14 @@ func WriteScriptOutputToCells(projectName, sheetID, row, col string, triggernext
 		// if matrix dimensions is more than ScriptOutput_RowSpan x ScriptOutput_ColSpan, we will simply fill cur.Value = scriptOutput
 		if len(matrix) > rSpan || (len(matrix) > 0 && len(matrix[0]) > cSpan) {
 			oldVal := previousValues[row+"-"+col]
-			cur.Value = cur.ScriptOutput
+			if isSelfReferencing {
+				cur.Value = cur.Value_FromNonSelfScript
+			} else {
+				cur.Value = cur.ScriptOutput
+				cur.Value_FromNonSelfScript = cur.ScriptOutput
+			}
 			s.Data[row][col] = cur
-			recordChange(row, col, oldVal, cur.ScriptOutput)
+			recordChange(row, col, oldVal, cur.Value)
 			s.mu.Unlock()
 			addMergedAuditEntries(s, cellChanges)
 			globalSheetManager.SaveSheet(s)
@@ -1056,9 +1188,17 @@ func WriteScriptOutputToCells(projectName, sheetID, row, col string, triggernext
 				}
 				c := s.Data[rKey][cLabel]
 				oldVal := previousValues[rKey+"-"+cLabel]
-				c.Value = val
+				// For matrix output, cells other than the script cell are always non-self-referencing
+				if dr == 0 && dc == 0 && isSelfReferencing {
+					c.Value = c.Value_FromNonSelfScript
+				} else {
+					c.Value = val
+					if dr == 0 && dc == 0 {
+						c.Value_FromNonSelfScript = val
+					}
+				}
 				s.Data[rKey][cLabel] = c
-				recordChange(rKey, cLabel, oldVal, val)
+				recordChange(rKey, cLabel, oldVal, c.Value)
 				if triggernext {
 					CellsModified = append(CellsModified, CellIdentifier{projectName, sheetID, rKey, cLabel})
 				}
@@ -1118,9 +1258,14 @@ func WriteScriptOutputToCells(projectName, sheetID, row, col string, triggernext
 			}
 		} else {
 			oldVal := previousValues[row+"-"+col]
-			cur.Value = cur.ScriptOutput
+			if isSelfReferencing {
+				cur.Value = cur.Value_FromNonSelfScript
+			} else {
+				cur.Value = cur.ScriptOutput
+				cur.Value_FromNonSelfScript = cur.ScriptOutput
+			}
 			s.Data[row][col] = cur
-			recordChange(row, col, oldVal, cur.ScriptOutput)
+			recordChange(row, col, oldVal, cur.Value)
 			if triggernext {
 				CellsModified = append(CellsModified, CellIdentifier{projectName, sheetID, row, col})
 			}
@@ -1140,15 +1285,15 @@ func WriteScriptOutputToCells(projectName, sheetID, row, col string, triggernext
 // ExecuteDependentScripts executes all scripts that depend on the given cell
 // This should be called when a cell value is modified to trigger cascading updates
 // skipSelf prevent execution of the script in the same cell
-func ExecuteDependentScripts(projectName, sheetID, row, col string, skipSelf bool) {
+func ExecuteDependentScripts(projectName, sheetID, row, col string) {
 	// Get the cell ID for the modified cell
 	s := globalSheetManager.GetSheetBy(sheetID, projectName)
 	if s == nil {
 		return
 	}
-
+	//fmt.Println("Checking dependents for cell ", projectName, "/", sheetID, " cell ", row+col)
 	// Get all dependent scripts
-	dependents := globalSheetManager.GetDependentScripts(projectName, sheetID, row, col, skipSelf)
+	dependents := globalSheetManager.GetDependentScripts(projectName, sheetID, row, col)
 
 	// Execute each dependent script
 	for _, dep := range dependents {
@@ -1189,4 +1334,42 @@ func ExecuteCellScriptWithIdentifier(dep ScriptIdentifier) {
 		ExecuteCellScript(dep.ScriptProjectName, dep.ScriptSheetID, depRow, depCol)
 	}
 
+}
+
+// Removes zombie script locks
+func removeLocksWithMissingCellID(s *Sheet) {
+	s.mu.Lock()
+	for rKey, rowMap := range s.Data {
+		for cKey, cell := range rowMap {
+			if cell.Locked {
+				if strings.HasPrefix(cell.LockedBy, "script-span ") {
+					// Extract the script cell ID from "script-span <CellID>"
+					scriptCellID := strings.TrimPrefix(cell.LockedBy, "script-span ")
+					cellpresent := false
+					//check if the cell with this CellID exists in the sheet
+					for _, rowMap2 := range s.Data {
+						for _, cell2 := range rowMap2 {
+
+							if cell2.CellID == scriptCellID {
+								cellpresent = true
+								break
+							}
+						}
+						if cellpresent {
+							break
+						}
+					}
+					if !cellpresent { // If the cell with this CellID exists, do not remove the lock
+						cell.Locked = false
+						cell.LockedBy = ""
+						s.Data[rKey][cKey] = cell
+					}
+					// Cell exists, do not remove the lockcontinue } } // Cell does not exist, remove the lock cell.Locked = false cell.LockedBy = "" s.Data[rKey][cKey] = cell } else if strings.HasPrefix(cell.LockedBy, "script-") { // If it starts with "script-" but not "script-span", we can also remove the lock cell.Locked = false cell.LockedBy = "" s.Data[rKey][cKey] = cell} else if strings.HasPrefix(cell.LockedBy, "script-") { // If it starts with "script-" but not "script-span", we can also remove the lock cell.Locked = false cell.LockedBy = "" s.Data[rKey][cKey] = cell
+
+				}
+			}
+		}
+	}
+	s.mu.Unlock()
+	globalSheetManager.SaveSheet(s)
 }
