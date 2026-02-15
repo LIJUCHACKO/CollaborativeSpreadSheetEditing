@@ -16,9 +16,29 @@ type ScriptIdentifier struct {
 	ScriptProjectName string
 	ScriptSheetID     string
 	ScriptCellID      string
-	ReferencedRange   string // e.g., "A2" or "A2:B3"
+	ReferencedRange   string // e.g., "A2" or "A2:B3" is the cell or range that this script depends on (used for dependency tracking)
+	// projectname and sheetID in ReferencedRange are not needed because they are already captured in the key used in scriptDeps map[string][]ScriptIdentifier
 }
 
+type cellChangesstruct struct {
+	rowNum int
+	colStr string
+	oldVal string
+	newVal string
+	action string
+	user   string
+}
+
+/*
+cellChanges := make(map[string]struct {
+		rowNum int
+		colStr string
+		oldVal string
+		newVal string
+		action string
+		user   string
+	})
+*/
 // String returns the string representation of the script identifier
 func (si ScriptIdentifier) String() string {
 	return si.ScriptProjectName + "/" + si.ScriptSheetID + "/" + si.ScriptCellID
@@ -846,20 +866,15 @@ func ExecuteCellScript(projectName, sheetID, row, col string) {
 }
 
 // addMergedAuditEntries adds audit entries for cell changes, merging with existing entries from the same user within 24 hours
-func addMergedAuditEntries(s *Sheet, cellChanges map[string]struct {
-	rowNum int
-	colStr string
-	oldVal string
-	newVal string
-}) {
+func addMergedAuditEntries(s *Sheet, cellChanges map[string]cellChangesstruct) {
 	now := time.Now()
 	for _, change := range cellChanges {
 		// Find the latest matching edit for this cell by user "system"
 		prevIdx := -1
 		for i := len(s.AuditLog) - 1; i >= 0; i-- {
 			entry := s.AuditLog[i]
-			if entry.Action == "EDIT_CELL" && entry.Row1 == change.rowNum && entry.Col1 == change.colStr {
-				if entry.User == "system" && !entry.ChangeReversed {
+			if entry.Action == change.action && entry.Row1 == change.rowNum && entry.Col1 == change.colStr {
+				if entry.User == change.user && !entry.ChangeReversed {
 					prevIdx = i
 				}
 				break
@@ -877,8 +892,8 @@ func addMergedAuditEntries(s *Sheet, cellChanges map[string]struct {
 
 		s.AuditLog = append(s.AuditLog, AuditEntry{
 			Timestamp:      now,
-			User:           "system",
-			Action:         "EDIT_CELL",
+			User:           change.user,
+			Action:         change.action,
 			Row1:           change.rowNum,
 			Col1:           change.colStr,
 			OldValue:       oldValForNew,
@@ -1012,27 +1027,18 @@ func WriteScriptOutputToCells(projectName, sheetID, row, col string, triggernext
 	s.Data[row][col] = cur
 
 	// Track all cell changes for audit logging - map key: "row-col"
-	cellChanges := make(map[string]struct {
-		rowNum int
-		colStr string
-		oldVal string
-		newVal string
-	})
-
+	cellChanges := make(map[string]cellChangesstruct)
 	// Helper to record a cell change
 	recordChange := func(rKey, cLabel, oldValue, newValue string) {
 		if oldValue != newValue {
 			key := rKey + "-" + cLabel
-			cellChanges[key] = struct {
-				rowNum int
-				colStr string
-				oldVal string
-				newVal string
-			}{
+			cellChanges[key] = cellChangesstruct{
 				rowNum: atoiSafe(rKey),
 				colStr: cLabel,
 				oldVal: oldValue,
 				newVal: newValue,
+				action: "EDIT_CELL",
+				user:   "system",
 			}
 		}
 	}
@@ -1342,6 +1348,7 @@ func removeLocksWithMissingCellID(s *Sheet) {
 	for rKey, rowMap := range s.Data {
 		for cKey, cell := range rowMap {
 			if cell.Locked {
+				//identify if the lock is a script-span lock which should have a CellID reference in the LockedBy field like "script-span <CellID>"
 				if strings.HasPrefix(cell.LockedBy, "script-span ") {
 					// Extract the script cell ID from "script-span <CellID>"
 					scriptCellID := strings.TrimPrefix(cell.LockedBy, "script-span ")

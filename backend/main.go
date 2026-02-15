@@ -821,6 +821,7 @@ func main() {
 			}
 			// Update script dependencies for the renamed project
 			globalSheetManager.RenameProjectInDependencies(req.OldName, req.NewName)
+			globalSheetManager.RenameProjectInOptionsRangeDependencies(req.OldName, req.NewName)
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]string{"message": "Project renamed"})
 			return
@@ -979,6 +980,7 @@ func main() {
 			}
 			// Update script dependencies for the renamed subfolder
 			globalSheetManager.RenameProjectInDependencies(fullOldPath, fullNewPath)
+			globalSheetManager.RenameProjectInOptionsRangeDependencies(fullOldPath, fullNewPath)
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]string{"name": req.NewName})
 			return

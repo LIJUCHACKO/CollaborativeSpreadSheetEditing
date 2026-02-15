@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"time"
 )
@@ -179,6 +180,125 @@ func (h *Hub) run() {
 					}
 				} else {
 					log.Printf("Error unmarshalling UPDATE_CELL_STYLE payload: %v", err)
+				}
+
+			} else if message.Type == "UPDATE_CELL_TYPE" {
+				// Only owner can change cell type
+				sheet := globalSheetManager.GetSheetBy(message.SheetID, message.Project)
+				if sheet == nil {
+					continue
+				}
+				if message.User != sheet.Owner {
+					deniedPayload, _ := json.Marshal(map[string]string{
+						"reason": "owner-only",
+						"type":   message.Type,
+					})
+					toSend = &Message{
+						Type:    "EDIT_DENIED",
+						SheetID: message.SheetID,
+						Payload: deniedPayload,
+						User:    message.User,
+					}
+					if clients, ok := h.rooms[sheetKey(message.Project, message.SheetID)]; ok {
+						for client := range clients {
+							if client.userID != message.User {
+								continue
+							}
+							select {
+							case client.send <- msgToBytes(toSend):
+							default:
+								close(client.send)
+								delete(clients, client)
+							}
+						}
+					}
+					continue
+				}
+
+				var ct struct {
+					Row          string   `json:"row"`
+					Col          string   `json:"col"`
+					CellType     int      `json:"cell_type"`
+					Options      []string `json:"options,omitempty"`
+					OptionsRange string   `json:"options_range,omitempty"`
+					User         string   `json:"user"`
+				}
+				if err := json.Unmarshal(message.Payload, &ct); err == nil {
+					if sheet.SetCellType(ct.Row, ct.Col, ct.CellType, ct.Options, ct.OptionsRange, message.User) {
+						// Broadcast updated sheet snapshot with constructed details
+						payload, _ := json.Marshal(sheet.SnapshotForClient())
+						toSend = &Message{
+							Type:    "ROW_COL_UPDATED",
+							SheetID: message.SheetID,
+							Payload: payload,
+							User:    message.User,
+						}
+					} else {
+						deniedPayload, _ := json.Marshal(map[string]string{
+							"reason": "owner-only",
+							"type":   message.Type,
+						})
+						toSend = &Message{
+							Type:    "EDIT_DENIED",
+							SheetID: message.SheetID,
+							Payload: deniedPayload,
+							User:    message.User,
+						}
+					}
+				} else {
+					log.Printf("Error unmarshalling UPDATE_CELL_TYPE payload: %v", err)
+				}
+
+			} else if message.Type == "UPDATE_CELL_OPTIONS" {
+				// Handle option selection for ComboBox and MultipleSelection cells
+				if denyIfNotEditor() {
+					continue
+				}
+				var opts struct {
+					Row            string `json:"row"`
+					Col            string `json:"col"`
+					Value          string `json:"value"`
+					OptionSelected []int  `json:"option_selected"`
+					User           string `json:"user"`
+				}
+				if err := json.Unmarshal(message.Payload, &opts); err == nil {
+					sheet := globalSheetManager.GetSheetBy(message.SheetID, message.Project)
+					if sheet != nil {
+						// Get old value before update
+						var oldValue string
+						if sheet.Data[opts.Row] != nil {
+							if cell, exists := sheet.Data[opts.Row][opts.Col]; exists {
+								oldValue = cell.Value
+							}
+						}
+
+						// Update cell value and selected options
+						sheet.SetCell(opts.Row, opts.Col, opts.Value, message.User, false)
+						sheet.SetCellOptionSelected(opts.Row, opts.Col, opts.OptionSelected)
+
+						// Log to audit
+						sheet.AuditLog = append(sheet.AuditLog, AuditEntry{
+							Timestamp: time.Now(),
+							User:      message.User,
+							Action:    "OPTION_SELECT",
+							Details:   fmt.Sprintf("Selected options in %s%s", opts.Col, opts.Row),
+							Row1:      atoiSafe(opts.Row),
+							Col1:      opts.Col,
+							OldValue:  oldValue,
+							NewValue:  opts.Value,
+						})
+
+						// Broadcast the update
+						payload, _ := json.Marshal(sheet.SnapshotForClient())
+						toSend = &Message{
+							Type:    "ROW_COL_UPDATED",
+							SheetID: message.SheetID,
+							Payload: payload,
+							User:    message.User,
+						}
+					}
+				} else {
+					log.Printf("Error unmarshalling UPDATE_CELL_OPTIONS payload: %v", err)
 				}
 
 			} else if message.Type == "UPDATE_CELL_SCRIPT" {

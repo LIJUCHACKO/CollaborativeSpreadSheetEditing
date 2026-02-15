@@ -103,6 +103,10 @@ export default function Sheet() {
     const chatBodyRef = useRef(null);
     // Ref for script textarea
     const scriptTextareaRef = useRef(null);
+    // Refs for option inputs (to track cursor position for range insertion)
+    const optionIdRefs = useRef([]);
+    const optionDisplayValueRefs = useRef([]);
+    const [focusedOptionField, setFocusedOptionField] = useState({ index: null, field: null }); // 'id' or 'displayValue'
 
     // Scroll chat to bottom on open/init and when chatMessages change
     useEffect(() => {
@@ -114,6 +118,8 @@ export default function Sheet() {
     const [selectedAuditId, setSelectedAuditId] = useState(null);
     // Floating diff panel for audit value changes
     const [diffPanel, setDiffPanel] = useState({ visible: false, entry: null, parts: [] });
+    // Show/hide system audit logs
+    const [showSystemLogs, setShowSystemLogs] = useState(true);
     // Undo/Redo stacks for committed cell value edits
     const [undoStack, setUndoStack] = useState([]); // [{type:'cell_edit', row, col, oldValue, newValue}]
     const [redoStack, setRedoStack] = useState([]);
@@ -166,16 +172,33 @@ export default function Sheet() {
 
         const values = [];
         const scripts = [];
+        const cellTypes = [];
+        const optionsArray = [];
+        const optionsRangeArray = [];
+        const optionSelectedArray = [];
         for (const r of uniqueRows) {
             const rowArr = [];
             const scriptRowArr = [];
+            const cellTypeRowArr = [];
+            const optionsRowArr = [];
+            const optionsRangeRowArr = [];
+            const optionSelectedRowArr = [];
             for (const c of uniqueCols) {
                 const key = `${r}-${c}`;
-                rowArr.push((data[key]?.value ?? '').toString());
-                scriptRowArr.push((data[key]?.script ?? '').toString());
+                const cell = data[key] || {};
+                rowArr.push((cell.value ?? '').toString());
+                scriptRowArr.push((cell.script ?? '').toString());
+                cellTypeRowArr.push(cell.cell_type ?? 0);
+                optionsRowArr.push(cell.options ?? []);
+                optionsRangeRowArr.push(cell.options_range ?? '');
+                optionSelectedRowArr.push(cell.option_selected ?? []);
             }
             values.push(rowArr);
             scripts.push(scriptRowArr);
+            cellTypes.push(cellTypeRowArr);
+            optionsArray.push(optionsRowArr);
+            optionsRangeArray.push(optionsRangeRowArr);
+            optionSelectedArray.push(optionSelectedRowArr);
         }
 
         const noOfRows = uniqueRows.length;
@@ -192,6 +215,10 @@ export default function Sheet() {
                 sheet_id: id,
                 values,
                 scripts,
+                cellTypes,
+                optionsArray,
+                optionsRangeArray,
+                optionSelectedArray,
                 rangeText: combinedRangeText,
             };
             ws.current.send(JSON.stringify({ type: 'SELECTION_COPIED', sheet_id: id, payload }));
@@ -279,6 +306,9 @@ export default function Sheet() {
 
     const showContextMenu = (e, rowLabel, colLabel) => {
         e.preventDefault();
+        // Close other popups first
+        closeScriptPopup();
+        setShowCellTypeDialog(false);
         setIsEditing(false);
         setIsDoubleClicked(false);
         setIsSelectingWithShift(false);
@@ -295,6 +325,7 @@ export default function Sheet() {
         if (anchorRowIndex < 0) return;
         const updates = {};
         const scriptUpdates = {};
+        const cellTypeUpdates = {};
         const changes = [];
         let hasConflict = false;
         // Prevent pasting into any locked destination cells using filtered row order
@@ -348,12 +379,48 @@ export default function Sheet() {
                 const key = `${r}-${cLabel}`;
                 const value = copiedBlock.values[rOff][cOff] ?? '';
                 const scriptVal = copiedBlock.scripts && copiedBlock.scripts[rOff] ? (copiedBlock.scripts[rOff][cOff] ?? '') : '';
+                const cellType = copiedBlock.cellTypes && copiedBlock.cellTypes[rOff] ? (copiedBlock.cellTypes[rOff][cOff] ?? 0) : 0;
+                const options = copiedBlock.optionsArray && copiedBlock.optionsArray[rOff] ? (copiedBlock.optionsArray[rOff][cOff] ?? []) : [];
+                const optionsRange = copiedBlock.optionsRangeArray && copiedBlock.optionsRangeArray[rOff] ? (copiedBlock.optionsRangeArray[rOff][cOff] ?? '') : '';
+                const optionSelected = copiedBlock.optionSelectedArray && copiedBlock.optionSelectedArray[rOff] ? (copiedBlock.optionSelectedArray[rOff][cOff] ?? []) : [];
                 const oldValue = (data[key]?.value ?? '').toString();
+                const oldCellType = data[key]?.cell_type ?? 0;
+                const oldOptions = data[key]?.options ?? [];
+                const oldOptionsRange = data[key]?.options_range ?? '';
+                const oldOptionSelected = data[key]?.option_selected ?? [];
                 updates[key] = { value, user: username };
                 if (scriptVal && scriptVal.toString().length > 0) {
                     scriptUpdates[key] = { script: scriptVal.toString(), user: username };
                 }
-                changes.push({ row: String(r), col: String(cLabel), oldValue, newValue: (value ?? '').toString() });
+                // Check if cell metadata has changed
+                const hasCellTypeChange = cellType !== oldCellType || 
+                    JSON.stringify(options) !== JSON.stringify(oldOptions) || 
+                    optionsRange !== oldOptionsRange;
+                if (hasCellTypeChange) {
+                    cellTypeUpdates[key] = { 
+                        cellType, 
+                        options, 
+                        optionsRange,
+                        oldCellType, 
+                        oldOptions, 
+                        oldOptionsRange,
+                        user: username 
+                    };
+                }
+                changes.push({ 
+                    row: String(r), 
+                    col: String(cLabel), 
+                    oldValue, 
+                    newValue: (value ?? '').toString(),
+                    oldCellType,
+                    newCellType: cellType,
+                    oldOptions,
+                    newOptions: options,
+                    oldOptionsRange,
+                    newOptionsRange: optionsRange,
+                    oldOptionSelected,
+                    newOptionSelected: optionSelected,
+                });
             }
         }
 
@@ -366,6 +433,15 @@ export default function Sheet() {
             Object.entries(scriptUpdates).forEach(([key, cell]) => {
                 next[key] = { ...(next[key] || prev[key] || {}), script: cell.script, user: cell.user };
             });
+            Object.entries(cellTypeUpdates).forEach(([key, cell]) => {
+                next[key] = { 
+                    ...(next[key] || prev[key] || {}), 
+                    cell_type: cell.cellType, 
+                    options: cell.options,
+                    options_range: cell.optionsRange,
+                    user: cell.user 
+                };
+            });
             return next;
         });
 
@@ -377,7 +453,20 @@ export default function Sheet() {
 
         // Broadcast each cell update to server
         if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-            // Send script updates first; backend will execute and broadcast updated values
+            // Send cell type updates first
+            Object.entries(cellTypeUpdates).forEach(([key, cell]) => {
+                const [rowStr, colLabel] = key.split('-');
+                const payload = { 
+                    row: rowStr, 
+                    col: colLabel, 
+                    cell_type: cell.cellType, 
+                    options: cell.options,
+                    options_range: cell.optionsRange,
+                    user: username 
+                };
+                ws.current.send(JSON.stringify({ type: 'UPDATE_CELL_TYPE', sheet_id: id, payload }));
+            });
+            // Send script updates after cell type; backend will execute and broadcast updated values
             Object.entries(scriptUpdates).forEach(([key, cell]) => {
                 const [rowStr, colLabel] = key.split('-');
                 const payload = { row: rowStr, col: colLabel, script: cell.script, user: username };
@@ -426,11 +515,14 @@ export default function Sheet() {
     const dragRef = useRef({ type: null, label: null, startPos: 0, startSize: 0 });
 
     // Floating script editor popup state
-    const [scriptPopup, setScriptPopup] = useState({ visible: false, x: 0, y: 0, row: null, col: null });
+    const [scriptPopup, setScriptPopup] = useState({ visible: false, row: null, col: null });
     const [scriptRowSpan, setScriptRowSpan] = useState(1);
     const [scriptColSpan, setScriptColSpan] = useState(1);
-    const openScriptPopup = (row, col, x, y) => {
+    const openScriptPopup = (row, col) => {
         if (!row || !col) return;
+        // Close other popups first
+        setShowCellTypeDialog(false);
+        setContextMenu({ visible: false, x: 0, y: 0, cell: null });
         const key = `${row}-${col}`;
         const existingScript = (data[key]?.script ?? '').toString();
         setScriptText(existingScript);
@@ -439,9 +531,9 @@ export default function Sheet() {
         const existingColSpan = parseInt(data[key]?.script_output_col_span ?? 1, 10) || 1;
         setScriptRowSpan(existingRowSpan);
         setScriptColSpan(existingColSpan);
-        setScriptPopup({ visible: true, x: Math.max(8, x), y: Math.max(8, y), row, col });
+        setScriptPopup({ visible: true, row, col });
     };
-    const closeScriptPopup = () => setScriptPopup({ visible: false, x: 0, y: 0, row: null, col: null });
+    const closeScriptPopup = () => setScriptPopup({ visible: false, row: null, col: null });
 
     const getSelectedRange = () => {
          if (!selectedRange || selectedRange.length === 0) return "";
@@ -498,8 +590,37 @@ export default function Sheet() {
         }
     };
 
+   
+
+    const insertRangeIntoOptionsRange = () => {
+        let rangeText = '';
+        if (copiedBlock && copiedBlock.rangeText) {
+            rangeText = copiedBlock.rangeText || '';
+            copiedBlock.rangeText = ''; // clear after use
+        } else if (selectedRange && selectedRange.length > 0) {
+            rangeText = getSelectedRange();
+        } else {
+            return;
+        }
+        
+        // Update the optionsRange state with the selected range
+        setOptionsRange(rangeText);
+    };
+
     // Toggle to show scripts instead of values (read-only mode)
     const [showScripts, setShowScripts] = useState(false);
+
+    // Cell type dialog state
+    const [showCellTypeDialog, setShowCellTypeDialog] = useState(false);
+    const [cellTypeDialogCell, setCellTypeDialogCell] = useState(null);
+    const [selectedCellType, setSelectedCellType] = useState(0); // 0=ValueCell, 1=ScriptCell, 2=ComboBox, 3=MultipleSelection
+    const [cellTypeOptions, setCellTypeOptions] = useState([]);
+    const [optionsRange, setOptionsRange] = useState(''); // Range like "A1:A10" for dynamic options
+
+    // Option selection dialog state (for ComboBox and MultipleSelection cells)
+    const [showOptionDialog, setShowOptionDialog] = useState(false);
+    const [optionDialogCell, setOptionDialogCell] = useState(null); // { row, col, cellType, options }
+    const [selectedOptions, setSelectedOptions] = useState([]); // Array of selected option indices
 
     const handleDownloadXlsx = async () => {
         try {
@@ -534,6 +655,162 @@ export default function Sheet() {
         }
     };
 
+    // Handler to open cell type dialog
+    const openCellTypeDialog = (row, col) => {
+        // Close other popups first
+        closeScriptPopup();
+        setContextMenu({ visible: false, x: 0, y: 0, cell: null });
+        const key = `${row}-${col}`;
+        const cell = data[key] || {};
+        setCellTypeDialogCell({ row, col });
+        setSelectedCellType(cell.cell_type || 0);
+        setCellTypeOptions(cell.options || []);
+        setOptionsRange(cell.options_range || '');
+        setShowCellTypeDialog(true);
+    };
+
+    // Handler to save cell type changes
+    const handleCellTypeChange = () => {
+        if (!cellTypeDialogCell || !ws.current || ws.current.readyState !== WebSocket.OPEN) return;
+
+        const { row, col } = cellTypeDialogCell;
+        const payload = {
+            row: String(row),
+            col: String(col),
+            cell_type: selectedCellType,
+            options: cellTypeOptions,
+            options_range: optionsRange,
+            user: username
+        };
+
+        ws.current.send(JSON.stringify({ type: 'UPDATE_CELL_TYPE', sheet_id: id, payload }));
+        setShowCellTypeDialog(false);
+        setCellTypeDialogCell(null);
+    };
+
+    // Handler to add option to cell type options
+    const addCellTypeOption = () => {
+        setCellTypeOptions(prev => [...prev, '']);
+    };
+
+    // Handler to remove option from cell type options
+    const removeCellTypeOption = (index) => {
+        setCellTypeOptions(prev => prev.filter((_, i) => i !== index));
+    };
+
+    // Handler to update option
+    const updateCellTypeOption = (index, value) => {
+        setCellTypeOptions(prev => {
+            const newOptions = [...prev];
+            newOptions[index] = value;
+            return newOptions;
+        });
+    };
+
+    // Open option selection dialog for ComboBox or MultipleSelection cells
+    const openOptionDialog = (row, col) => {
+        const key = `${row}-${col}`;
+        const cell = data[key] || {};
+        if (cell.cell_type !== 2 && cell.cell_type !== 3) return; // Only for ComboBox(2) and MultipleSelection(3)
+        
+        const options = cell.options || [];
+        const currentSelected = cell.option_selected || [];
+        
+        setOptionDialogCell({ row, col, cellType: cell.cell_type, options });
+        setSelectedOptions([...currentSelected]);
+        setShowOptionDialog(true);
+    };
+
+    // Toggle option selection in the dialog
+    const toggleOptionSelection = (index) => {
+        if (!optionDialogCell) return;
+        
+        if (optionDialogCell.cellType === 2) { // ComboBox - single selection
+            setSelectedOptions([index]);
+        } else if (optionDialogCell.cellType === 3) { // MultipleSelection - multiple
+            setSelectedOptions(prev => {
+                if (prev.includes(index)) {
+                    return prev.filter(i => i !== index);
+                } else {
+                    return [...prev, index];
+                }
+            });
+        }
+    };
+
+    // Save selected options and update cell value
+    const saveOptionSelection = () => {
+        if (!optionDialogCell || !canEdit) return;
+        
+        const { row, col, cellType, options } = optionDialogCell;
+        const key = `${row}-${col}`;
+        const cell = data[key] || {};
+        
+        // Calculate new value based on selected options
+        let newValue = '';
+        if (cellType === 2 && selectedOptions.length > 0) { // ComboBox
+            newValue = options[selectedOptions[0]] || '';
+        } else if (cellType === 3) { // MultipleSelection
+            newValue = selectedOptions.map(idx => options[idx] || '').join('; ');
+        }
+        
+        const oldValue = (cell.value ?? '').toString();
+        const oldSelected = cell.option_selected || [];
+        
+        // Only update if changed
+        if (newValue === oldValue && JSON.stringify(oldSelected) === JSON.stringify(selectedOptions)) {
+            setShowOptionDialog(false);
+            setOptionDialogCell(null);
+            return;
+        }
+        
+        // Add to undo stack
+        setUndoStack(prev => [...prev, {
+            type: 'option_selection',
+            row: String(row),
+            col: String(col),
+            oldValue,
+            newValue,
+            oldSelected,
+            newSelected: selectedOptions
+        }]);
+        setRedoStack([]);
+        
+        // Update local state
+        setData(prev => ({
+            ...prev,
+            [key]: {
+                ...(prev[key] || {}),
+                value: newValue,
+                option_selected: selectedOptions,
+                user: username
+            }
+        }));
+        
+        // Send to server
+        if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+            const payload = {
+                row: String(row),
+                col: String(col),
+                value: newValue,
+                option_selected: selectedOptions,
+                user: username
+            };
+            ws.current.send(JSON.stringify({ type: 'UPDATE_CELL_OPTIONS', sheet_id: id, payload }));
+        }
+        
+        // Close dialog
+        setShowOptionDialog(false);
+        setOptionDialogCell(null);
+    };
+
+    // Close option dialog
+    const closeOptionDialog = () => {
+        setShowOptionDialog(false);
+        setOptionDialogCell(null);
+        setSelectedOptions([]);
+    };
+
     // Visible ranges accounting for frozen panes
     const nonFrozenVisibleRowsCount = Math.max(0, Math.min(visibleRowsCount, ROWS) - Math.min(freezeRowsCount, ROWS));
     const nonFrozenVisibleColsCount = Math.max(0, Math.min(visibleColsCount, COLS) - Math.min(freezeColsCount, COLS));
@@ -542,6 +819,13 @@ export default function Sheet() {
 
     // Filtered rows state
     const [filteredRowHeaders, setFilteredRowHeaders] = useState(ROW_HEADERS);
+
+    const closeAllPopups = () => {
+        setContextMenu({ visible: false, x: 0, y: 0, cell: null });
+        setShowCellTypeDialog(false);
+        closeScriptPopup();
+        closeOptionDialog();
+    }
 
     useEffect(() => {
         // Check session validity
@@ -702,9 +986,19 @@ export default function Sheet() {
                             ));
                         }
                     } else if (msg.type === 'SELECTION_SHARED') {
-                        const { Rows, Cols, sheet_id, values, scripts, rangeText } = msg.payload || {};
+                        const { Rows, Cols, sheet_id, values, scripts, cellTypes, optionsArray, optionsRangeArray, optionSelectedArray, rangeText } = msg.payload || {};
                         if (Rows && Cols && Array.isArray(values)) {
-                            setCopiedBlock({ Rows, Cols, values, scripts: Array.isArray(scripts) ? scripts : undefined, rangeText, }); 
+                            setCopiedBlock({ 
+                                Rows, 
+                                Cols, 
+                                values, 
+                                scripts: Array.isArray(scripts) ? scripts : undefined,
+                                cellTypes: Array.isArray(cellTypes) ? cellTypes : undefined,
+                                optionsArray: Array.isArray(optionsArray) ? optionsArray : undefined,
+                                optionsRangeArray: Array.isArray(optionsRangeArray) ? optionsRangeArray : undefined,
+                                optionSelectedArray: Array.isArray(optionSelectedArray) ? optionSelectedArray : undefined,
+                                rangeText,
+                            }); 
                         }
                     } else if (msg.type === 'PONG') {
                         console.log("Received PONG from server");
@@ -898,7 +1192,7 @@ export default function Sheet() {
 
     const doUndo = () => {
         if (undoStack.length === 0 || !canEdit) return;
-        closeScriptPopup();
+        closeAllPopups();
         const last = undoStack[undoStack.length - 1];
         if (last.type === 'cell_edit') {
             const { row, col, oldValue, newValue } = last;
@@ -913,18 +1207,45 @@ export default function Sheet() {
             setUndoStack(prev => prev.slice(0, -1));
         } else if (last.type === 'paste') {
             const { changes } = last;
-            // Apply local state for all changes (restore old values)
+            // Apply local state for all changes (restore old values and metadata)
             setData(prev => {
                 const next = { ...prev };
                 for (const ch of changes) {
                     const key = `${ch.row}-${ch.col}`;
-                    next[key] = { ...(next[key] || {}), value: ch.oldValue, user: username };
+                    next[key] = { 
+                        ...(next[key] || {}), 
+                        value: ch.oldValue, 
+                        cell_type: ch.oldCellType ?? 0,
+                        options: ch.oldOptions ?? [],
+                        options_range: ch.oldOptionsRange ?? '',
+                        option_selected: ch.oldOptionSelected ?? [],
+                        user: username 
+                    };
                 }
                 return next;
             });
             // Send revert updates to server for all changes
             if (ws.current && ws.current.readyState === WebSocket.OPEN) {
                 for (const ch of changes) {
+                    // Send cell type update if it changed
+                    const hasCellTypeChange = (ch.newCellType ?? 0) !== (ch.oldCellType ?? 0) || 
+                        JSON.stringify(ch.newOptions ?? []) !== JSON.stringify(ch.oldOptions ?? []) || 
+                        (ch.newOptionsRange ?? '') !== (ch.oldOptionsRange ?? '');
+                    if (hasCellTypeChange) {
+                        ws.current.send(JSON.stringify({ 
+                            type: 'UPDATE_CELL_TYPE', 
+                            sheet_id: id, 
+                            payload: { 
+                                row: String(ch.row), 
+                                col: String(ch.col), 
+                                cell_type: ch.oldCellType ?? 0,
+                                options: ch.oldOptions ?? [],
+                                options_range: ch.oldOptionsRange ?? '',
+                                user: username 
+                            } 
+                        }));
+                    }
+                    // Send value update
                     ws.current.send(JSON.stringify({ type: 'UPDATE_CELL', sheet_id: id, payload: { row: String(ch.row), col: String(ch.col), value: ch.oldValue, user: username } }));
                 }
             }
@@ -937,6 +1258,29 @@ export default function Sheet() {
             // Send to server
             if (ws.current && ws.current.readyState === WebSocket.OPEN) {
                 ws.current.send(JSON.stringify({ type: 'UPDATE_CELL_SCRIPT', sheet_id: id, payload: { row, col, script: oldValue, user: username} }));
+            }
+            setRedoStack(prev => [...prev, last]);
+            setUndoStack(prev => prev.slice(0, -1));
+        } else if (last.type === 'option_selection') {
+            const { row, col, oldValue, oldSelected } = last;
+            const key = `${row}-${col}`;
+            // Apply local state
+            setData(prev => ({
+                ...prev,
+                [key]: {
+                    ...(prev[key] || {}),
+                    value: oldValue,
+                    option_selected: oldSelected,
+                    user: username
+                }
+            }));
+            // Send to server
+            if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+                ws.current.send(JSON.stringify({
+                    type: 'UPDATE_CELL_OPTIONS',
+                    sheet_id: id,
+                    payload: { row, col, value: oldValue, option_selected: oldSelected, user: username }
+                }));
             }
             setRedoStack(prev => [...prev, last]);
             setUndoStack(prev => prev.slice(0, -1));
@@ -1005,7 +1349,7 @@ export default function Sheet() {
 
     const doRedo = () => {
         if (redoStack.length === 0 || !canEdit) return;
-        closeScriptPopup();
+        closeAllPopups();
         const last = redoStack[redoStack.length - 1];
         if (last.type === 'cell_edit') {
             const { row, col, oldValue, newValue } = last;
@@ -1017,18 +1361,45 @@ export default function Sheet() {
             setRedoStack(prev => prev.slice(0, -1));
         } else if (last.type === 'paste') {
             const { changes } = last;
-            // Apply local state for all changes (reapply new values)
+            // Apply local state for all changes (reapply new values and metadata)
             setData(prev => {
                 const next = { ...prev };
                 for (const ch of changes) {
                     const key = `${ch.row}-${ch.col}`;
-                    next[key] = { ...(next[key] || {}), value: ch.newValue, user: username };
+                    next[key] = { 
+                        ...(next[key] || {}), 
+                        value: ch.newValue, 
+                        cell_type: ch.newCellType ?? 0,
+                        options: ch.newOptions ?? [],
+                        options_range: ch.newOptionsRange ?? '',
+                        option_selected: ch.newOptionSelected ?? [],
+                        user: username 
+                    };
                 }
                 return next;
             });
             // Send updates to server for all changes
             if (ws.current && ws.current.readyState === WebSocket.OPEN) {
                 for (const ch of changes) {
+                    // Send cell type update if it changed
+                    const hasCellTypeChange = (ch.newCellType ?? 0) !== (ch.oldCellType ?? 0) || 
+                        JSON.stringify(ch.newOptions ?? []) !== JSON.stringify(ch.oldOptions ?? []) || 
+                        (ch.newOptionsRange ?? '') !== (ch.oldOptionsRange ?? '');
+                    if (hasCellTypeChange) {
+                        ws.current.send(JSON.stringify({ 
+                            type: 'UPDATE_CELL_TYPE', 
+                            sheet_id: id, 
+                            payload: { 
+                                row: String(ch.row), 
+                                col: String(ch.col), 
+                                cell_type: ch.newCellType ?? 0,
+                                options: ch.newOptions ?? [],
+                                options_range: ch.newOptionsRange ?? '',
+                                user: username 
+                            } 
+                        }));
+                    }
+                    // Send value update
                     ws.current.send(JSON.stringify({ type: 'UPDATE_CELL', sheet_id: id, payload: { row: String(ch.row), col: String(ch.col), value: ch.newValue, user: username } }));
                 }
             }
@@ -1039,6 +1410,29 @@ export default function Sheet() {
             updateCellScriptState(row, col, newValue, username);
             if (ws.current && ws.current.readyState === WebSocket.OPEN) {
                 ws.current.send(JSON.stringify({ type: 'UPDATE_CELL_SCRIPT', sheet_id: id, payload: { row, col, script: newValue, user: username } }));
+            }
+            setUndoStack(prev => [...prev, last]);
+            setRedoStack(prev => prev.slice(0, -1));
+        } else if (last.type === 'option_selection') {
+            const { row, col, newValue, newSelected } = last;
+            const key = `${row}-${col}`;
+            // Apply local state
+            setData(prev => ({
+                ...prev,
+                [key]: {
+                    ...(prev[key] || {}),
+                    value: newValue,
+                    option_selected: newSelected,
+                    user: username
+                }
+            }));
+            // Send to server
+            if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+                ws.current.send(JSON.stringify({
+                    type: 'UPDATE_CELL_OPTIONS',
+                    sheet_id: id,
+                    payload: { row, col, value: newValue, option_selected: newSelected, user: username }
+                }));
             }
             setUndoStack(prev => [...prev, last]);
             setRedoStack(prev => prev.slice(0, -1));
@@ -1167,8 +1561,7 @@ export default function Sheet() {
 
     const applyStyleToSelectedRange = () => {
         if (!selectedRange || selectedRange.length === 0 || !canEdit) return;
-        closeScriptPopup();
-
+        closeAllPopups();
         for (const sel of selectedRange) {
             const r = sel.row;
             const colLabel = sel.col;
@@ -1822,13 +2215,13 @@ export default function Sheet() {
                             <input
                                 type="color"
                                 value={styleBg || '#ffffff'}
-                                onChange={(e) => { closeScriptPopup(); setStyleBg(e.target.value); }}
+                                onChange={(e) => { closeAllPopups(); setStyleBg(e.target.value); }}
                                 disabled={!canEdit}
                                 title="Background color"
                             />
                             <button
                                 className={`px-2 py-1 text-sm rounded border ${styleBold ? 'bg-indigo-100 border-indigo-300' : 'border-gray-300 bg-white'} hover:bg-gray-100`}
-                                onClick={() => { closeScriptPopup(); setStyleBold(v => !v); }}
+                                onClick={() => { closeAllPopups(); setStyleBold(v => !v); }}
                                 disabled={!canEdit}
                                 title="Bold"
                             >
@@ -1836,7 +2229,7 @@ export default function Sheet() {
                             </button>
                             <button
                                 className={`px-2 py-1 text-sm rounded border ${styleItalic ? 'bg-indigo-100 border-indigo-300' : 'border-gray-300 bg-white'} hover:bg-gray-100`}
-                                onClick={() => { closeScriptPopup(); setStyleItalic(v => !v); }}
+                                onClick={() => { closeAllPopups(); setStyleItalic(v => !v); }}
                                 disabled={!canEdit}
                                 title="Italic"
                             >
@@ -1885,8 +2278,20 @@ export default function Sheet() {
                                 ←
                             </button>
                         </div>
-                        <div ref={auditLogRef} className="overflow-auto p-3" style={{ height: 'calc(70% - 56px)', overflowY: 'scroll' , opacity: 1 }}>
-                            {auditLog.slice().reverse().map((entry, i) => {
+                        <div className="p-2 border-bottom bg-white">
+                            <label className="d-flex align-items-center gap-2 text-sm" style={{ fontSize: '0.875rem', cursor: 'pointer' }}>
+                                <input
+                                    type="checkbox"
+                                    className="form-check-input m-0"
+                                    checked={showSystemLogs}
+                                    onChange={(e) => setShowSystemLogs(e.target.checked)}
+                                    title="Show/hide system audit logs"
+                                />
+                                Show system logs
+                            </label>
+                        </div>
+                        <div ref={auditLogRef} className="overflow-auto p-3" style={{ height: 'calc(70% - 96px)', overflowY: 'scroll' , opacity: 1 }}>
+                            {auditLog.slice().reverse().filter(entry => showSystemLogs || entry.user !== 'system').map((entry, i) => {
                                 const ts = entry.timestamp ? new Date(entry.timestamp).toLocaleString() : '';
                                 const entryId = `${entry.timestamp || i}|${entry.user || ''}|${entry.action || ''}|${entry.details || ''}`;
                                 const isSelected = selectedAuditId === entryId;
@@ -1978,7 +2383,7 @@ export default function Sheet() {
                     </div>
                 )}
                 {scriptPopup.visible && (
-                    <div style={{ position: 'fixed', top: scriptPopup.y + 8, left: scriptPopup.x + 8, zIndex: 2100 }} className="bg-white border rounded shadow p-3">
+                    <div style={{ position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', zIndex: 2100 }} className="bg-white border rounded shadow p-3">
                         <div className="flex items-center gap-2">
                             <span className="text-sm text-gray-600">Python Script [Cell : {String(scriptPopup.col)}{String(scriptPopup.row)}]</span>
                         </div>
@@ -2049,7 +2454,7 @@ export default function Sheet() {
                                 </button>
                                 <button
                                     className="px-2 py-1 text-sm rounded border border-gray-300 bg-white hover:bg-indigo-100 hover:shadow-md active:bg-indigo-200 active:scale-95 transition-all duration-100"
-                                    onClick={closeScriptPopup}
+                                    onClick={() => { closeScriptPopup();  }}
                                     title="Cancel"
                                 >
                                     Cancel
@@ -2058,6 +2463,195 @@ export default function Sheet() {
                         </div>
                     </div>
                 )}
+
+                {/* Cell Type Dialog */}
+                {showCellTypeDialog && cellTypeDialogCell && (
+                    <>
+                        
+                        {/* Dialog */}
+                        <div style={{ 
+                            position: 'fixed', 
+                            top: '50%', 
+                            left: '50%', 
+                            transform: 'translate(-50%, -50%)', 
+                            zIndex: 2200,
+                            backgroundColor: 'white',
+                            border: '1px solid #ccc',
+                            borderRadius: '8px',
+                            boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
+                            padding: '20px',
+                            minWidth: '400px'
+                        }}>
+                            <h4 className="mb-3">Change Cell Type for {cellTypeDialogCell.col}{cellTypeDialogCell.row}</h4>
+                            
+                            <div className="mb-3">
+                                <label className="form-label">Cell Type:</label>
+                                <select 
+                                    className="form-select"
+                                    value={selectedCellType}
+                                    onChange={(e) => setSelectedCellType(parseInt(e.target.value))}
+                                >
+                                    <option value={0}>Value Cell</option>
+                                    <option value={1}>Script Cell</option>
+                                    <option value={2}>ComboBox</option>
+                                    <option value={3}>Multiple Selection</option>
+                                </select>
+                            </div>
+
+                            {(selectedCellType === 2 || selectedCellType === 3) && (
+                                <div className="mb-3">
+                                   
+                                    {cellTypeOptions  && (
+                                        <>
+                                         <label className="form-label">Options:</label>
+                                    <div className="mb-3">
+                                        <label className="form-label small">Options Range (e.g., A1:A10):</label>
+                                        <input
+                                            type="text"
+                                            className="form-control form-control-sm"
+                                            placeholder="e.g., A1:A10"
+                                            value={optionsRange}
+                                            onChange={(e) => setOptionsRange(e.target.value)}
+                                        />
+                                        <small className="text-muted">Specify a range to dynamically populate options from sheet data</small>
+                                    </div>
+                                        <div className="d-flex gap-2">
+                                            <button
+                                                className="btn btn-sm btn-outline-secondary"
+                                                style={{ fontSize: '0.75rem', padding: '0.15rem 0.4rem' }}
+                                                onClick={insertRangeIntoOptionsRange}
+                                                title="Insert selected range into options range field"
+                                            >
+                                                Insert Range
+                                            </button>
+                                        </div>
+                                        </>
+                                    )}
+                                    <div className="mb-2">
+                                        {cellTypeOptions && cellTypeOptions.length > 0 && (optionsRange == '') ? (
+                                            cellTypeOptions.map((option, idx) => (
+                                                <div key={idx} className="mb-2">
+                                                    <div className="d-flex gap-2 mb-1">
+                                                        <input
+                                                            ref={(el) => optionDisplayValueRefs.current[idx] = el}
+                                                            type="text"
+                                                            className="form-control form-control-sm"
+                                                            placeholder="Option Value"
+                                                            value={option || ''}
+                                                            onChange={(e) => updateCellTypeOption(idx, e.target.value)}
+                                                            onFocus={() => setFocusedOptionField({ index: idx, field: 'option' })}
+                                                        />
+                                                        <button
+                                                            className="btn btn-sm btn-danger"
+                                                            onClick={() => removeCellTypeOption(idx)}
+                                                        >
+                                                            ✕
+                                                        </button>
+                                                    </div>
+                                                    
+                                                </div>
+                                            ))
+                                        ) : (
+                                            <p className="text-muted small">No options defined yet</p>
+                                        )}
+                                    </div>
+                                    { (optionsRange == '')  && (
+                                    <button
+                                        className="btn btn-sm btn-secondary"
+                                        onClick={addCellTypeOption}
+                                    >
+                                        + Add Option
+                                    </button>
+                                    )}
+                                </div>
+                            )}
+
+                            <div className="d-flex gap-2 justify-content-end">
+                                <button
+                                    className="btn btn-primary"
+                                    onClick={handleCellTypeChange}
+                                >
+                                    Save
+                                </button>
+                                <button
+                                    className="btn btn-secondary"
+                                    onClick={() => {
+                                        setShowCellTypeDialog(false);
+                                        setCellTypeDialogCell(null);
+                                    }}
+                                >
+                                    Cancel
+                                </button>
+                            </div>
+                        </div>
+                    </>
+                )}
+
+                {/* Option Selection Dialog for ComboBox and MultipleSelection */}
+                {showOptionDialog && optionDialogCell && (
+                    <>
+                        <div
+                            className="position-fixed top-0 start-0 w-100 h-100 bg-dark bg-opacity-50"
+                            style={{ zIndex: 1050 }}
+                            onClick={closeOptionDialog}
+                        />
+                        <div
+                            className="position-fixed top-50 start-50 translate-middle bg-white rounded shadow-lg p-4"
+                            style={{ zIndex: 1051, minWidth: '400px', maxWidth: '600px', maxHeight: '80vh', overflowY: 'auto' }}
+                            onClick={(e) => e.stopPropagation()}
+                        >
+                            <h5 className="mb-3">
+                                {optionDialogCell.cellType === 2 ? 'Select Option (ComboBox)' : 'Select Options (Multiple Selection)'}
+                            </h5>
+                            <p className="text-muted small mb-3">
+                                Cell: {optionDialogCell.row}-{optionDialogCell.col}
+                            </p>
+
+                            <div className="mb-3">
+                                {optionDialogCell.options && optionDialogCell.options.length > 0 ? (
+                                    <div className="list-group">
+                                        {optionDialogCell.options.map((option, idx) => (
+                                            <button
+                                                key={idx}
+                                                type="button"
+                                                className={`list-group-item list-group-item-action d-flex align-items-center ${
+                                                    selectedOptions.includes(idx) ? 'active' : ''
+                                                }`}
+                                                onClick={() => toggleOptionSelection(idx)}
+                                            >
+                                                <input
+                                                    type={optionDialogCell.cellType === 2 ? 'radio' : 'checkbox'}
+                                                    className="form-check-input me-2"
+                                                    checked={selectedOptions.includes(idx)}
+                                                    readOnly
+                                                />
+                                                <span>{option}</span>
+                                            </button>
+                                        ))}
+                                    </div>
+                                ) : (
+                                    <p className="text-muted">No options available</p>
+                                )}
+                            </div>
+
+                            <div className="d-flex gap-2 justify-content-end">
+                                <button
+                                    className="btn btn-primary"
+                                    onClick={saveOptionSelection}
+                                >
+                                    Save
+                                </button>
+                                <button
+                                    className="btn btn-secondary"
+                                    onClick={closeOptionDialog}
+                                >
+                                    Cancel
+                                </button>
+                            </div>
+                        </div>
+                    </>
+                )}
+
                 {/* Grid Area */}
                 <div className="flex-1 overflow-hidden p-6 bg-gray-100/50" >
                     {/* Scrollbars + Grid layout */}
@@ -2570,10 +3164,16 @@ export default function Sheet() {
                                                             if (showScripts) return;
                                                             if (isEditing) return;
                                                             if (cell.locked || !canEdit) return;
+                                                            // If cell is ComboBox or MultipleSelection, open option dialog
+                                                            if (cell.cell_type === 2 || cell.cell_type === 3) {
+                                                                e.preventDefault();
+                                                                openOptionDialog(rowLabel, colLabel);
+                                                                return;
+                                                            }
                                                             // If the cell has a script, open the script editor instead of value editing
                                                             if ((cell.script ?? '').toString().length > 0) {
                                                                 e.preventDefault();
-                                                                openScriptPopup(rowLabel, colLabel, e.clientX, e.clientY);
+                                                                openScriptPopup(rowLabel, colLabel);
                                                                 return;
                                                             }
                                                             // Default behavior: enter value edit mode
@@ -2581,6 +3181,7 @@ export default function Sheet() {
                                                             e.target.focus();
                                                             if (connected) {
                                                                 closeScriptPopup();
+                                                                setShowCellTypeDialog(false);
                                                                 setIsEditing(true);
                                                                 setIsDoubleClicked(true);
                                                                 setCutRow(null);
@@ -2622,7 +3223,7 @@ export default function Sheet() {
                                                                 if (cell.locked) return;
                                                                 // If cell has a script, do not enter value edit mode
                                                                 if ((cell.script ?? '').toString().length > 0) return;
-                                                                if (connected) { closeScriptPopup(); setIsEditing(true); }
+                                                                if (connected) { closeAllPopups(); setIsEditing(true); }
                                                                 return;
                                                             }
                                                             // In edit mode, allow default arrow behavior inside textarea and disable cell navigation if multiline without Shift
@@ -2733,28 +3334,10 @@ export default function Sheet() {
                                                         {/* Context Menu */}
                                                         {contextMenu.visible && (
                                                             <div
-                                                                style={{ position: 'fixed', top: contextMenu.y, left: contextMenu.x, zIndex: 2000 }}
-                                                                className="bg-white border p-2 text-sm"
+                                                                style={{ position: 'fixed', top: contextMenu.y, left: contextMenu.x, zIndex: 2000, display: 'flex', flexDirection: 'column', minWidth: '180px' }}
+                                                                className="bg-white border p-2 text-sm "
                                                                 onClick={(e) => e.stopPropagation()}
                                                             >
-                                                                        <button
-                                                                            className="block w-full text-left px-2 py-1 hover:bg-gray-100 rounded"
-                                                                            disabled={!copiedBlock || !contextMenu.cell}
-                                                                            onClick={() => handlePasteAt(contextMenu.cell.row, contextMenu.cell.col)}
-                                                                        >
-                                                                            Paste
-                                                                        </button>
-                                                                        <button
-                                                                            className="block w-full text-left px-2 py-1 hover:bg-gray-100 rounded"
-                                                                            disabled={!canEdit || !contextMenu.cell || (data[`${contextMenu.cell.row}-${contextMenu.cell.col}`]?.locked_by?.startsWith('script-span '))}
-                                                                            onClick={() => {
-                                                                                if (!canEdit || !contextMenu.cell || (data[`${contextMenu.cell.row}-${contextMenu.cell.col}`]?.locked_by?.startsWith('script-span '))) return;
-                                                                                openScriptPopup(contextMenu.cell.row, contextMenu.cell.col, contextMenu.x, contextMenu.y);
-                                                                                closeContextMenu();
-                                                                            }}
-                                                                        >
-                                                                            Edit Script
-                                                                        </button>
                                                                 {contextMenu.cell && (
                                                                     <>
                                                                         {(() => {
@@ -2778,6 +3361,53 @@ export default function Sheet() {
                                                                         })()}
                                                                         </>
                                                                 )}
+                                                                        <button
+                                                                            className="block w-full text-left px-2 py-1 hover:bg-gray-100 rounded"
+                                                                            disabled={!copiedBlock || !contextMenu.cell}
+                                                                            onClick={() => handlePasteAt(contextMenu.cell.row, contextMenu.cell.col)}
+                                                                        >
+                                                                            Paste
+                                                                        </button>
+                                                                        <button
+                                                                            className="block w-full text-left px-2 py-1 hover:bg-gray-100 rounded"
+                                                                            disabled={!canEdit || !contextMenu.cell || (data[`${contextMenu.cell.row}-${contextMenu.cell.col}`]?.locked_by?.startsWith('script-span '))}
+                                                                            onClick={() => {
+                                                                                if (!canEdit || !contextMenu.cell || (data[`${contextMenu.cell.row}-${contextMenu.cell.col}`]?.locked_by?.startsWith('script-span '))) return;
+                                                                                openScriptPopup(contextMenu.cell.row, contextMenu.cell.col);
+                                                                                closeContextMenu();
+                                                                            }}
+                                                                        >
+                                                                            Edit Script
+                                                                        </button>
+                                                                        {contextMenu.cell && (() => {
+                                                                            const cellKey = `${contextMenu.cell.row}-${contextMenu.cell.col}`;
+                                                                            const cell = data[cellKey] || {};
+                                                                            return (cell.cell_type === 2 || cell.cell_type === 3) && (
+                                                                                <button
+                                                                                    className="block w-full text-left px-2 py-1 hover:bg-gray-100 rounded"
+                                                                                    disabled={!canEdit || cell.locked}
+                                                                                    onClick={() => {
+                                                                                        if (!canEdit || cell.locked) return;
+                                                                                        openOptionDialog(contextMenu.cell.row, contextMenu.cell.col);
+                                                                                        closeContextMenu();
+                                                                                    }}
+                                                                                >
+                                                                                    Select Options
+                                                                                </button>
+                                                                            );
+                                                                        })()}
+                                                                        {isOwner && contextMenu.cell && (
+                                                                            <button
+                                                                                className="block w-full text-left px-2 py-1 hover:bg-gray-100 rounded"
+                                                                                onClick={() => {
+                                                                                    openCellTypeDialog(contextMenu.cell.row, contextMenu.cell.col);
+                                                                                    closeContextMenu();
+                                                                                }}
+                                                                            >
+                                                                                Change Cell Type
+                                                                            </button>
+                                                                        )}
+                                                                
                                                                 {isOwner && contextMenu.cell && (
                                                                     <>
                                                                         {(() => {
