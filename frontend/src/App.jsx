@@ -6,6 +6,7 @@ import Projects from './components/Projects';
 import Sheet from './components/Sheet';
 import Settings from './components/Settings';
 import ChangePassword from './components/ChangePassword';
+import Admin from './components/Admin';
 
 function App() {
   return (
@@ -17,6 +18,7 @@ function App() {
         <Route path="/sheet/:id" element={<Sheet />} />
         <Route path="/settings/:id" element={<Settings />} />
         <Route path="/change-password" element={<ChangePassword />} />
+        <Route path="/admin" element={<Admin />} />
       </Routes>
     </Router>
   );

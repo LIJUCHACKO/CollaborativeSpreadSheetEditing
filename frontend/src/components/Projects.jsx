@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { authenticatedFetch, isSessionValid, clearAuth, getUsername, apiUrl } from '../utils/auth';
-import { Copy, ClipboardPaste, Edit2, Trash2, Search, User, LogOut, Folder, Lock, X } from 'lucide-react';
+import { authenticatedFetch, isSessionValid, clearAuth, getUsername, apiUrl, isAdmin, canCreateProject } from '../utils/auth';
+import { Copy, ClipboardPaste, Edit2, Trash2, Search, User, LogOut, Folder, Lock, X, ShieldCheck } from 'lucide-react';
 import 'bootstrap/dist/css/bootstrap.min.css';
 
 // Shared clipboard helpers using localStorage
@@ -296,6 +296,11 @@ export default function Projects() {
             <span className="navbar-text me-3 d-flex align-items-center">
               <User className="me-1" /> {username}
             </span>
+            {isAdmin() && (
+              <button onClick={() => navigate('/admin')} className="btn btn-outline-dark btn-sm d-flex align-items-center me-2" title="Admin Panel">
+                <ShieldCheck size={14} className="me-1" /> Admin
+              </button>
+            )}
             <button onClick={() => navigate('/change-password')} className="btn btn-outline-primary btn-sm d-flex align-items-center me-2" title="Change Password">
               <Lock className="me-1" /> Change Password
             </button>
@@ -315,6 +320,7 @@ export default function Projects() {
             <input type="text" placeholder="Search projects..." value={search} onChange={(e)=>setSearch(e.target.value)} className="w-full pl-10 pr-4 py-2 bg-white border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all shadow-sm" />
           </div>
           <div className={`overflow-hidden transition-all duration-300 ease-in-out  max-h-40 mb-8 opacity-100 }`}>
+          {canCreateProject() ? (
           <div className="p-6 bg-white border border-indigo-100 rounded-2xl shadow-sm">
             <form onSubmit={createProject} className="flex items-end gap-4">
               <div className="flex-1">
@@ -326,10 +332,16 @@ export default function Projects() {
               </div>
             </form>
           </div>
+          ) : (
+          <div className="p-3 bg-white border border-warning rounded-2xl shadow-sm text-muted small d-flex align-items-center gap-2">
+            <ShieldCheck size={16} className="text-warning" />
+            You are not allowed to create projects. Contact an admin to request permission.
+          </div>
+          )}
         </div>
         </div>
 
-        {clipboard && (
+        {clipboard && canCreateProject() && (
           <div className="mb-4 p-3 bg-white border border-success rounded-2xl shadow-sm d-flex align-items-center gap-3 flex-wrap">
             <span className="text-muted small">
               Clipboard: <strong>{clipboard.type === 'sheet' ? `Sheet: ${clipboard.sourceSheetId}` : clipboard.sourcePath}</strong>
@@ -400,10 +412,12 @@ export default function Projects() {
                             <Edit2 size={14} className="me-1"/> Rename
                           </button>
                         )}
-                        <button className={`btn btn-sm me-2 ${clipboard?.sourcePath === p.name && clipboard?.type === 'folder' ? 'btn-primary' : 'btn-outline-secondary'}`} onClick={(ev)=>{ev.stopPropagation(); handleCopy(p.name);}}>
-                          <Copy size={14} className="me-1"/> {clipboard?.sourcePath === p.name && clipboard?.type === 'folder' ? 'Copied' : 'Copy'}
-                        </button>
-                        {clipboard && !(clipboard.type === 'folder' && clipboard.sourcePath === p.name) && (
+                        {canCreateProject() && (
+                          <button className={`btn btn-sm me-2 ${clipboard?.sourcePath === p.name && clipboard?.type === 'folder' ? 'btn-primary' : 'btn-outline-secondary'}`} onClick={(ev)=>{ev.stopPropagation(); handleCopy(p.name);}}>
+                            <Copy size={14} className="me-1"/> {clipboard?.sourcePath === p.name && clipboard?.type === 'folder' ? 'Copied' : 'Copy'}
+                          </button>
+                        )}
+                        {canCreateProject() && clipboard && !(clipboard.type === 'folder' && clipboard.sourcePath === p.name) && (
                           <button className="btn btn-sm btn-outline-success me-2" onClick={(ev)=>{ev.stopPropagation(); startPaste(p.name);}} title={`Paste inside ${p.name}`}>
                             <ClipboardPaste size={14} className="me-1"/> Paste Inside
                           </button>

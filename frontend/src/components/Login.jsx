@@ -21,9 +21,9 @@ export default function Login() {
       return;
     }
 
-    // Prevent registration with reserved username 'system'
-    if (isRegistering && username.trim().toLowerCase() === 'system') {
-      setError("'system' is a reserved username. Please choose another.");
+    // Prevent registration with reserved username 'system' or 'admin'
+    if (isRegistering && (username.trim().toLowerCase() === 'system' || username.trim().toLowerCase() === 'admin')) {
+      setError(`'${username.trim()}' is a reserved username. Please choose another.`);
       return;
     }
 
@@ -51,6 +51,8 @@ export default function Login() {
           localStorage.setItem('auth_token', data.token);
           localStorage.setItem('chat_username', data.username);
           localStorage.setItem('login_time', new Date().getTime().toString());
+          localStorage.setItem('is_admin', data.is_admin ? 'true' : 'false');
+          localStorage.setItem('can_create_project', data.can_create_project ? 'true' : 'false');
           navigate('/projects');
         }
       } else {

@@ -501,9 +501,11 @@ func main() {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{
-			"token":    token,
-			"username": req.Username,
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"token":              token,
+			"username":           req.Username,
+			"is_admin":           globalUserManager.IsAdminUser(req.Username),
+			"can_create_project": globalUserManager.CanUserCreateProject(req.Username),
 		})
 	})
 
@@ -604,6 +606,116 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]string{"message": "password updated"})
 	})
 
+	// ── Admin: GET /api/admin/users  (list all users)
+	http.HandleFunc("/api/admin/users", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		token := r.Header.Get("Authorization")
+		caller, err := globalUserManager.ValidateToken(token)
+		if err != nil {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if !globalUserManager.IsAdminUser(caller) {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+		users := globalUserManager.ListUsers()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(users)
+	})
+
+	// ── Admin: PUT /api/admin/user/password  (set any user's password)
+	http.HandleFunc("/api/admin/user/password", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "PUT, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if r.Method != http.MethodPut {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		token := r.Header.Get("Authorization")
+		caller, err := globalUserManager.ValidateToken(token)
+		if err != nil {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if !globalUserManager.IsAdminUser(caller) {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+		var req struct {
+			Username    string `json:"username"`
+			NewPassword string `json:"new_password"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if req.Username == "" || req.NewPassword == "" {
+			http.Error(w, "username and new_password are required", http.StatusBadRequest)
+			return
+		}
+		if err := globalUserManager.AdminSetPassword(req.Username, req.NewPassword); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"message": "password updated"})
+	})
+
+	// ── Admin: PUT /api/admin/user/permission  (grant/revoke project creation)
+	http.HandleFunc("/api/admin/user/permission", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "PUT, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if r.Method != http.MethodPut {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		token := r.Header.Get("Authorization")
+		caller, err := globalUserManager.ValidateToken(token)
+		if err != nil {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if !globalUserManager.IsAdminUser(caller) {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+		var req struct {
+			Username         string `json:"username"`
+			CanCreateProject bool   `json:"can_create_project"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if req.Username == "" {
+			http.Error(w, "username is required", http.StatusBadRequest)
+			return
+		}
+		if err := globalUserManager.SetCanCreateProject(req.Username, req.CanCreateProject); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"message": "permission updated"})
+	})
+
 	http.HandleFunc("/api/sheets", func(w http.ResponseWriter, r *http.Request) {
 		// Simple CORS
 		w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -666,6 +778,15 @@ func main() {
 				}
 				if _, statErr := os.Stat(filepath.Join(dir, req.Name)); statErr == nil {
 					http.Error(w, "A folder with that name already exists", http.StatusConflict)
+					return
+				}
+			}
+			// Only the project owner may create sheets inside a project/subfolder
+			if req.ProjectName != "" {
+				topProject := strings.SplitN(req.ProjectName, "/", 2)[0]
+				owner := globalProjectMeta.GetOwner(topProject)
+				if owner != "" && owner != username {
+					http.Error(w, "Forbidden: only the project owner can create sheets here", http.StatusForbidden)
 					return
 				}
 			}
@@ -814,6 +935,11 @@ func main() {
 			}
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
 				http.Error(w, "Project name required", http.StatusBadRequest)
+				return
+			}
+			// Check permission: only admin and approved users may create projects
+			if !globalUserManager.CanUserCreateProject(username) {
+				http.Error(w, "Not allowed: contact admin to get project creation permission", http.StatusForbidden)
 				return
 			}
 			if _, statErr := os.Stat(filepath.Join(dataDir, req.Name)); statErr == nil {
@@ -1088,11 +1214,11 @@ func main() {
 		}
 
 		var req struct {
-			SourceType    string `json:"source_type"`    // "folder" (default) or "sheet"
-			SourcePath    string `json:"source_path"`    // for folder: "project32io" or "project32io/sub1"; for sheet: project path
+			SourceType    string `json:"source_type"`     // "folder" (default) or "sheet"
+			SourcePath    string `json:"source_path"`     // for folder: "project32io" or "project32io/sub1"; for sheet: project path
 			SourceSheetID string `json:"source_sheet_id"` // only for source_type=sheet
-			DestPath      string `json:"dest_path"`      // for folder: full dest path; for sheet: target project/folder path
-			DestName      string `json:"dest_name"`      // only for source_type=sheet: new sheet name
+			DestPath      string `json:"dest_path"`       // for folder: full dest path; for sheet: target project/folder path
+			DestName      string `json:"dest_name"`       // only for source_type=sheet: new sheet name
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "Invalid request body", http.StatusBadRequest)
@@ -1118,6 +1244,12 @@ func main() {
 				http.Error(w, "Destination folder not found", http.StatusNotFound)
 				return
 			}
+			// Only the owner of the destination project may paste sheets there
+			destTopProject := strings.SplitN(req.DestPath, "/", 2)[0]
+			if destOwner := globalProjectMeta.GetOwner(destTopProject); destOwner != "" && destOwner != username {
+				http.Error(w, "Forbidden: only the project owner can paste sheets here", http.StatusForbidden)
+				return
+			}
 			newSheet := globalSheetManager.CopySheetToProject(req.SourceSheetID, req.SourcePath, req.DestPath, newName, username)
 			if newSheet == nil {
 				http.Error(w, "Source sheet not found", http.StatusNotFound)
@@ -1140,6 +1272,21 @@ func main() {
 		if req.DestPath == req.SourcePath || strings.HasPrefix(req.DestPath, req.SourcePath+"/") {
 			http.Error(w, "Cannot paste a folder inside itself", http.StatusBadRequest)
 			return
+		}
+		// Only the owner of the destination top-level project may paste inside it
+		destTopParts := strings.SplitN(req.DestPath, "/", 2)
+		if len(destTopParts) > 1 {
+			// Pasting inside an existing project – check owner
+			if destOwner := globalProjectMeta.GetOwner(destTopParts[0]); destOwner != "" && destOwner != username {
+				http.Error(w, "Forbidden: only the project owner can paste here", http.StatusForbidden)
+				return
+			}
+		} else {
+			// Pasting as a new top-level project – requires create-project permission
+			if !globalUserManager.CanUserCreateProject(username) {
+				http.Error(w, "Not allowed: contact admin to get project creation permission", http.StatusForbidden)
+				return
+			}
 		}
 
 		// Ensure source exists

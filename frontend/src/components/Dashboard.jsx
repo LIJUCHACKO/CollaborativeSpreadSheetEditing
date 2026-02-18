@@ -47,6 +47,9 @@ export default function Dashboard() {
     const [pastingTarget, setPastingTarget] = useState(null); // '__here__' for current folder, or subfolder name
     const [pasteName, setPasteName] = useState('');
 
+    // Project owner (only top-level project owner can create/paste sheets & subfolders)
+    const [projectOwner, setProjectOwner] = useState('');
+
     // Audit sidebar state
     const [auditLog, setAuditLog] = useState([]);
     const [isAuditOpen, setAuditOpen] = useState(false);
@@ -72,6 +75,7 @@ export default function Dashboard() {
         setCurrentPath(project || '');
         fetchSheets(project || '');
         if (project) fetchFolders(project);
+        if (project) fetchProjectOwner(project);
 
         const sessionCheckInterval = setInterval(() => {
             if (!isSessionValid()) {
@@ -141,6 +145,20 @@ export default function Dashboard() {
             console.error('Failed to fetch folders', error);
             setFolders([]);
         }
+    };
+
+    const fetchProjectOwner = async (pathOverride) => {
+        try {
+            const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
+            const topProject = ((typeof pathOverride === 'string' ? pathOverride : project) || '').split('/')[0];
+            if (!topProject) { setProjectOwner(''); return; }
+            const res = await authenticatedFetch(`http://${host}:8082/api/projects`);
+            if (res.ok) {
+                const list = await res.json();
+                const found = Array.isArray(list) ? list.find(p => p.name === topProject) : null;
+                setProjectOwner(found?.owner || '');
+            }
+        } catch (e) { /* ignore */ }
     };
 
     const fetchProjectAudit = async () => {
@@ -268,6 +286,7 @@ export default function Dashboard() {
         navigate(`/project/${encodeURIComponent(next)}`);
         fetchSheets(next);
         fetchFolders(next);
+        fetchProjectOwner(next);
     };
 
     const goUpOne = () => {
@@ -278,6 +297,7 @@ export default function Dashboard() {
             setCurrentPath(top);
             fetchSheets(top);
             fetchFolders(top);
+            fetchProjectOwner(top);
             return;
         }
         const next = parts.slice(0, -1).join('/');
@@ -285,6 +305,7 @@ export default function Dashboard() {
         navigate(`/project/${encodeURIComponent(next)}`);
         fetchSheets(next);
         fetchFolders(next);
+        fetchProjectOwner(next);
     };
 
     const createFolder = async (e) => {
@@ -587,6 +608,9 @@ export default function Dashboard() {
         return list.filter((s) => (s?.name || '').toLowerCase().includes(q));
     }, [sheets, searchQuery]);
 
+    // Only the project owner may create/paste sheets and subfolders
+    const isOwner = !projectOwner || projectOwner === username;
+
     return (
         <div className="min-h-screen bg-gray-50 flex flex-col font-sans text-gray-900">
             {/* Bootstrap Navbar */}
@@ -715,7 +739,8 @@ export default function Dashboard() {
                 )}
                 
                  <div><h2>Sheets</h2></div>
-                {/* Create Sheet Modal/Collapse */}
+                {/* Create Sheet - owner only */}
+                {isOwner ? (
                 <div className={`overflow-hidden transition-all duration-300 ease-in-out ${isCreating ? 'max-h-40 mb-8 opacity-100' : 'max-h-0 opacity-0'}`}>
                     <div className="p-6 bg-white border border-indigo-100 rounded-2xl shadow-sm">
                         <form onSubmit={createSheet} className="flex items-end gap-4">
@@ -740,6 +765,11 @@ export default function Dashboard() {
                         </form>
                     </div>
                 </div>
+                ) : (
+                <div className="mb-4 p-3 bg-white border border-warning rounded-2xl shadow-sm text-muted small">
+                    Only the project owner can create sheets here.
+                </div>
+                )}
                 {/* Actions Bar (Search only) */}
                 <div className="flex flex-col md:flex-row justify-end items-start md:items-center gap-4 mb-8">
                     <div className="relative flex-1 md:w-64 group">
@@ -847,9 +877,10 @@ export default function Dashboard() {
                 </div>
                 {/* Folders */}
                 {currentPath && (
-                    <div className="mb-6">
+                    <div className="mb-6 mt-4">
                         <div><h2>SubFolders</h2></div>
-                        {clipboard && (
+                        {/* Clipboard banner — owner only for paste */}
+                        {clipboard && isOwner && (
                             <div className="mb-3 p-2 bg-white border border-success rounded shadow-sm d-flex align-items-center gap-2 flex-wrap">
                                 <span className="text-muted small">
                                     Clipboard ({clipboard.type === 'sheet' ? 'Sheet' : 'Folder'}): <strong>{clipboard.type === 'sheet' ? `${clipboard.sourcePath}/${clipboard.sourceSheetId}` : clipboard.sourcePath}</strong>
@@ -877,83 +908,116 @@ export default function Dashboard() {
                                 </button>
                             </div>
                         )}
-                        <div className="p-3 bg-white border rounded-2xl shadow-sm">
-                            <div className="d-flex align-items-end gap-2 mb-3">
-                                <input
-                                    type="text"
-                                    className="form-control form-control-sm"
-                                    value={newFolderName}
-                                    onChange={(e)=>setNewFolderName(e.target.value)}
-                                    placeholder="New subfolder name"
-                                    style={{ maxWidth: 280 }}
-                                />
-                                <button className="btn btn-sm btn-primary" onClick={createFolder}>Create Folder</button>
+                        {clipboard && !isOwner && (
+                            <div className="mb-3 p-2 bg-white border border-success rounded shadow-sm d-flex align-items-center gap-2 flex-wrap">
+                                <span className="text-muted small">
+                                    Clipboard ({clipboard.type === 'sheet' ? 'Sheet' : 'Folder'}): <strong>{clipboard.type === 'sheet' ? `${clipboard.sourcePath}/${clipboard.sourceSheetId}` : clipboard.sourcePath}</strong>
+                                </span>
+                                <span className="small text-warning ms-2">Only the project owner can paste here.</span>
+                                <button className="btn btn-sm btn-outline-secondary ms-auto" onClick={clearClipboardFn}>
+                                    <X size={14} className="me-1" /> Clear
+                                </button>
                             </div>
-                            {folders.length > 0 ? (
-                                <div className="d-flex flex-wrap gap-2">
+                        )}
+
+                        <div className="bg-white border rounded-2xl shadow-sm overflow-hidden">
+                            {/* Create subfolder row — owner only */}
+                            {isOwner && (
+                                <div className="p-3 border-bottom d-flex align-items-center gap-2">
+                                    <input
+                                        type="text"
+                                        className="form-control form-control-sm"
+                                        value={newFolderName}
+                                        onChange={(e) => setNewFolderName(e.target.value)}
+                                        placeholder="New subfolder name"
+                                        style={{ maxWidth: 280 }}
+                                        onKeyDown={(e) => { if (e.key === 'Enter') createFolder(e); }}
+                                    />
+                                    <button className="btn btn-sm btn-primary" onClick={createFolder}>Create Folder</button>
+                                </div>
+                            )}
+                            <table className="table table-hover mb-0 align-middle">
+                                <thead style={{ background: 'lightgray' }}>
+                                    <tr>
+                                        <th>Folder Name</th>
+                                        <th className="text-end">Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
                                     {folders.map((name) => {
                                         const fullPath = currentPath ? `${currentPath}/${name}` : name;
                                         const isClipboardSrc = clipboard && clipboard.type === 'folder' && clipboard.sourcePath === fullPath;
                                         return (
-                                        <div key={name} className="d-flex align-items-center gap-1">
-                                            {editingFolderName === name ? (
-                                                <>
+                                        <tr key={name}>
+                                            <td style={{ cursor: 'pointer' }} onClick={() => editingFolderName !== name && goToFolder(name)}>
+                                                {editingFolderName === name ? (
                                                     <input
                                                         type="text"
                                                         className="form-control form-control-sm"
                                                         value={editingFolderNewName}
                                                         onChange={(e) => setEditingFolderNewName(e.target.value)}
+                                                        onClick={(e) => e.stopPropagation()}
                                                         onKeyDown={(e) => {
                                                             if (e.key === 'Enter') renameFolder(name);
                                                             if (e.key === 'Escape') cancelRenamingFolder();
                                                         }}
-                                                        style={{ width: '150px' }}
+                                                        style={{ maxWidth: 220 }}
                                                         autoFocus
                                                     />
-                                                    <button className="btn btn-sm btn-success" onClick={() => renameFolder(name)}>Save</button>
-                                                    <button className="btn btn-sm btn-secondary" onClick={cancelRenamingFolder}>Cancel</button>
-                                                </>
-                                            ) : pastingTarget === name ? (
-                                                <div className="d-flex align-items-center gap-1">
-                                                    <span className="small text-muted">
-                                                        Paste {clipboard?.type === 'sheet' ? 'sheet' : 'folder'} into <strong>{name}</strong>:
-                                                    </span>
-                                                    <input
-                                                        type="text"
-                                                        className="form-control form-control-sm"
-                                                        placeholder="Paste name"
-                                                        value={pasteName}
-                                                        onChange={(e) => setPasteName(e.target.value)}
-                                                        style={{ width: '150px' }}
-                                                    />
-                                                    <button className="btn btn-sm btn-success" disabled={!pasteName.trim()} onClick={confirmPaste}>Paste</button>
-                                                    <button className="btn btn-sm btn-secondary" onClick={cancelPaste}>Cancel</button>
-                                                </div>
-                                            ) : (
-                                                <>
-                                                    <button className="btn btn-sm btn-outline-primary" onClick={() => goToFolder(name)}>
-                                                        {name}
-                                                    </button>
-                                                    <button className="btn btn-sm btn-outline-secondary" onClick={() => startRenamingFolder(name)} title="Rename folder">
-                                                        <Edit2 size={14} />
-                                                    </button>
-                                                    <button className={`btn btn-sm ${isClipboardSrc ? 'btn-primary' : 'btn-outline-secondary'}`} onClick={() => handleCopyFolder(name)} title="Copy folder">
-                                                        <Copy size={14} />
-                                                    </button>
-                                                    {clipboard && !isClipboardSrc && (
-                                                        <button className="btn btn-sm btn-outline-success" onClick={() => startPaste(name)} title="Paste inside this folder">
-                                                            <ClipboardPaste size={14} />
+                                                ) : (
+                                                    <span className="text-primary fw-semibold">{name}</span>
+                                                )}
+                                            </td>
+                                            <td className="text-end">
+                                                {editingFolderName === name ? (
+                                                    <>
+                                                        <button className="btn btn-sm btn-success me-1" onClick={() => renameFolder(name)}>Save</button>
+                                                        <button className="btn btn-sm btn-secondary" onClick={cancelRenamingFolder}>Cancel</button>
+                                                    </>
+                                                ) : pastingTarget === name ? (
+                                                    <div className="d-flex align-items-center gap-1 justify-content-end">
+                                                        <span className="small text-muted">
+                                                            Paste {clipboard?.type === 'sheet' ? 'sheet' : 'folder'} into <strong>{name}</strong>:
+                                                        </span>
+                                                        <input
+                                                            type="text"
+                                                            className="form-control form-control-sm"
+                                                            placeholder="Paste name"
+                                                            value={pasteName}
+                                                            onChange={(e) => setPasteName(e.target.value)}
+                                                            style={{ width: '140px' }}
+                                                        />
+                                                        <button className="btn btn-sm btn-success" disabled={!pasteName.trim()} onClick={confirmPaste}>Paste</button>
+                                                        <button className="btn btn-sm btn-secondary" onClick={cancelPaste}>Cancel</button>
+                                                    </div>
+                                                ) : (
+                                                    <div className="d-flex gap-1 justify-content-end">
+                                                        {isOwner && (
+                                                            <button className="btn btn-sm btn-outline-secondary" onClick={(e) => { e.stopPropagation(); startRenamingFolder(name); }} title="Rename folder">
+                                                                <Edit2 size={14} />
+                                                            </button>
+                                                        )}
+                                                        <button className={`btn btn-sm ${isClipboardSrc ? 'btn-primary' : 'btn-outline-secondary'}`} onClick={(e) => { e.stopPropagation(); handleCopyFolder(name); }} title="Copy folder">
+                                                            <Copy size={14} />
                                                         </button>
-                                                    )}
-                                                </>
-                                            )}
-                                        </div>
+                                                        {clipboard && !isClipboardSrc && isOwner && (
+                                                            <button className="btn btn-sm btn-outline-success" onClick={(e) => { e.stopPropagation(); startPaste(name); }} title="Paste inside this folder">
+                                                                <ClipboardPaste size={14} />
+                                                            </button>
+                                                        )}
+                                                    </div>
+                                                )}
+                                            </td>
+                                        </tr>
                                         );
                                     })}
-                                </div>
-                            ) : (
-                                <div className="text-muted small">No subfolders</div>
-                            )}
+                                    {folders.length === 0 && (
+                                        <tr>
+                                            <td colSpan={2} className="text-center text-muted py-3">No subfolders.</td>
+                                        </tr>
+                                    )}
+                                </tbody>
+                            </table>
                         </div>
                     </div>
                 )}

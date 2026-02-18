@@ -43,6 +43,8 @@ export function clearAuth() {
   localStorage.removeItem('auth_token');
   localStorage.removeItem('chat_username');
   localStorage.removeItem('login_time');
+  localStorage.removeItem('is_admin');
+  localStorage.removeItem('can_create_project');
 }
 
 /**
@@ -111,4 +113,18 @@ export function apiUrl(path) {
   }
   const p = path.startsWith('/') ? path : `/${path}`;
   return `${base}${p}`;
+}
+
+/**
+ * Returns true if the current logged-in user is an admin.
+ */
+export function isAdmin() {
+  return localStorage.getItem('is_admin') === 'true';
+}
+
+/**
+ * Returns true if the current user is allowed to create projects.
+ */
+export function canCreateProject() {
+  return localStorage.getItem('can_create_project') === 'true';
 }

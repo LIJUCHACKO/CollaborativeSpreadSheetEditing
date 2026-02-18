@@ -20,9 +20,11 @@ var userPersistenceFile = filepath.Join(dataDir, "users.json")
 const sessionTimeout = 1 * time.Hour
 
 type User struct {
-	Username     string      `json:"username"`
-	PasswordHash string      `json:"password_hash"`
-	Prefs        Preferences `json:"prefs,omitempty"`
+	Username         string      `json:"username"`
+	PasswordHash     string      `json:"password_hash"`
+	Prefs            Preferences `json:"prefs,omitempty"`
+	IsAdmin          bool        `json:"is_admin,omitempty"`
+	CanCreateProject bool        `json:"can_create_project,omitempty"`
 }
 
 type Session struct {
@@ -52,8 +54,9 @@ func (um *UserManager) Register(username, password string) error {
 	um.mu.Lock()
 	defer um.mu.Unlock()
 
-	// Disallow reserved username "system" (case-insensitive)
-	if strings.EqualFold(strings.TrimSpace(username), "system") {
+	// Disallow reserved usernames "system" and "admin" (case-insensitive)
+	trimmed := strings.TrimSpace(username)
+	if strings.EqualFold(trimmed, "system") || strings.EqualFold(trimmed, "admin") {
 		return errors.New("reserved username")
 	}
 
@@ -67,9 +70,10 @@ func (um *UserManager) Register(username, password string) error {
 	}
 
 	user := &User{
-		Username:     username,
-		PasswordHash: string(hashedPassword),
-		Prefs:        Preferences{VisibleRows: 15, VisibleCols: 7},
+		Username:         username,
+		PasswordHash:     string(hashedPassword),
+		Prefs:            Preferences{VisibleRows: 15, VisibleCols: 7},
+		CanCreateProject: false, // must be approved by admin
 	}
 
 	um.users[username] = user
@@ -181,6 +185,76 @@ func (um *UserManager) ListUsernames() []string {
 	return list
 }
 
+// IsAdminUser returns true if the given username is an admin
+func (um *UserManager) IsAdminUser(username string) bool {
+	um.mu.RLock()
+	defer um.mu.RUnlock()
+	u, ok := um.users[username]
+	return ok && u.IsAdmin
+}
+
+// CanCreateProject returns true if user is allowed to create projects
+func (um *UserManager) CanUserCreateProject(username string) bool {
+	um.mu.RLock()
+	defer um.mu.RUnlock()
+	u, ok := um.users[username]
+	return ok && (u.IsAdmin || u.CanCreateProject)
+}
+
+// SetCanCreateProject grants or revokes project-creation permission for a user
+func (um *UserManager) SetCanCreateProject(username string, allowed bool) error {
+	um.mu.Lock()
+	defer um.mu.Unlock()
+	u, ok := um.users[username]
+	if !ok {
+		return errors.New("user not found")
+	}
+	u.CanCreateProject = allowed
+	um.saveUsersLocked()
+	return nil
+}
+
+// AdminSetPassword forcefully sets a new password for any user (admin action, no old-password check)
+func (um *UserManager) AdminSetPassword(username, newPassword string) error {
+	um.mu.Lock()
+	defer um.mu.Unlock()
+	u, ok := um.users[username]
+	if !ok {
+		return errors.New("user not found")
+	}
+	if len(newPassword) < 6 {
+		return errors.New("new password must be at least 6 characters")
+	}
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+	u.PasswordHash = string(hashedPassword)
+	um.saveUsersLocked()
+	return nil
+}
+
+// ListUsers returns info about all users (safe for admin view)
+type UserInfo struct {
+	Username         string `json:"username"`
+	IsAdmin          bool   `json:"is_admin"`
+	CanCreateProject bool   `json:"can_create_project"`
+}
+
+func (um *UserManager) ListUsers() []UserInfo {
+	um.mu.RLock()
+	defer um.mu.RUnlock()
+	list := make([]UserInfo, 0, len(um.users))
+	for _, u := range um.users {
+		list = append(list, UserInfo{
+			Username:         u.Username,
+			IsAdmin:          u.IsAdmin,
+			CanCreateProject: u.IsAdmin || u.CanCreateProject,
+		})
+	}
+	return list
+}
+
 func (um *UserManager) Load() {
 	um.mu.Lock()
 	defer um.mu.Unlock()
@@ -188,6 +262,7 @@ func (um *UserManager) Load() {
 	file, err := os.Open(userPersistenceFile)
 	if err != nil {
 		if os.IsNotExist(err) {
+			um.ensureAdminLocked()
 			return
 		}
 		log.Printf("Error opening users file: %v", err)
@@ -203,6 +278,35 @@ func (um *UserManager) Load() {
 
 	um.users = loadedUsers
 	log.Printf("Loaded %d users from disk", len(um.users))
+
+	// Ensure default admin exists
+	um.ensureAdminLocked()
+}
+
+// ensureAdminLocked creates the default admin user if no admin exists.
+// Must be called with the lock held.
+func (um *UserManager) ensureAdminLocked() {
+	// Check if any admin exists
+	for _, u := range um.users {
+		if u.IsAdmin {
+			return // already have an admin
+		}
+	}
+	// Create default admin
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte("admin"), bcrypt.DefaultCost)
+	if err != nil {
+		log.Printf("Failed to hash admin password: %v", err)
+		return
+	}
+	um.users["admin"] = &User{
+		Username:         "admin",
+		PasswordHash:     string(hashedPassword),
+		Prefs:            Preferences{VisibleRows: 15, VisibleCols: 7},
+		IsAdmin:          true,
+		CanCreateProject: true,
+	}
+	um.saveUsersLocked()
+	log.Printf("Default admin user created")
 }
 
 func (um *UserManager) saveUsersLocked() {
