@@ -5115,20 +5115,47 @@ func (sm *SheetManager) DuplicateProject(sourceProject, newProject, newOwner str
 	if sourceProject == "" || newProject == "" {
 		return fmt.Errorf("source and new project names required")
 	}
-	// Ensure destination directory
-	destDir := filepath.Join(dataDir, newProject)
-	if err := os.MkdirAll(destDir, 0755); err != nil {
+	// Ensure top-level destination directory
+	if err := os.MkdirAll(filepath.Join(dataDir, newProject), 0755); err != nil {
 		return fmt.Errorf("failed to create dest project dir: %w", err)
 	}
-	// Gather sheets to duplicate
+
+	// rewriteRef replaces every occurrence of the sourceProject prefix in a cross-sheet
+	// reference string (Script or OptionsRange) with newProject.
+	// Cross-sheet refs are written as "sourceProject/..." so a simple prefix replacement is safe.
+	rewriteRef := func(ref string) string {
+		oldPrefix := sourceProject + "/"
+		newPrefix := newProject + "/"
+		return strings.ReplaceAll(ref, oldPrefix, newPrefix)
+	}
+
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+
 	for _, s := range sm.sheets {
-		if s == nil || s.ProjectName != sourceProject {
+		if s == nil {
 			continue
 		}
-		// Clone maintaining same ID and owner/permissions
-		// Ensure new owner is present in editors
+		// Include the top-level project sheets AND all subfolder sheets
+		// (subfolder sheets have ProjectName like "sourceProject/subA/subB")
+		if s.ProjectName != sourceProject && !strings.HasPrefix(s.ProjectName, sourceProject+"/") {
+			continue
+		}
+
+		// Compute the ProjectName for the clone: replace the leading sourceProject with newProject
+		var cloneProjectName string
+		if s.ProjectName == sourceProject {
+			cloneProjectName = newProject
+		} else {
+			cloneProjectName = newProject + s.ProjectName[len(sourceProject):]
+		}
+
+		// Ensure the subfolder directory exists in the new project tree
+		if err := os.MkdirAll(filepath.Join(dataDir, cloneProjectName), 0755); err != nil {
+			return fmt.Errorf("failed to create subfolder %s: %w", cloneProjectName, err)
+		}
+
+		// Build permissions for the clone
 		perms := s.Permissions
 		hasOwner := false
 		for _, e := range perms.Editors {
@@ -5144,18 +5171,27 @@ func (sm *SheetManager) DuplicateProject(sourceProject, newProject, newOwner str
 		clone := &Sheet{
 			Name:        s.Name,
 			Owner:       newOwner,
-			ProjectName: newProject,
+			ProjectName: cloneProjectName,
 			Data:        make(map[string]map[string]Cell),
 			ColWidths:   make(map[string]int),
 			RowHeights:  make(map[string]int),
 			Permissions: perms,
 			AuditLog:    append([]AuditEntry{}, s.AuditLog...),
 		}
-		// Deep copy state
+
+		// Deep copy cell data, rewriting any intra-project cross-sheet references
 		s.mu.RLock()
 		for r, cols := range s.Data {
 			clone.Data[r] = make(map[string]Cell, len(cols))
 			for c, cell := range cols {
+				// Rewrite Script: replace {{sourceProject/...}} with {{newProject/...}}
+				if strings.TrimSpace(cell.Script) != "" {
+					cell.Script = rewriteRef(cell.Script)
+				}
+				// Rewrite OptionsRange: replace sourceProject/... with newProject/...
+				if strings.TrimSpace(cell.OptionsRange) != "" {
+					cell.OptionsRange = rewriteRef(cell.OptionsRange)
+				}
 				clone.Data[r][c] = cell
 			}
 		}
@@ -5166,8 +5202,9 @@ func (sm *SheetManager) DuplicateProject(sourceProject, newProject, newOwner str
 			clone.RowHeights[k] = v
 		}
 		s.mu.RUnlock()
-		// Register and persist
-		sm.sheets[sheetKey(newProject, clone.Name)] = clone
+
+		// Register in memory and persist to disk
+		sm.sheets[sheetKey(cloneProjectName, clone.Name)] = clone
 		sm.saveSheetLocked(clone)
 	}
 	return nil
