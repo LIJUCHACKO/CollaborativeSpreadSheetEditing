@@ -14,10 +14,10 @@ import (
 // ScriptIdentifier represents a unique script location
 type ScriptIdentifier struct {
 	ScriptProjectName string
-	ScriptSheetID     string
+	ScriptSheetName   string
 	ScriptCellID      string
 	ReferencedRange   string // e.g., "A2" or "A2:B3" is the cell or range that this script depends on (used for dependency tracking)
-	// projectname and sheetID in ReferencedRange are not needed because they are already captured in the key used in scriptDeps map[string][]ScriptIdentifier
+	// projectname and sheetName in ReferencedRange are not needed because they are already captured in the key used in scriptDeps map[string][]ScriptIdentifier
 }
 
 type cellChangesstruct struct {
@@ -41,7 +41,7 @@ cellChanges := make(map[string]struct {
 */
 // String returns the string representation of the script identifier
 func (si ScriptIdentifier) String() string {
-	return si.ScriptProjectName + "/" + si.ScriptSheetID + "/" + si.ScriptCellID
+	return si.ScriptProjectName + "/" + si.ScriptSheetName + "/" + si.ScriptCellID
 }
 
 // ParseScriptIdentifier parses a script identifier string
@@ -52,7 +52,7 @@ func ParseScriptIdentifier(s string) (ScriptIdentifier, bool) {
 	}
 	return ScriptIdentifier{
 		ScriptProjectName: parts[0],
-		ScriptSheetID:     parts[1],
+		ScriptSheetName:   parts[1],
 		ScriptCellID:      parts[2],
 	}, true
 }
@@ -74,8 +74,10 @@ func ExtractScriptDependencies(script, currentProject, currentSheet string) []De
 	var deps []DependencyInfo
 	seenDeps := make(map[string]bool)
 
-	// Pattern to match {{projectname/sheetid/A2}} or {{projectname/sheetid/A2:B3}} (cross-sheet references)
-	crossSheetPattern := regexp.MustCompile(`\{\{([^/\{\}]+)/([^/\{\}]+)/([A-Z]+\d+(?::[A-Z]+\d+)?)\}\}`)
+	// Pattern to match {{project/.../sheetid/A2}} or {{project/.../sheetid/A2:B3}} (cross-sheet references).
+	// The project path may contain slashes (subfolder), so we allow any characters except {{ and }} before
+	// the last two slash-delimited segments (sheetid and cell range).
+	crossSheetPattern := regexp.MustCompile(`\{\{((?:[^/\{\}]+/)+)([^/\{\}]+)/([A-Z]+\d+(?::[A-Z]+\d+)?)\}\}`)
 
 	// Pattern to match {{A2}} or {{A2:B3}} (same sheet references)
 	tagPattern := regexp.MustCompile(`\{\{([A-Z]+\d+(?::[A-Z]+\d+)?)\}\}`)
@@ -84,7 +86,8 @@ func ExtractScriptDependencies(script, currentProject, currentSheet string) []De
 	matches := crossSheetPattern.FindAllStringSubmatch(script, -1)
 	for _, match := range matches {
 		if len(match) >= 4 {
-			refProject := match[1]
+			// match[1] is "project/.../" (trailing slash), match[2] is sheetid, match[3] is range
+			refProject := strings.TrimSuffix(match[1], "/")
 			refSheet := match[2]
 			refRange := match[3]
 			key := refProject + "/" + refSheet + "/" + refRange
@@ -121,12 +124,12 @@ func ExtractScriptDependencies(script, currentProject, currentSheet string) []De
 
 // UpdateScriptDependencies updates the dependency map for a script
 // Should be called whenever a script is modified
-// projectName, sheetID, cellID identify the script location
+// projectName, sheetName, cellID identify the script location
 // script is the new script content (used to extract dependencies)
 // If script is empty, it will remove all dependencies for this script
 // Function is used when script is modified
-// eg:- scriptDeps["projectName/sheetID"] = [ScriptIdentifier{ScriptProjectName: projectName, ScriptSheetID: sheetID, ScriptCellID: cellID, ReferencedRange: "A2"})
-func (sm *SheetManager) UpdateScriptDependencies(scriptProjectName, scriptSheetID, scriptCellID, script, rowLabel, colLabel string) {
+// eg:- scriptDeps["projectName/sheetName"] = [ScriptIdentifier{ScriptProjectName: projectName, ScriptSheetName: sheetName, ScriptCellID: cellID, ReferencedRange: "A2"})
+func (sm *SheetManager) UpdateScriptDependencies(scriptProjectName, scriptSheetName, scriptCellID, script, rowLabel, colLabel string) {
 	sm.scriptDepsMu.Lock()
 	defer sm.scriptDepsMu.Unlock()
 
@@ -135,7 +138,7 @@ func (sm *SheetManager) UpdateScriptDependencies(scriptProjectName, scriptSheetI
 		filtered := make([]ScriptIdentifier, 0, len(scripts))
 		for _, s := range scripts {
 			// Compare without ReferencedRange since we're identifying the script itself
-			if s.ScriptProjectName != scriptProjectName || s.ScriptSheetID != scriptSheetID || s.ScriptCellID != scriptCellID {
+			if s.ScriptProjectName != scriptProjectName || s.ScriptSheetName != scriptSheetName || s.ScriptCellID != scriptCellID {
 				filtered = append(filtered, s)
 			}
 		}
@@ -148,7 +151,7 @@ func (sm *SheetManager) UpdateScriptDependencies(scriptProjectName, scriptSheetI
 
 	// If script is empty, we're done (dependencies removed)
 	if strings.TrimSpace(script) == "" {
-		s := globalSheetManager.GetSheetBy(scriptSheetID, scriptProjectName)
+		s := globalSheetManager.GetSheetBy(scriptSheetName, scriptProjectName)
 		lockedbyScriptAt := "script-span " + scriptCellID
 		for rKey, rowMap := range s.Data {
 			for cKey, cell := range rowMap {
@@ -166,14 +169,14 @@ func (sm *SheetManager) UpdateScriptDependencies(scriptProjectName, scriptSheetI
 	}
 
 	// Add new dependencies
-	deps := ExtractScriptDependencies(script, scriptProjectName, scriptSheetID)
+	deps := ExtractScriptDependencies(script, scriptProjectName, scriptSheetName)
 	if len(deps) == 0 {
 		// No explicit references found; add self cell as dependency
 		//fmt.Println("No explicit references found in script, adding self reference for cell ", scriptCellID)
 		if strings.TrimSpace(colLabel) != "" && strings.TrimSpace(rowLabel) != "" {
 			deps = append(deps, DependencyInfo{
 				Project: scriptProjectName,
-				Sheet:   scriptSheetID,
+				Sheet:   scriptSheetName,
 				Range:   colLabel + rowLabel,
 			})
 		}
@@ -182,7 +185,7 @@ func (sm *SheetManager) UpdateScriptDependencies(scriptProjectName, scriptSheetI
 		sheetKey := dep.Project + "/" + dep.Sheet
 		scriptIdent := ScriptIdentifier{
 			ScriptProjectName: scriptProjectName,
-			ScriptSheetID:     scriptSheetID,
+			ScriptSheetName:   scriptSheetName,
 			ScriptCellID:      scriptCellID,
 			ReferencedRange:   dep.Range,
 		}
@@ -193,11 +196,11 @@ func (sm *SheetManager) UpdateScriptDependencies(scriptProjectName, scriptSheetI
 // GetDependentScripts returns all scripts that depend on the given cell
 // Checks if the cell matches any exact references or falls within range references
 // If a script in the same cell depends on itself, it will be placed first in the result
-func (sm *SheetManager) GetDependentScripts(projectName, sheetID, row, col string) []ScriptIdentifier {
+func (sm *SheetManager) GetDependentScripts(projectName, sheetName, row, col string) []ScriptIdentifier {
 	sm.scriptDepsMu.RLock()
 	defer sm.scriptDepsMu.RUnlock()
 
-	sheetKey := projectName + "/" + sheetID
+	sheetKey := projectName + "/" + sheetName
 	var result []ScriptIdentifier
 	var sameCell *ScriptIdentifier // Track if there's a script in the same cell
 	seen := make(map[string]bool)  // Track unique scripts: "project/sheet/cellid"
@@ -217,11 +220,11 @@ func (sm *SheetManager) GetDependentScripts(projectName, sheetID, row, col strin
 
 	// Check each script's referenced range
 	for _, si := range scripts {
-		scriptKey := si.ScriptProjectName + "/" + si.ScriptSheetID + "/" + si.ScriptCellID
+		scriptKey := si.ScriptProjectName + "/" + si.ScriptSheetName + "/" + si.ScriptCellID
 		if seen[scriptKey] {
 			continue
 		}
-		//fmt.Println("Checking script at ", si.ScriptProjectName, "/", si.ScriptSheetID, " cell ", si.ScriptCellID, " with reference ", si.ReferencedRange, " against changed cell ", projectName, "/", sheetID, " cell ", col+row)
+		//fmt.Println("Checking script at ", si.ScriptProjectName, "/", si.ScriptSheetName, " cell ", si.ScriptCellID, " with reference ", si.ReferencedRange, " against changed cell ", projectName, "/", sheetName, " cell ", col+row)
 		refRange := si.ReferencedRange
 		matches := false
 
@@ -273,7 +276,7 @@ func (sm *SheetManager) GetDependentScripts(projectName, sheetID, row, col strin
 
 		if matches {
 			// Check if this script is in the same cell
-			if si.ScriptProjectName == projectName && si.ScriptSheetID == sheetID && si.ScriptCellID == cellID {
+			if si.ScriptProjectName == projectName && si.ScriptSheetName == sheetName && si.ScriptCellID == cellID {
 				// Store the same-cell script to add it first
 				siCopy := si
 				sameCell = &siCopy
@@ -328,9 +331,9 @@ func (sm *SheetManager) RenameProjectInDependencies(oldProject, newProject strin
 	sheetsToRemap := make([]*Sheet, 0)
 	oldKeys := make([]string, 0)
 
-	// First pass: identify sheets that need to be remapped
+	// First pass: identify sheets that need to be remapped (including sheets in subfolders)
 	for key, sheet := range sm.sheets {
-		if sheet.ProjectName == oldProject {
+		if sheet.ProjectName == oldProject || strings.HasPrefix(sheet.ProjectName, oldProject+"/") {
 			sheetsToRemap = append(sheetsToRemap, sheet)
 			oldKeys = append(oldKeys, key)
 		}
@@ -339,12 +342,19 @@ func (sm *SheetManager) RenameProjectInDependencies(oldProject, newProject strin
 	// Update sheet ProjectName and remap in sheets map
 	for i, sheet := range sheetsToRemap {
 		sheet.mu.Lock()
-		sheet.ProjectName = newProject
+		var updatedPN string
+		if sheet.ProjectName == oldProject {
+			updatedPN = newProject
+		} else {
+			// subfolder: replace only the leading oldProject prefix
+			updatedPN = newProject + sheet.ProjectName[len(oldProject):]
+		}
+		sheet.ProjectName = updatedPN
 		sheet.mu.Unlock()
 
 		// Remove old key and add with new key
 		delete(sm.sheets, oldKeys[i])
-		sm.sheets[sheetKey(newProject, sheet.ID)] = sheet
+		sm.sheets[sheetKey(updatedPN, sheet.Name)] = sheet
 	}
 	sm.mu.Unlock()
 
@@ -385,14 +395,14 @@ func (sm *SheetManager) RenameProjectInDependencies(oldProject, newProject strin
 		// Save the sheet if any scripts were modified
 		if modified {
 			sm.SaveSheet(sheet)
-			globalSheetManager.QueueRowColUpdate(sheet.ProjectName, sheet.ID)
+			globalSheetManager.QueueRowColUpdate(sheet.ProjectName, sheet.Name)
 			// Send ROW_COL_UPDATED message to clients if sheet is opened
 			/*
 				if globalHub != nil {
 					payload, _ := json.Marshal(sheet.SnapshotForClient())
 					globalHub.broadcast <- &Message{
 						Type:    "ROW_COL_UPDATED",
-						SheetID: sheet.ID,
+						SheetName: sheet.ID,
 						Project: sheet.ProjectName,
 						Payload: payload,
 						User:    "system", // System update for project rename
@@ -403,10 +413,79 @@ func (sm *SheetManager) RenameProjectInDependencies(oldProject, newProject strin
 	}
 }
 
+// RenameSheetInDependencies updates all dependency references when a sheet is renamed within a project.
+// It also updates the sheet name in all scripts that reference the old sheet name.
+func (sm *SheetManager) RenameSheetInDependencies(projectName, oldSheetName, newSheetName string) {
+	sm.scriptDepsMu.Lock()
+	defer sm.scriptDepsMu.Unlock()
+
+	// Create new map with updated keys
+	newDeps := make(map[string][]ScriptIdentifier)
+
+	for sk, scripts := range sm.scriptDeps {
+		// Update sheet key if it matches the renamed sheet
+		newSk := sk
+		parts := strings.Split(sk, "/")
+		if len(parts) >= 2 && parts[0] == projectName && parts[1] == oldSheetName {
+			parts[1] = newSheetName
+			newSk = strings.Join(parts, "/")
+		}
+
+		// Update script identifiers
+		newScripts := make([]ScriptIdentifier, 0, len(scripts))
+		for _, script := range scripts {
+			if script.ScriptProjectName == projectName && script.ScriptSheetName == oldSheetName {
+				script.ScriptSheetName = newSheetName
+			}
+			newScripts = append(newScripts, script)
+		}
+
+		newDeps[newSk] = newScripts
+	}
+
+	sm.scriptDeps = newDeps
+
+	// Update sheet names in all scripts that contain cross-sheet references to the renamed sheet.
+	// Pattern: {{projectName/oldSheetName/cellref}} -> {{projectName/newSheetName/cellref}}
+	sm.mu.RLock()
+	sheetsToUpdate := make([]*Sheet, 0, len(sm.sheets))
+	for _, sheet := range sm.sheets {
+		sheetsToUpdate = append(sheetsToUpdate, sheet)
+	}
+	sm.mu.RUnlock()
+
+	for _, sheet := range sheetsToUpdate {
+		sheet.mu.Lock()
+		modified := false
+		for rowKey, rowMap := range sheet.Data {
+			for colKey, cell := range rowMap {
+				if strings.TrimSpace(cell.Script) != "" {
+					oldPattern := "{{" + projectName + "/" + oldSheetName + "/"
+					newPattern := "{{" + projectName + "/" + newSheetName + "/"
+					updatedScript := strings.ReplaceAll(cell.Script, oldPattern, newPattern)
+
+					if updatedScript != cell.Script {
+						cellCopy := sheet.Data[rowKey][colKey]
+						cellCopy.Script = updatedScript
+						sheet.Data[rowKey][colKey] = cellCopy
+						modified = true
+					}
+				}
+			}
+		}
+		sheet.mu.Unlock()
+
+		if modified {
+			sm.SaveSheet(sheet)
+			globalSheetManager.QueueRowColUpdate(sheet.ProjectName, sheet.Name)
+		}
+	}
+}
+
 // on script change
-func ExecuteCellScriptonChange(projectName, sheetID, row, col string) {
+func ExecuteCellScriptonChange(projectName, sheetName, row, col string) {
 	//find a cell addressed in the script and add it in globalSheetManager.CellsModifiedManuallyQueue so that we can trigger script execution for that cell
-	s := globalSheetManager.GetSheetBy(sheetID, projectName)
+	s := globalSheetManager.GetSheetBy(sheetName, projectName)
 	if s == nil {
 		return
 	}
@@ -419,12 +498,12 @@ func ExecuteCellScriptonChange(projectName, sheetID, row, col string) {
 	}
 
 	// Extract all dependencies from the script
-	deps := ExtractScriptDependencies(cur.Script, projectName, sheetID)
+	deps := ExtractScriptDependencies(cur.Script, projectName, sheetName)
 	if len(deps) == 0 {
 		// No explicit references found; add self cell as dependency
 		deps = append(deps, DependencyInfo{
 			Project: projectName,
-			Sheet:   sheetID,
+			Sheet:   sheetName,
 			Range:   col + row,
 		})
 	}
@@ -467,7 +546,7 @@ func ExecuteCellScriptonChange(projectName, sheetID, row, col string) {
 				globalSheetManager.CellsModifiedManuallyQueue,
 				CellIdentifier{
 					ProjectName: dep.Project,
-					sheetID:     dep.Sheet,
+					sheetName:   dep.Sheet,
 					row:         cellRow,
 					col:         cellCol,
 				},
@@ -479,10 +558,10 @@ func ExecuteCellScriptonChange(projectName, sheetID, row, col string) {
 
 // CheckIfScriptReferencesSelf checks if a script references its own cell
 // Returns true if the script depends on the cell where it's located
-func CheckIfScriptReferencesSelf(script, projectName, sheetID, cellID string) bool {
-	deps := ExtractScriptDependencies(script, projectName, sheetID)
+func CheckIfScriptReferencesSelf(script, projectName, sheetName, cellID string) bool {
+	deps := ExtractScriptDependencies(script, projectName, sheetName)
 	for _, dep := range deps {
-		if dep.Project == projectName && dep.Sheet == sheetID {
+		if dep.Project == projectName && dep.Sheet == sheetName {
 			// Check if the reference matches the cell ID
 			if strings.Contains(dep.Range, ":") {
 				// Range reference - check if cellID falls within range
@@ -548,9 +627,9 @@ func CheckIfScriptReferencesSelf(script, projectName, sheetID, cellID string) bo
 // ExecuteCellScript executes a Python script in a cell and updates the cell value
 // with the script output. It handles tag replacement (e.g., {{A2}} or {{A2:B3}}),
 // script execution, and populates cell spans if defined.
-func ExecuteCellScript(projectName, sheetID, row, col string) {
+func ExecuteCellScript(projectName, sheetName, row, col string) {
 
-	s := globalSheetManager.GetSheetBy(sheetID, projectName)
+	s := globalSheetManager.GetSheetBy(sheetName, projectName)
 	if s == nil {
 		return
 	}
@@ -580,7 +659,7 @@ func ExecuteCellScript(projectName, sheetID, row, col string) {
 
 	// if globalSheetManager.scriptExecuted contains current script then return else add current script to globalSheetManager.scriptExecuted
 	// Build the string identifier for the current script cell: "project/sheet/cellID"
-	ident := projectName + "/" + sheetID + "/" + cellID
+	ident := projectName + "/" + sheetName + "/" + cellID
 	//fmt.Println("script for cell", cellID, "with content:", script)
 	// Check if already executed to prevent cycles
 	// Release sheet read lock before acquiring global scripts-executed lock to avoid nested locks
@@ -606,7 +685,7 @@ func ExecuteCellScript(projectName, sheetID, row, col string) {
 		s.Data[row][col] = cur
 		s.mu.Unlock()
 		globalSheetManager.SaveSheet(s)
-		WriteScriptOutputToCells(projectName, sheetID, row, col, true, false)
+		WriteScriptOutputToCells(projectName, sheetName, row, col, true, false)
 		return
 	}
 	// Execute the script and update the cell value
@@ -634,8 +713,9 @@ func ExecuteCellScript(projectName, sheetID, row, col string) {
 	//2. if tag is like {{A2:B3}} then replace with a 2D array string like [[7,8],[9,10]] from the cell values
 	//3. For cell range from another sheet, e.g., {{projectname/sheetid/A2:B3}} , {{projectname/sheetid/B3}} etc
 
-	// Pattern to match {{projectname/sheetid/A2}} or {{projectname/sheetid/A2:B3}} (cross-sheet references)
-	crossSheetPattern := regexp.MustCompile(`\{\{([^/\{\}]+)/([^/\{\}]+)/([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?\}\}`)
+	// Pattern to match {{project/.../sheetid/A2}} or {{project/.../sheetid/A2:B3}} (cross-sheet references).
+	// Project path may contain slashes (subfolder support).
+	crossSheetPattern := regexp.MustCompile(`\{\{((?:[^/\{\}]+/)+)([^/\{\}]+)/([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?\}\}`)
 
 	// Pattern to match {{A2}} or {{A2:B3}} (same sheet references)
 	tagPattern := regexp.MustCompile(`\{\{([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?\}\}`)
@@ -647,13 +727,14 @@ func ExecuteCellScript(projectName, sheetID, row, col string) {
 			return match
 		}
 
-		refProjectName := submatches[1]
-		refSheetID := submatches[2]
+		// submatches[1] is "project/.../" (trailing slash), submatches[2] is sheetid
+		refProjectName := strings.TrimSuffix(submatches[1], "/")
+		refSheetName := submatches[2]
 		startCol := submatches[3]
 		startRow := submatches[4]
 
 		// Get the referenced sheet
-		refSheet := globalSheetManager.GetSheetBy(refSheetID, refProjectName)
+		refSheet := globalSheetManager.GetSheetBy(refSheetName, refProjectName)
 		if refSheet == nil {
 			return `""`
 		}
@@ -832,7 +913,7 @@ func ExecuteCellScript(projectName, sheetID, row, col string) {
 		s.Data[row][col] = cur
 		s.mu.Unlock()
 		globalSheetManager.SaveSheet(s)
-		WriteScriptOutputToCells(projectName, sheetID, row, col, true, true)
+		WriteScriptOutputToCells(projectName, sheetName, row, col, true, true)
 		return
 	}
 	var stdout, stderr bytes.Buffer
@@ -859,10 +940,10 @@ func ExecuteCellScript(projectName, sheetID, row, col string) {
 	globalSheetManager.SaveSheet(s)
 
 	// Check if script references its own cell
-	isSelfReferencing := CheckIfScriptReferencesSelf(script, projectName, sheetID, cellID)
+	isSelfReferencing := CheckIfScriptReferencesSelf(script, projectName, sheetName, cellID)
 
 	// Call second function to write output to cell values
-	WriteScriptOutputToCells(projectName, sheetID, row, col, true, isSelfReferencing)
+	WriteScriptOutputToCells(projectName, sheetName, row, col, true, isSelfReferencing)
 }
 
 // addMergedAuditEntries adds audit entries for cell changes, merging with existing entries from the same user within 24 hours
@@ -904,8 +985,8 @@ func addMergedAuditEntries(s *Sheet, cellChanges map[string]cellChangesstruct) {
 }
 
 // This function causes mutex lockout when called concurrently (observed in tests) - needs refactor to avoid nested locks and long lock durations
-func WriteScriptOutputToCells(projectName, sheetID, row, col string, triggernext bool, isSelfReferencing bool) {
-	s := globalSheetManager.GetSheetBy(sheetID, projectName)
+func WriteScriptOutputToCells(projectName, sheetName, row, col string, triggernext bool, isSelfReferencing bool) {
+	s := globalSheetManager.GetSheetBy(sheetName, projectName)
 	if s == nil {
 		return
 	}
@@ -1059,15 +1140,15 @@ func WriteScriptOutputToCells(projectName, sheetID, row, col string, triggernext
 		s.mu.Unlock()
 		if triggernext {
 			globalSheetManager.CellsModifiedByScriptQueueMu.Lock()
-			globalSheetManager.CellsModifiedByScriptQueue = append(globalSheetManager.CellsModifiedByScriptQueue, CellIdentifier{projectName, sheetID, row, col})
+			globalSheetManager.CellsModifiedByScriptQueue = append(globalSheetManager.CellsModifiedByScriptQueue, CellIdentifier{projectName, sheetName, row, col})
 			globalSheetManager.CellsModifiedByScriptQueueMu.Unlock()
 		}
 
 		// Add merged audit entries before save
 		addMergedAuditEntries(s, cellChanges)
 		globalSheetManager.SaveSheet(s)
-		//broadcastRowColUpdated(s, projectName, sheetID)
-		globalSheetManager.QueueRowColUpdate(s.ProjectName, s.ID)
+		//broadcastRowColUpdated(s, projectName, sheetName)
+		globalSheetManager.QueueRowColUpdate(s.ProjectName, s.Name)
 		return
 	}
 
@@ -1093,8 +1174,8 @@ func WriteScriptOutputToCells(projectName, sheetID, row, col string, triggernext
 			s.mu.Unlock()
 			addMergedAuditEntries(s, cellChanges)
 			globalSheetManager.SaveSheet(s)
-			//broadcastRowColUpdated(s, projectName, sheetID)
-			globalSheetManager.QueueRowColUpdate(s.ProjectName, s.ID)
+			//broadcastRowColUpdated(s, projectName, sheetName)
+			globalSheetManager.QueueRowColUpdate(s.ProjectName, s.Name)
 			return
 		}
 		// Use normalized value for subsequent parsing
@@ -1117,14 +1198,14 @@ func WriteScriptOutputToCells(projectName, sheetID, row, col string, triggernext
 		s.mu.Unlock()
 		if triggernext {
 			globalSheetManager.CellsModifiedByScriptQueueMu.Lock()
-			globalSheetManager.CellsModifiedByScriptQueue = append(globalSheetManager.CellsModifiedByScriptQueue, CellIdentifier{projectName, sheetID, row, col})
+			globalSheetManager.CellsModifiedByScriptQueue = append(globalSheetManager.CellsModifiedByScriptQueue, CellIdentifier{projectName, sheetName, row, col})
 			globalSheetManager.CellsModifiedByScriptQueueMu.Unlock()
 		}
 
 		addMergedAuditEntries(s, cellChanges)
 		globalSheetManager.SaveSheet(s)
-		//broadcastRowColUpdated(s, projectName, sheetID)
-		globalSheetManager.QueueRowColUpdate(s.ProjectName, s.ID)
+		//broadcastRowColUpdated(s, projectName, sheetName)
+		globalSheetManager.QueueRowColUpdate(s.ProjectName, s.Name)
 		return
 	} // handling matrix type [[1,2],[3,4]]
 	var matrix [][]string
@@ -1175,8 +1256,8 @@ func WriteScriptOutputToCells(projectName, sheetID, row, col string, triggernext
 			s.mu.Unlock()
 			addMergedAuditEntries(s, cellChanges)
 			globalSheetManager.SaveSheet(s)
-			//broadcastRowColUpdated(s, projectName, sheetID)
-			globalSheetManager.QueueRowColUpdate(s.ProjectName, s.ID)
+			//broadcastRowColUpdated(s, projectName, sheetName)
+			globalSheetManager.QueueRowColUpdate(s.ProjectName, s.Name)
 			return
 		}
 		//else
@@ -1206,7 +1287,7 @@ func WriteScriptOutputToCells(projectName, sheetID, row, col string, triggernext
 				s.Data[rKey][cLabel] = c
 				recordChange(rKey, cLabel, oldVal, c.Value)
 				if triggernext {
-					CellsModified = append(CellsModified, CellIdentifier{projectName, sheetID, rKey, cLabel})
+					CellsModified = append(CellsModified, CellIdentifier{projectName, sheetName, rKey, cLabel})
 				}
 			}
 		}
@@ -1217,8 +1298,8 @@ func WriteScriptOutputToCells(projectName, sheetID, row, col string, triggernext
 		globalSheetManager.CellsModifiedByScriptQueueMu.Unlock()
 		addMergedAuditEntries(s, cellChanges)
 		globalSheetManager.SaveSheet(s)
-		//broadcastRowColUpdated(s, projectName, sheetID)
-		globalSheetManager.QueueRowColUpdate(s.ProjectName, s.ID)
+		//broadcastRowColUpdated(s, projectName, sheetName)
+		globalSheetManager.QueueRowColUpdate(s.ProjectName, s.Name)
 		return
 	}
 
@@ -1245,7 +1326,7 @@ func WriteScriptOutputToCells(projectName, sheetID, row, col string, triggernext
 					s.Data[row][cLabel] = c
 					recordChange(row, cLabel, oldVal, valStr)
 					if triggernext {
-						CellsModified = append(CellsModified, CellIdentifier{projectName, sheetID, row, cLabel})
+						CellsModified = append(CellsModified, CellIdentifier{projectName, sheetName, row, cLabel})
 					}
 
 				} else {
@@ -1258,7 +1339,7 @@ func WriteScriptOutputToCells(projectName, sheetID, row, col string, triggernext
 					s.Data[rKey][col] = c
 					recordChange(rKey, col, oldVal, valStr)
 					if triggernext {
-						CellsModified = append(CellsModified, CellIdentifier{projectName, sheetID, rKey, col})
+						CellsModified = append(CellsModified, CellIdentifier{projectName, sheetName, rKey, col})
 					}
 				}
 			}
@@ -1273,7 +1354,7 @@ func WriteScriptOutputToCells(projectName, sheetID, row, col string, triggernext
 			s.Data[row][col] = cur
 			recordChange(row, col, oldVal, cur.Value)
 			if triggernext {
-				CellsModified = append(CellsModified, CellIdentifier{projectName, sheetID, row, col})
+				CellsModified = append(CellsModified, CellIdentifier{projectName, sheetName, row, col})
 			}
 		}
 	}
@@ -1284,26 +1365,26 @@ func WriteScriptOutputToCells(projectName, sheetID, row, col string, triggernext
 	addMergedAuditEntries(s, cellChanges)
 	globalSheetManager.SaveSheet(s)
 
-	//broadcastRowColUpdated(s, projectName, sheetID)
-	globalSheetManager.QueueRowColUpdate(s.ProjectName, s.ID)
+	//broadcastRowColUpdated(s, projectName, sheetName)
+	globalSheetManager.QueueRowColUpdate(s.ProjectName, s.Name)
 }
 
 // ExecuteDependentScripts executes all scripts that depend on the given cell
 // This should be called when a cell value is modified to trigger cascading updates
 // skipSelf prevent execution of the script in the same cell
-func ExecuteDependentScripts(projectName, sheetID, row, col string) {
+func ExecuteDependentScripts(projectName, sheetName, row, col string) {
 	// Get the cell ID for the modified cell
-	s := globalSheetManager.GetSheetBy(sheetID, projectName)
+	s := globalSheetManager.GetSheetBy(sheetName, projectName)
 	if s == nil {
 		return
 	}
-	//fmt.Println("Checking dependents for cell ", projectName, "/", sheetID, " cell ", row+col)
+	//fmt.Println("Checking dependents for cell ", projectName, "/", sheetName, " cell ", row+col)
 	// Get all dependent scripts
-	dependents := globalSheetManager.GetDependentScripts(projectName, sheetID, row, col)
+	dependents := globalSheetManager.GetDependentScripts(projectName, sheetName, row, col)
 
 	// Execute each dependent script
 	for _, dep := range dependents {
-		//fmt.Println("Executing dependent script at ", dep.ScriptProjectName, "/", dep.ScriptSheetID, " cell ", dep.ScriptCellID, " which depends on ", projectName, "/", sheetID, " cell ", row+col)
+		//fmt.Println("Executing dependent script at ", dep.ScriptProjectName, "/", dep.ScriptSheetName, " cell ", dep.ScriptCellID, " which depends on ", projectName, "/", sheetName, " cell ", row+col)
 		ExecuteCellScriptWithIdentifier(dep)
 	}
 }
@@ -1311,7 +1392,7 @@ func ExecuteDependentScripts(projectName, sheetID, row, col string) {
 func ExecuteCellScriptWithIdentifier(dep ScriptIdentifier) {
 
 	// Find the cell with this script
-	depSheet := globalSheetManager.GetSheetBy(dep.ScriptSheetID, dep.ScriptProjectName)
+	depSheet := globalSheetManager.GetSheetBy(dep.ScriptSheetName, dep.ScriptProjectName)
 	if depSheet == nil {
 		return
 	}
@@ -1337,7 +1418,7 @@ func ExecuteCellScriptWithIdentifier(dep ScriptIdentifier) {
 
 	if found {
 		// Execute the dependent script
-		ExecuteCellScript(dep.ScriptProjectName, dep.ScriptSheetID, depRow, depCol)
+		ExecuteCellScript(dep.ScriptProjectName, dep.ScriptSheetName, depRow, depCol)
 	}
 
 }

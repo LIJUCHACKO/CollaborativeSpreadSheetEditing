@@ -60,24 +60,24 @@ func main() {
 			return
 		}
 
-		sheetID := r.URL.Query().Get("sheet_id")
-		if sheetID == "" {
-			http.Error(w, "sheet_id is required", http.StatusBadRequest)
+		sheetName := r.URL.Query().Get("sheet_name")
+		if sheetName == "" {
+			http.Error(w, "sheet_name is required", http.StatusBadRequest)
 			return
 		}
 		project := r.URL.Query().Get("project")
-		sheet := globalSheetManager.GetSheetBy(sheetID, project)
+		sheet := globalSheetManager.GetSheetBy(sheetName, project)
 		if sheet == nil {
 			http.Error(w, "Sheet not found", http.StatusNotFound)
 			return
 		}
 
 		f := excelize.NewFile()
-		const sheetName = "Sheet1"
-		f.NewSheet(sheetName)
+		const xlsxSheetName = "Sheet1"
+		f.NewSheet(xlsxSheetName)
 		f.DeleteSheet("Sheet1")
 		// Ensure we are working on a known sheet name
-		f.NewSheet(sheetName)
+		f.NewSheet(xlsxSheetName)
 
 		// Write header row based on columns present in data
 		colSet := make(map[string]struct{})
@@ -135,7 +135,7 @@ func main() {
 					continue
 				}
 				cellRef, _ := excelize.CoordinatesToCellName(i+1, row)
-				_ = f.SetCellValue(sheetName, cellRef, cell.Value)
+				_ = f.SetCellValue(xlsxSheetName, cellRef, cell.Value)
 			}
 		}
 		sheet.mu.RUnlock()
@@ -150,7 +150,7 @@ func main() {
 			return
 		}
 
-		log.Printf("User %s exported sheet %s to XLSX", username, sheetID)
+		log.Printf("User %s exported sheet %s to XLSX", username, sheetName)
 	})
 
 	// Export all sheets in a project as XLSX
@@ -360,9 +360,9 @@ func main() {
 			newSheet.mu.Unlock()
 			// Persist once
 			globalSheetManager.SaveSheet(newSheet)
-			fmt.Printf("Saving Sheet %s %s\n", newSheet.ID, newSheet.Name)
+			fmt.Printf("Saving Sheet %s\n", newSheet.Name)
 			time.Sleep(1000 * time.Millisecond) // slight delay to ensure filesystem consistency
-			created = append(created, map[string]string{"id": newSheet.ID, "name": newSheet.Name})
+			created = append(created, map[string]string{"id": newSheet.Name})
 			// Project-level audit per sheet
 			globalProjectAuditManager.Append(project, username, "IMPORT_SHEET", "Imported sheet '"+newSheet.Name+"' from XLSX")
 		}
@@ -425,9 +425,9 @@ func main() {
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(newSheet)
 		// Project-level audit: sheet copy (log on target and source)
-		globalProjectAuditManager.Append(req.TargetProject, username, "COPY_SHEET", "Copied from project '"+req.SourceProject+"' sheet id="+req.SourceID+" to new id="+newSheet.ID+" name='"+newSheet.Name+"'")
+		globalProjectAuditManager.Append(req.TargetProject, username, "COPY_SHEET", "Copied from project '"+req.SourceProject+"' sheet '"+req.SourceID+"' to '"+newSheet.Name+"'")
 		if req.SourceProject != "" {
-			globalProjectAuditManager.Append(req.SourceProject, username, "COPY_SHEET", "Copied sheet id="+req.SourceID+" to project '"+req.TargetProject+"' as id="+newSheet.ID)
+			globalProjectAuditManager.Append(req.SourceProject, username, "COPY_SHEET", "Copied sheet id="+req.SourceID+" to project '"+req.TargetProject+"' as id="+newSheet.Name)
 		}
 	})
 
@@ -624,6 +624,7 @@ func main() {
 		}
 
 		if r.Method == "GET" {
+			// Optional project filter via query parameter (e.g. /api/sheets?project=ProjectA)
 			project := r.URL.Query().Get("project")
 			all := globalSheetManager.ListSheets()
 			if project == "" {
@@ -641,6 +642,7 @@ func main() {
 		}
 
 		if r.Method == "POST" {
+			// Create new sheet in optional project (project specified in request body)
 			var req struct {
 				Name        string `json:"name"`
 				User        string `json:"user"`
@@ -650,15 +652,33 @@ func main() {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
+			// Reject if a sheet file or subfolder with the same name already exists
+			{
+				var dir string
+				if req.ProjectName != "" {
+					dir = filepath.Join(dataDir, req.ProjectName)
+				} else {
+					dir = dataDir
+				}
+				if _, statErr := os.Stat(filepath.Join(dir, req.Name+".json")); statErr == nil {
+					http.Error(w, "A sheet with that name already exists", http.StatusConflict)
+					return
+				}
+				if _, statErr := os.Stat(filepath.Join(dir, req.Name)); statErr == nil {
+					http.Error(w, "A folder with that name already exists", http.StatusConflict)
+					return
+				}
+			}
 			// Use authenticated username instead of client-provided user
 			sheet := globalSheetManager.CreateSheet(req.Name, username, req.ProjectName)
 			// Project-level audit: sheet creation
-			globalProjectAuditManager.Append(req.ProjectName, username, "CREATE_SHEET", "Created sheet '"+sheet.Name+"' id="+sheet.ID)
+			globalProjectAuditManager.Append(req.ProjectName, username, "CREATE_SHEET", "Created sheet '"+sheet.Name+"'")
 			json.NewEncoder(w).Encode(sheet)
 			return
 		}
 
 		if r.Method == "PUT" {
+			// Rename a sheet - only owner may rename, and must not conflict with existing sheet or folder in the same project
 			var req struct {
 				ID          string `json:"id"`
 				Name        string `json:"name"`
@@ -684,6 +704,23 @@ func main() {
 				http.Error(w, "Forbidden: owner only", http.StatusForbidden)
 				return
 			}
+			// Reject if a sheet file or subfolder with the new name already exists
+			{
+				var dir string
+				if req.ProjectName != "" {
+					dir = filepath.Join(dataDir, req.ProjectName)
+				} else {
+					dir = dataDir
+				}
+				if _, statErr := os.Stat(filepath.Join(dir, req.Name+".json")); statErr == nil {
+					http.Error(w, "A sheet with that name already exists", http.StatusConflict)
+					return
+				}
+				if _, statErr := os.Stat(filepath.Join(dir, req.Name)); statErr == nil {
+					http.Error(w, "A folder with that name already exists", http.StatusConflict)
+					return
+				}
+			}
 
 			if !globalSheetManager.RenameSheetBy(req.ID, req.ProjectName, req.Name, username) {
 				http.Error(w, "Sheet not found", http.StatusNotFound)
@@ -696,6 +733,7 @@ func main() {
 		}
 
 		if r.Method == "DELETE" {
+			// Only owner may delete, and must specify sheet ID and optional project in query parameters
 			// Extract sheet ID from query parameter
 			id := r.URL.Query().Get("id")
 			if id == "" {
@@ -720,7 +758,7 @@ func main() {
 			json.NewEncoder(w).Encode(map[string]string{"message": "Sheet deleted"})
 			// Project-level audit: sheet deletion
 			if s != nil {
-				globalProjectAuditManager.Append(project, username, "DELETE_SHEET", "Deleted sheet '"+s.Name+"' id="+s.ID)
+				globalProjectAuditManager.Append(project, username, "DELETE_SHEET", "Deleted sheet '"+s.Name+"'")
 			} else {
 				globalProjectAuditManager.Append(project, username, "DELETE_SHEET", "Deleted sheet id="+id)
 			}
@@ -748,6 +786,7 @@ func main() {
 
 		switch r.Method {
 		case http.MethodGet:
+			// List subdirectories in dataDir as projects
 			entries, err := os.ReadDir(dataDir)
 			if err != nil {
 				http.Error(w, "Failed to read projects", http.StatusInternalServerError)
@@ -769,11 +808,16 @@ func main() {
 			return
 
 		case http.MethodPost:
+			// Create new project as a subdirectory under dataDir
 			var req struct {
 				Name string `json:"name"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
 				http.Error(w, "Project name required", http.StatusBadRequest)
+				return
+			}
+			if _, statErr := os.Stat(filepath.Join(dataDir, req.Name)); statErr == nil {
+				http.Error(w, "A project or folder with that name already exists", http.StatusConflict)
 				return
 			}
 			if err := os.MkdirAll(filepath.Join(dataDir, req.Name), 0755); err != nil {
@@ -787,6 +831,7 @@ func main() {
 			return
 
 		case http.MethodPut:
+			// Rename a project (directory) - only owner may rename
 			var req struct{ OldName, NewName string }
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.OldName == "" || req.NewName == "" {
 				http.Error(w, "OldName and NewName required", http.StatusBadRequest)
@@ -804,20 +849,33 @@ func main() {
 			}
 			oldPath := filepath.Join(dataDir, req.OldName)
 			newPath := filepath.Join(dataDir, req.NewName)
+			if _, statErr := os.Stat(newPath); statErr == nil {
+				http.Error(w, "A project or folder with that name already exists", http.StatusConflict)
+				return
+			}
 			if err := os.Rename(oldPath, newPath); err != nil {
 				http.Error(w, "Failed to rename project", http.StatusInternalServerError)
 				return
 			}
 			// Preserve project owner mapping on rename
 			globalProjectMeta.Rename(req.OldName, req.NewName)
-			// Update in-memory sheets' ProjectName
+			// Update in-memory sheets' ProjectName (including sheets in subfolders)
 			for _, s := range globalSheetManager.ListSheets() {
-				if s.ProjectName == req.OldName {
-					s.mu.Lock()
-					s.ProjectName = req.NewName
-					s.mu.Unlock()
-					globalSheetManager.SaveSheet(s)
+				s.mu.RLock()
+				oldPN := s.ProjectName
+				s.mu.RUnlock()
+				var newPN string
+				if oldPN == req.OldName {
+					newPN = req.NewName
+				} else if strings.HasPrefix(oldPN, req.OldName+"/") {
+					newPN = req.NewName + oldPN[len(req.OldName):]
+				} else {
+					continue
 				}
+				s.mu.Lock()
+				s.ProjectName = newPN
+				s.mu.Unlock()
+				globalSheetManager.SaveSheet(s)
 			}
 			// Update script dependencies for the renamed project
 			globalSheetManager.RenameProjectInDependencies(req.OldName, req.NewName)
@@ -827,6 +885,7 @@ func main() {
 			return
 
 		case http.MethodDelete:
+			// Extract project name from query parameter
 			name := r.URL.Query().Get("name")
 			if name == "" {
 				http.Error(w, "Project name required", http.StatusBadRequest)
@@ -915,6 +974,14 @@ func main() {
 				return
 			}
 			abs := filepath.Join(dataDir, req.Parent, req.Name)
+			if _, statErr := os.Stat(abs); statErr == nil {
+				http.Error(w, "A folder or sheet with that name already exists", http.StatusConflict)
+				return
+			}
+			if _, statErr := os.Stat(filepath.Join(dataDir, req.Parent, req.Name+".json")); statErr == nil {
+				http.Error(w, "A sheet with that name already exists", http.StatusConflict)
+				return
+			}
 			if err := os.MkdirAll(abs, 0755); err != nil {
 				http.Error(w, "Failed to create folder", http.StatusInternalServerError)
 				return
@@ -954,6 +1021,14 @@ func main() {
 			}
 			oldPath := filepath.Join(dataDir, req.Parent, req.OldName)
 			newPath := filepath.Join(dataDir, req.Parent, req.NewName)
+			if _, statErr := os.Stat(newPath); statErr == nil {
+				http.Error(w, "A folder or sheet with that name already exists", http.StatusConflict)
+				return
+			}
+			if _, statErr := os.Stat(filepath.Join(dataDir, req.Parent, req.NewName+".json")); statErr == nil {
+				http.Error(w, "A sheet with that name already exists", http.StatusConflict)
+				return
+			}
 			if err := os.Rename(oldPath, newPath); err != nil {
 				http.Error(w, "Failed to rename folder", http.StatusInternalServerError)
 				return
@@ -1118,9 +1193,9 @@ func main() {
 	// Get the value of a specific cell in a sheet
 	//usage
 	//curl -s -H "Authorization: <token>" \
-	// "http://localhost:8082/api/sheet/cell?sheet_id=20260122223748&project=project32/new2&row=1&col=A"
+	// "http://localhost:8082/api/sheet/cell?sheet_name=20260122223748&project=project32/new2&row=1&col=A"
 	//curl -s -H "Authorization: <token>" \
-	// "http://localhost:8082/api/sheet/cell?sheet_id=20260122223748&project=project32/new2&cell=A1"
+	// "http://localhost:8082/api/sheet/cell?sheet_name=20260122223748&project=project32/new2&cell=A1"
 	//# With jq (recommended)
 	//TOKEN=$(curl -s -X POST http://localhost:8082/api/login \
 	// -H "Content-Type: application/json" \
@@ -1151,14 +1226,14 @@ func main() {
 			return
 		}
 
-		sheetID := r.URL.Query().Get("sheet_id")
+		sheetName := r.URL.Query().Get("sheet_name")
 		project := r.URL.Query().Get("project")
 		row := r.URL.Query().Get("row")
 		col := r.URL.Query().Get("col")
 		cell := strings.TrimSpace(r.URL.Query().Get("cell"))
 
-		if sheetID == "" {
-			http.Error(w, "sheet_id is required", http.StatusBadRequest)
+		if sheetName == "" {
+			http.Error(w, "sheet_name is required", http.StatusBadRequest)
 			return
 		}
 
@@ -1193,7 +1268,7 @@ func main() {
 			http.Error(w, "row and col (or cell) required", http.StatusBadRequest)
 			return
 		}
-		sheet := globalSheetManager.GetSheetBy(sheetID, project)
+		sheet := globalSheetManager.GetSheetBy(sheetName, project)
 		if sheet == nil {
 			http.Error(w, "Sheet not found", http.StatusNotFound)
 			return
@@ -1212,12 +1287,12 @@ func main() {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"sheet_id": sheetID,
-			"project":  project,
-			"row":      row,
-			"col":      col,
-			"value":    value,
-			"exists":   exists,
+			"sheet_name": sheetName,
+			"project":    project,
+			"row":        row,
+			"col":        col,
+			"value":      value,
+			"exists":     exists,
 		})
 	})
 
@@ -1311,13 +1386,13 @@ func main() {
 			return
 		}
 
-		sheetID := r.URL.Query().Get("sheet_id")
-		if sheetID == "" {
-			http.Error(w, "sheet_id is required", http.StatusBadRequest)
+		sheetName := r.URL.Query().Get("sheet_name")
+		if sheetName == "" {
+			http.Error(w, "sheet_name is required", http.StatusBadRequest)
 			return
 		}
 		project := r.URL.Query().Get("project")
-		sheet := globalSheetManager.GetSheetBy(sheetID, project)
+		sheet := globalSheetManager.GetSheetBy(sheetName, project)
 		if sheet == nil {
 			http.Error(w, "Sheet not found", http.StatusNotFound)
 			return
@@ -1374,7 +1449,7 @@ func main() {
 			return
 		}
 		var req struct {
-			SheetID     string `json:"sheet_id"`
+			SheetName   string `json:"sheet_name"`
 			NewOwner    string `json:"new_owner"`
 			ProjectName string `json:"project_name"`
 		}
@@ -1382,11 +1457,11 @@ func main() {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		if req.SheetID == "" || req.NewOwner == "" {
-			http.Error(w, "sheet_id and new_owner required", http.StatusBadRequest)
+		if req.SheetName == "" || req.NewOwner == "" {
+			http.Error(w, "sheet_name and new_owner required", http.StatusBadRequest)
 			return
 		}
-		sheet := globalSheetManager.GetSheetBy(req.SheetID, req.ProjectName)
+		sheet := globalSheetManager.GetSheetBy(req.SheetName, req.ProjectName)
 		if sheet == nil {
 			http.Error(w, "Sheet not found", http.StatusNotFound)
 			return

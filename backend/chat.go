@@ -14,7 +14,6 @@ type ChatMessage struct {
 	User        string          `json:"user"`
 	Text        string          `json:"text"`
 	To          string          `json:"to,omitempty"` // "all" or specific username
-	SheetID     string          `json:"sheet_id,omitempty"`
 	SheetName   string          `json:"sheet_name,omitempty"`
 	ProjectName string          `json:"project_name,omitempty"`
 	ReadBy      map[string]bool `json:"read_by,omitempty"` // username -> true
@@ -78,7 +77,7 @@ func (cm *ChatManager) Save() {
 	}
 }
 
-func (cm *ChatManager) Append(user, text, to, sheetID, sheetName, projectName string) ChatMessage {
+func (cm *ChatManager) Append(user, text, to, sheetName, projectName string) ChatMessage {
 	cm.mu.Lock()
 	if to == "" {
 		to = "all"
@@ -88,7 +87,6 @@ func (cm *ChatManager) Append(user, text, to, sheetID, sheetName, projectName st
 		User:        user,
 		Text:        text,
 		To:          to,
-		SheetID:     sheetID,
 		SheetName:   sheetName,
 		ProjectName: projectName,
 		ReadBy:      make(map[string]bool),

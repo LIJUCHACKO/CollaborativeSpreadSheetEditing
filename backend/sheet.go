@@ -29,8 +29,8 @@ func firstNChar(s string, n int) string {
 	return s[:n] + "..."
 }
 
-func getSheetFilePath(sheetID string) string {
-	return filepath.Join(dataDir, sheetID+".json")
+func getSheetFilePath(sheetName string) string {
+	return filepath.Join(dataDir, sheetName+".json")
 }
 
 func ensureDataDir() error {
@@ -105,7 +105,6 @@ type Permissions struct {
 }
 
 type Sheet struct {
-	ID          string                     `json:"id"`
 	Name        string                     `json:"name"`
 	Owner       string                     `json:"owner"`
 	ProjectName string                     `json:"project_name,omitempty"`
@@ -168,12 +167,12 @@ type SheetManager struct {
 
 type RowColUpdateItem struct {
 	ProjectName string
-	SheetID     string
+	SheetName   string
 }
 
 type CellIdentifier struct {
 	ProjectName string
-	sheetID     string
+	sheetName   string
 	row         string
 	col         string
 }
@@ -201,10 +200,10 @@ func (sm *SheetManager) saveSheetLocked(sheet *Sheet) {
 	} else {
 		dir = dataDir
 	}
-	filePath := filepath.Join(dir, sheet.ID+".json")
+	filePath := filepath.Join(dir, sheet.Name+".json")
 	file, err := os.Create(filePath)
 	if err != nil {
-		log.Printf("Error saving sheet %s: %v", sheet.ID, err)
+		log.Printf("Error saving sheet %s: %v", sheet.Name, err)
 		return
 	}
 	defer file.Close()
@@ -212,9 +211,9 @@ func (sm *SheetManager) saveSheetLocked(sheet *Sheet) {
 	encoder := json.NewEncoder(file)
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(sheet); err != nil {
-		log.Printf("Error encoding sheet %s: %v", sheet.ID, err)
+		log.Printf("Error encoding sheet %s: %v", sheet.Name, err)
 	}
-	fmt.Printf("Sheet %s saved successfully at %s\n", sheet.ID, filePath)
+	fmt.Printf("Sheet %s saved successfully at %s\n", sheet.Name, filePath)
 }
 
 // MarshalJSON implementation for Sheet to ensure thread-safe encoding
@@ -330,9 +329,9 @@ func (sm *SheetManager) flusher() {
 					sm.CellsModifiedManuallyQueue = sm.CellsModifiedManuallyQueue[1:]
 					sm.CellsModifiedManuallyQueueMu.Unlock()
 					//fmt.Println("Executing scripts for manually modified cell:", toExec)
-					ExecuteDependentScripts(toExec.ProjectName, toExec.sheetID, toExec.row, toExec.col)
+					ExecuteDependentScripts(toExec.ProjectName, toExec.sheetName, toExec.row, toExec.col)
 					// Update options for cells which have options depending on range in the sheet of modified cell
-					updateOptionsForDependentCells(toExec.ProjectName, toExec.sheetID, toExec.row, toExec.col)
+					updateOptionsForDependentCells(toExec.ProjectName, toExec.sheetName, toExec.row, toExec.col)
 
 					continue
 				} else {
@@ -344,9 +343,9 @@ func (sm *SheetManager) flusher() {
 				sm.CellsModifiedByScriptQueue = sm.CellsModifiedByScriptQueue[1:]
 				sm.CellsModifiedByScriptQueueMu.Unlock()
 				//fmt.Println("Executing scripts for script modified cell:", toExec)
-				ExecuteDependentScripts(toExec.ProjectName, toExec.sheetID, toExec.row, toExec.col)
+				ExecuteDependentScripts(toExec.ProjectName, toExec.sheetName, toExec.row, toExec.col)
 				// Update options for cells which have options depending on range in the sheet of modified cell
-				updateOptionsForDependentCells(toExec.ProjectName, toExec.sheetID, toExec.row, toExec.col)
+				updateOptionsForDependentCells(toExec.ProjectName, toExec.sheetName, toExec.row, toExec.col)
 
 				continue
 			}
@@ -378,7 +377,7 @@ func (sm *SheetManager) flusher() {
 				uniqueUpdates := make([]RowColUpdateItem, 0)
 
 				for _, item := range sm.RowColUpdateQueue {
-					key := item.ProjectName + "::" + item.SheetID
+					key := item.ProjectName + "::" + item.SheetName
 					if !seenSheets[key] {
 						seenSheets[key] = true
 						uniqueUpdates = append(uniqueUpdates, item)
@@ -392,15 +391,15 @@ func (sm *SheetManager) flusher() {
 				// Send ROW_COL_UPDATED messages for each unique sheet
 				if globalHub != nil {
 					for _, item := range uniqueUpdates {
-						sheet := sm.GetSheetBy(item.SheetID, item.ProjectName)
+						sheet := sm.GetSheetBy(item.SheetName, item.ProjectName)
 						if sheet != nil {
 							payload, _ := json.Marshal(sheet.SnapshotForClient())
 							globalHub.broadcast <- &Message{
-								Type:    "ROW_COL_UPDATED",
-								SheetID: item.SheetID,
-								Project: item.ProjectName,
-								Payload: payload,
-								User:    "system",
+								Type:      "ROW_COL_UPDATED",
+								SheetName: item.SheetName,
+								Project:   item.ProjectName,
+								Payload:   payload,
+								User:      "system",
 							}
 						}
 					}
@@ -470,7 +469,7 @@ func (sm *SheetManager) flusher() {
 							sheet.mu.Unlock()
 						} else {
 							log.Printf("[MUTEX DEBUG] Sheet %s (Project: %s) mutex is currently locked at %v",
-								sheet.ID, sheet.ProjectName, currentTime)
+								sheet.Name, sheet.ProjectName, currentTime)
 						}
 					}
 					sm.mu.RUnlock()
@@ -484,18 +483,18 @@ func (sm *SheetManager) flusher() {
 }
 
 // QueueRowColUpdate adds a sheet to the ROW_COL_UPDATE broadcast queue
-func (sm *SheetManager) QueueRowColUpdate(projectName, sheetID string) {
+func (sm *SheetManager) QueueRowColUpdate(projectName, sheetName string) {
 	sm.RowColUpdateQueueMu.Lock()
 	defer sm.RowColUpdateQueueMu.Unlock()
 	// Check if this sheet is already queued to avoid duplicates
 	for _, item := range sm.RowColUpdateQueue {
-		if item.ProjectName == projectName && item.SheetID == sheetID {
+		if item.ProjectName == projectName && item.SheetName == sheetName {
 			return
 		}
 	}
 	sm.RowColUpdateQueue = append(sm.RowColUpdateQueue, RowColUpdateItem{
 		ProjectName: projectName,
-		SheetID:     sheetID,
+		SheetName:   sheetName,
 	})
 }
 
@@ -511,9 +510,7 @@ func (sm *SheetManager) CreateSheet(name, owner, projectName string) *Sheet {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	id := generateID() // Need to implement this or use a simple counter
 	sheet := &Sheet{
-		ID:          id,
 		Name:        name,
 		Owner:       owner,
 		ProjectName: projectName,
@@ -533,33 +530,22 @@ func (sm *SheetManager) CreateSheet(name, owner, projectName string) *Sheet {
 		Action:    "CREATE_SHEET",
 	})
 
-	sm.sheets[sheetKey(projectName, id)] = sheet
+	sm.sheets[sheetKey(projectName, name)] = sheet
 	sm.saveSheetLocked(sheet) // Persist individual sheet
 	return sheet
 }
 
-func (sm *SheetManager) GetSheet(id string) *Sheet {
-	sm.mu.RLock()
-	defer sm.mu.RUnlock()
-	for _, s := range sm.sheets {
-		if s != nil && s.ID == id {
-			return s
-		}
-	}
-	return nil
-}
-
-// GetSheetBy finds a sheet by id and project name.
-func (sm *SheetManager) GetSheetBy(id, project string) *Sheet {
+// GetSheetBy finds a sheet by name and project name.
+func (sm *SheetManager) GetSheetBy(name, project string) *Sheet {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 	// Try direct composite key first
-	if s, ok := sm.sheets[sheetKey(project, id)]; ok {
+	if s, ok := sm.sheets[sheetKey(project, name)]; ok {
 		return s
 	}
 	// Fallback: iterate (handles legacy keys)
 	for _, s := range sm.sheets {
-		if s != nil && s.ID == id && s.ProjectName == project {
+		if s != nil && s.Name == name && s.ProjectName == project {
 			return s
 		}
 	}
@@ -567,7 +553,7 @@ func (sm *SheetManager) GetSheetBy(id, project string) *Sheet {
 }
 
 // CopySheetToProject creates a copy of source sheet into target project.
-// New sheet ID is generated; name defaults to source name if empty.
+// New name defaults to source name if empty.
 func (sm *SheetManager) CopySheetToProject(sourceID, sourceProject, targetProject, newName, owner string) *Sheet {
 	// Locate source
 	src := sm.GetSheetBy(sourceID, sourceProject)
@@ -577,12 +563,10 @@ func (sm *SheetManager) CopySheetToProject(sourceID, sourceProject, targetProjec
 	// Build new sheet
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-	id := generateID()
 	if newName == "" {
 		newName = src.Name
 	}
 	copySheet := &Sheet{
-		ID:          id,
 		Name:        newName,
 		Owner:       owner,
 		ProjectName: targetProject,
@@ -608,7 +592,7 @@ func (sm *SheetManager) CopySheetToProject(sourceID, sourceProject, targetProjec
 	}
 	src.mu.RUnlock()
 	// Register and persist
-	sm.sheets[sheetKey(targetProject, id)] = copySheet
+	sm.sheets[sheetKey(targetProject, newName)] = copySheet
 	sm.saveSheetLocked(copySheet)
 	return copySheet
 }
@@ -641,7 +625,7 @@ func (s *Sheet) SetCell(row, col, value, user string, reverted bool) {
 
 	globalSheetManager.CellsModifiedManuallyQueue = append(globalSheetManager.CellsModifiedManuallyQueue, CellIdentifier{
 		ProjectName: s.ProjectName,
-		sheetID:     s.ID,
+		sheetName:   s.Name,
 		row:         row,
 		col:         col,
 	})
@@ -850,11 +834,11 @@ func (s *Sheet) SetCellScript(row, col, script, user string, reverted bool, rowS
 	s.mu.Unlock()
 
 	// Update dependency map for this script
-	globalSheetManager.UpdateScriptDependencies(s.ProjectName, s.ID, cellID, script, row, col)
+	globalSheetManager.UpdateScriptDependencies(s.ProjectName, s.Name, cellID, script, row, col)
 
 	// Done updating script; save and execute
 	globalSheetManager.SaveSheet(s)
-	ExecuteCellScriptonChange(s.ProjectName, s.ID, row, col)
+	ExecuteCellScriptonChange(s.ProjectName, s.Name, row, col)
 	//s.FillValueFromScriptOutput(row, col)
 }
 
@@ -908,19 +892,22 @@ func (s *Sheet) extractOptionsFromRange(rangeStr string) []string {
 		return nil
 	}
 
-	// Check if it's a cross-sheet reference (projectname/sheetid/A1:A10)
+	// Check if it's a cross-sheet reference (project/.../sheetid/A1:A10).
+	// The range portion is always the last slash-segment; the sheet name is the second-to-last;
+	// everything before that forms the project path (may contain slashes for subfolders).
 	var targetSheet *Sheet
 	var rangeOnly string
 
 	slashParts := strings.Split(rangeStr, "/")
-	if len(slashParts) == 3 {
-		// Cross-sheet reference: projectname/sheetid/A1:A10
-		refProjectName := slashParts[0]
-		refSheetID := slashParts[1]
-		rangeOnly = slashParts[2]
+	if len(slashParts) >= 3 {
+		// Cross-sheet reference: project/.../sheetid/A1:A10
+		n := len(slashParts)
+		rangeOnly = slashParts[n-1]
+		refSheetName := slashParts[n-2]
+		refProjectName := strings.Join(slashParts[:n-2], "/")
 
 		// Get the referenced sheet
-		targetSheet = globalSheetManager.GetSheetBy(refSheetID, refProjectName)
+		targetSheet = globalSheetManager.GetSheetBy(refSheetName, refProjectName)
 		if targetSheet == nil {
 			return nil
 		}
@@ -988,17 +975,22 @@ func (s *Sheet) extractOptionsFromRange(rangeStr string) []string {
 	targetSheet.mu.RLock()
 	defer targetSheet.mu.RUnlock()
 
-	// Extract values from the range
+	// Extract values from the range only if it's a single row or single column
 	var options []string
-	for rowNum := startRowNum; rowNum <= endRowNum; rowNum++ {
-		rowStr := strconv.Itoa(rowNum)
-		for colIdx := startColIdx; colIdx <= endColIdx; colIdx++ {
-			colStr := indexToColLabel(colIdx)
-			if targetSheet.Data[rowStr] != nil {
-				if cell, exists := targetSheet.Data[rowStr][colStr]; exists {
-					value := strings.TrimSpace(cell.Value)
-					if value != "" {
-						options = append(options, value)
+	isSingleRow := startRowNum == endRowNum
+	isSingleColumn := startColIdx == endColIdx
+
+	if isSingleRow || isSingleColumn {
+		for rowNum := startRowNum; rowNum <= endRowNum; rowNum++ {
+			rowStr := strconv.Itoa(rowNum)
+			for colIdx := startColIdx; colIdx <= endColIdx; colIdx++ {
+				colStr := indexToColLabel(colIdx)
+				if targetSheet.Data[rowStr] != nil {
+					if cell, exists := targetSheet.Data[rowStr][colStr]; exists {
+						value := strings.TrimSpace(cell.Value)
+						if value != "" {
+							options = append(options, value)
+						}
 					}
 				}
 			}
@@ -1057,7 +1049,7 @@ func (s *Sheet) SetCellType(row, col string, cellType int, options []string, opt
 	s.mu.Unlock()
 
 	// Update OptionsRange dependencies
-	globalSheetManager.UpdateOptionsRangeDependencies(s.ProjectName, s.ID, row, col, optionsRange)
+	globalSheetManager.UpdateOptionsRangeDependencies(s.ProjectName, s.Name, row, col, optionsRange)
 
 	globalSheetManager.SaveSheet(s)
 	return true
@@ -1225,7 +1217,7 @@ func (s *Sheet) UpdatePermissions(editors []string, performedBy string) bool {
 	s.mu.Unlock()
 	go globalSheetManager.SaveSheet(s)
 	// Log only in project audit
-	globalProjectAuditManager.Append(s.ProjectName, performedBy, "UPDATE_SHEET_PERMISSIONS", fmt.Sprintf("For Sheet %s Editors: %v", s.ID, editors))
+	globalProjectAuditManager.Append(s.ProjectName, performedBy, "UPDATE_SHEET_PERMISSIONS", fmt.Sprintf("For Sheet %s Editors: %v", s.Name, editors))
 	return true
 }
 
@@ -1258,7 +1250,7 @@ func (s *Sheet) TransferOwnership(newOwner, performedBy string) bool {
 	go globalSheetManager.SaveSheet(s)
 	s.mu.Unlock()
 	// Log only in project audit
-	globalProjectAuditManager.Append(s.ProjectName, performedBy, "TRANSFER_SHEET_OWNERSHIP", fmt.Sprintf("For Sheet %s Owner changed from %s to %s", s.ID, old, newOwner))
+	globalProjectAuditManager.Append(s.ProjectName, performedBy, "TRANSFER_SHEET_OWNERSHIP", fmt.Sprintf("For Sheet %s Owner changed from %s to %s", s.Name, old, newOwner))
 	return true
 }
 
@@ -1374,7 +1366,7 @@ func (s *Sheet) InsertRowBelow(targetRowStr, user string) bool {
 				}
 			}
 			if startRow != "" && startCol != "" {
-				ExecuteCellScriptonChange(s.ProjectName, s.ID, startRow, startCol)
+				ExecuteCellScriptonChange(s.ProjectName, s.Name, startRow, startCol)
 			}
 		}
 	}
@@ -1913,7 +1905,7 @@ func (s *Sheet) InsertColumnRight(targetColStr, user string) bool {
 			}
 		}
 		if startRow != "" && startCol != "" {
-			ExecuteCellScriptonChange(s.ProjectName, s.ID, startRow, startCol)
+			ExecuteCellScriptonChange(s.ProjectName, s.Name, startRow, startCol)
 		}
 	}
 	globalSheetManager.SaveSheet(s)
@@ -2192,7 +2184,6 @@ func (s *Sheet) SnapshotForClient() *Sheet {
 	}
 
 	snap := &Sheet{
-		ID:          s.ID,
 		Name:        s.Name,
 		Owner:       s.Owner,
 		ProjectName: s.ProjectName,
@@ -2366,7 +2357,7 @@ func (s *Sheet) adjustScriptTagsOnInsertRow(insertRow int) {
 			if newScript != cell.Script {
 				cell.Script = newScript
 				s.Data[rowKey][colKey] = cell
-				pending = append(pending, depUpd{s.ProjectName, s.ID, cell.CellID, newScript, rowKey, colKey})
+				pending = append(pending, depUpd{s.ProjectName, s.Name, cell.CellID, newScript, rowKey, colKey})
 			}
 		}
 	}
@@ -2380,11 +2371,11 @@ func (s *Sheet) adjustScriptTagsOnInsertRow(insertRow int) {
 	}
 	// Send ROW_COL_UPDATED message to clients if any scripts were modified in this sheet
 	if len(pending) > 0 && globalHub != nil {
-		globalSheetManager.QueueRowColUpdate(s.ProjectName, s.ID)
+		globalSheetManager.QueueRowColUpdate(s.ProjectName, s.Name)
 	}
 	// Adjust cross-sheet references in sheets that reference this sheet
 	// Use scriptDeps to find which sheets have dependencies on this sheet
-	sheet_Key := s.ProjectName + "/" + s.ID
+	sheet_Key := s.ProjectName + "/" + s.Name
 	globalSheetManager.scriptDepsMu.RLock()
 	scriptIdentifiers, hasRefs := globalSheetManager.scriptDeps[sheet_Key]
 	globalSheetManager.scriptDepsMu.RUnlock()
@@ -2398,7 +2389,7 @@ func (s *Sheet) adjustScriptTagsOnInsertRow(insertRow int) {
 	sheetsToUpdate := make([]*Sheet, 0)
 	globalSheetManager.mu.RLock()
 	for _, si := range scriptIdentifiers {
-		key := sheetKey(si.ScriptProjectName, si.ScriptSheetID)
+		key := sheetKey(si.ScriptProjectName, si.ScriptSheetName)
 		if !seenSheets[key] {
 			if sheet, ok := globalSheetManager.sheets[key]; ok && sheet != nil {
 				sheetsToUpdate = append(sheetsToUpdate, sheet)
@@ -2427,7 +2418,7 @@ func (s *Sheet) adjustScriptTagsOnInsertRow(insertRow int) {
 					refSheet := submatches[2]
 
 					// Only adjust if referencing the current sheet
-					if refProject != s.ProjectName || refSheet != s.ID {
+					if refProject != s.ProjectName || refSheet != s.Name {
 						return match
 					}
 
@@ -2474,7 +2465,7 @@ func (s *Sheet) adjustScriptTagsOnInsertRow(insertRow int) {
 			for rKey, rowMap := range sheet.Data {
 				for cKey, cell := range rowMap {
 					if cell.Script != "" {
-						updList = append(updList, depUpd2{sheet.ProjectName, sheet.ID, cell.CellID, cell.Script, rKey, cKey})
+						updList = append(updList, depUpd2{sheet.ProjectName, sheet.Name, cell.CellID, cell.Script, rKey, cKey})
 					}
 				}
 			}
@@ -2485,7 +2476,7 @@ func (s *Sheet) adjustScriptTagsOnInsertRow(insertRow int) {
 			globalSheetManager.SaveSheet(sheet)
 			// Send ROW_COL_UPDATED message to clients for this modified sheet
 			if globalHub != nil {
-				globalSheetManager.QueueRowColUpdate(sheet.ProjectName, sheet.ID)
+				globalSheetManager.QueueRowColUpdate(sheet.ProjectName, sheet.Name)
 			}
 		}
 	}
@@ -2563,7 +2554,7 @@ func (s *Sheet) adjustScriptTagsOnDeleteRow(deleteRow int) {
 			if newScript != cell.Script {
 				cell.Script = newScript
 				s.Data[rowKey][colKey] = cell
-				pending = append(pending, depUpd{s.ProjectName, s.ID, cell.CellID, newScript, rowKey, colKey})
+				pending = append(pending, depUpd{s.ProjectName, s.Name, cell.CellID, newScript, rowKey, colKey})
 			}
 		}
 	}
@@ -2576,11 +2567,11 @@ func (s *Sheet) adjustScriptTagsOnDeleteRow(deleteRow int) {
 	}
 	// Send ROW_COL_UPDATED message to clients if any scripts were modified in this sheet
 	if len(pending) > 0 && globalHub != nil {
-		globalSheetManager.QueueRowColUpdate(s.ProjectName, s.ID)
+		globalSheetManager.QueueRowColUpdate(s.ProjectName, s.Name)
 	}
 	// Adjust cross-sheet references in sheets that reference this sheet
 	// Use scriptDeps to find which sheets have dependencies on this sheet
-	sheet_Key := s.ProjectName + "/" + s.ID
+	sheet_Key := s.ProjectName + "/" + s.Name
 	globalSheetManager.scriptDepsMu.RLock()
 	scriptIdentifiers, hasRefs := globalSheetManager.scriptDeps[sheet_Key]
 	globalSheetManager.scriptDepsMu.RUnlock()
@@ -2594,7 +2585,7 @@ func (s *Sheet) adjustScriptTagsOnDeleteRow(deleteRow int) {
 	sheetsToUpdate := make([]*Sheet, 0)
 	globalSheetManager.mu.RLock()
 	for _, si := range scriptIdentifiers {
-		key := sheetKey(si.ScriptProjectName, si.ScriptSheetID)
+		key := sheetKey(si.ScriptProjectName, si.ScriptSheetName)
 		if !seenSheets[key] {
 			if sheet, ok := globalSheetManager.sheets[key]; ok && sheet != nil {
 				sheetsToUpdate = append(sheetsToUpdate, sheet)
@@ -2623,7 +2614,7 @@ func (s *Sheet) adjustScriptTagsOnDeleteRow(deleteRow int) {
 					refSheet := submatches[2]
 
 					// Only adjust if referencing the current sheet
-					if refProject != s.ProjectName || refSheet != s.ID {
+					if refProject != s.ProjectName || refSheet != s.Name {
 						return match
 					}
 
@@ -2691,7 +2682,7 @@ func (s *Sheet) adjustScriptTagsOnDeleteRow(deleteRow int) {
 			for rKey, rowMap := range sheet.Data {
 				for cKey, cell := range rowMap {
 					if cell.Script != "" {
-						updList = append(updList, depUpd2{sheet.ProjectName, sheet.ID, cell.CellID, cell.Script, rKey, cKey})
+						updList = append(updList, depUpd2{sheet.ProjectName, sheet.Name, cell.CellID, cell.Script, rKey, cKey})
 					}
 				}
 			}
@@ -2703,7 +2694,7 @@ func (s *Sheet) adjustScriptTagsOnDeleteRow(deleteRow int) {
 			// Send ROW_COL_UPDATED m
 			// essage to clients for this modified sheet
 			if globalHub != nil {
-				globalSheetManager.QueueRowColUpdate(sheet.ProjectName, sheet.ID)
+				globalSheetManager.QueueRowColUpdate(sheet.ProjectName, sheet.Name)
 			}
 		}
 	}
@@ -2793,7 +2784,7 @@ func (s *Sheet) adjustScriptTagsOnMoveRow(fromRow, destIndex int) {
 			if newScript != cell.Script {
 				cell.Script = newScript
 				s.Data[rowKey][colKey] = cell
-				pending = append(pending, depUpd{s.ProjectName, s.ID, cell.CellID, newScript, rowKey, colKey})
+				pending = append(pending, depUpd{s.ProjectName, s.Name, cell.CellID, newScript, rowKey, colKey})
 			}
 		}
 	}
@@ -2809,11 +2800,11 @@ func (s *Sheet) adjustScriptTagsOnMoveRow(fromRow, destIndex int) {
 	}
 	// Send ROW_COL_UPDATED message to clients if any scripts were modified in this sheet
 	if len(pending) > 0 && globalHub != nil {
-		globalSheetManager.QueueRowColUpdate(s.ProjectName, s.ID)
+		globalSheetManager.QueueRowColUpdate(s.ProjectName, s.Name)
 	}
 	// Adjust cross-sheet references in sheets that reference this sheet
 	// Use scriptDeps to find which sheets have dependencies on this sheet
-	sheet_Key := s.ProjectName + "/" + s.ID
+	sheet_Key := s.ProjectName + "/" + s.Name
 	globalSheetManager.scriptDepsMu.RLock()
 	scriptIdentifiers, hasRefs := globalSheetManager.scriptDeps[sheet_Key]
 	globalSheetManager.scriptDepsMu.RUnlock()
@@ -2827,7 +2818,7 @@ func (s *Sheet) adjustScriptTagsOnMoveRow(fromRow, destIndex int) {
 	sheetsToUpdate := make([]*Sheet, 0)
 	globalSheetManager.mu.RLock()
 	for _, si := range scriptIdentifiers {
-		key := sheetKey(si.ScriptProjectName, si.ScriptSheetID)
+		key := sheetKey(si.ScriptProjectName, si.ScriptSheetName)
 		if !seenSheets[key] {
 			if sheet, ok := globalSheetManager.sheets[key]; ok && sheet != nil {
 				sheetsToUpdate = append(sheetsToUpdate, sheet)
@@ -2856,7 +2847,7 @@ func (s *Sheet) adjustScriptTagsOnMoveRow(fromRow, destIndex int) {
 					refSheet := submatches[2]
 
 					// Only adjust if referencing the current sheet
-					if refProject != s.ProjectName || refSheet != s.ID {
+					if refProject != s.ProjectName || refSheet != s.Name {
 						return match
 					}
 
@@ -2936,7 +2927,7 @@ func (s *Sheet) adjustScriptTagsOnMoveRow(fromRow, destIndex int) {
 			for rKey, rowMap := range sheet.Data {
 				for cKey, cell := range rowMap {
 					if cell.Script != "" {
-						updList = append(updList, depUpd2{sheet.ProjectName, sheet.ID, cell.CellID, cell.Script, rKey, cKey})
+						updList = append(updList, depUpd2{sheet.ProjectName, sheet.Name, cell.CellID, cell.Script, rKey, cKey})
 					}
 				}
 			}
@@ -2947,7 +2938,7 @@ func (s *Sheet) adjustScriptTagsOnMoveRow(fromRow, destIndex int) {
 			globalSheetManager.SaveSheet(sheet) // persist the row move before clients fetch updated sheet
 			// Send ROW_COL_UPDATED message to clients for this modified sheet
 			if globalHub != nil {
-				globalSheetManager.QueueRowColUpdate(sheet.ProjectName, sheet.ID)
+				globalSheetManager.QueueRowColUpdate(sheet.ProjectName, sheet.Name)
 			}
 		}
 	}
@@ -3007,7 +2998,7 @@ func (s *Sheet) adjustScriptTagsOnInsertCol(insertIdx int) {
 			if newScript != cell.Script {
 				cell.Script = newScript
 				s.Data[rowKey][colKey] = cell
-				pending = append(pending, depUpd{s.ProjectName, s.ID, cell.CellID, newScript, rowKey, colKey})
+				pending = append(pending, depUpd{s.ProjectName, s.Name, cell.CellID, newScript, rowKey, colKey})
 			}
 		}
 	}
@@ -3020,11 +3011,11 @@ func (s *Sheet) adjustScriptTagsOnInsertCol(insertIdx int) {
 	}
 	// Send ROW_COL_UPDATED message to clients if any scripts were modified in this sheet
 	if len(pending) > 0 && globalHub != nil {
-		globalSheetManager.QueueRowColUpdate(s.ProjectName, s.ID)
+		globalSheetManager.QueueRowColUpdate(s.ProjectName, s.Name)
 	}
 	// Adjust cross-sheet references in sheets that reference this sheet
 	// Use scriptDeps to find which sheets have dependencies on this sheet
-	sheet_Key := s.ProjectName + "/" + s.ID
+	sheet_Key := s.ProjectName + "/" + s.Name
 	globalSheetManager.scriptDepsMu.RLock()
 	scriptIdentifiers, hasRefs := globalSheetManager.scriptDeps[sheet_Key]
 	globalSheetManager.scriptDepsMu.RUnlock()
@@ -3038,7 +3029,7 @@ func (s *Sheet) adjustScriptTagsOnInsertCol(insertIdx int) {
 	sheetsToUpdate := make([]*Sheet, 0)
 	globalSheetManager.mu.RLock()
 	for _, si := range scriptIdentifiers {
-		key := sheetKey(si.ScriptProjectName, si.ScriptSheetID)
+		key := sheetKey(si.ScriptProjectName, si.ScriptSheetName)
 		if !seenSheets[key] {
 			if sheet, ok := globalSheetManager.sheets[key]; ok && sheet != nil {
 				sheetsToUpdate = append(sheetsToUpdate, sheet)
@@ -3067,7 +3058,7 @@ func (s *Sheet) adjustScriptTagsOnInsertCol(insertIdx int) {
 					refSheet := submatches[2]
 
 					// Only adjust if referencing the current sheet
-					if refProject != s.ProjectName || refSheet != s.ID {
+					if refProject != s.ProjectName || refSheet != s.Name {
 						return match
 					}
 
@@ -3117,7 +3108,7 @@ func (s *Sheet) adjustScriptTagsOnInsertCol(insertIdx int) {
 			for rKey, rowMap := range sheet.Data {
 				for cKey, cell := range rowMap {
 					if cell.Script != "" {
-						updList = append(updList, depUpd2{sheet.ProjectName, sheet.ID, cell.CellID, cell.Script, rKey, cKey})
+						updList = append(updList, depUpd2{sheet.ProjectName, sheet.Name, cell.CellID, cell.Script, rKey, cKey})
 					}
 				}
 			}
@@ -3128,7 +3119,7 @@ func (s *Sheet) adjustScriptTagsOnInsertCol(insertIdx int) {
 			globalSheetManager.SaveSheet(sheet) // persist the column insert before clients fetch updated sheet
 			// Send ROW_COL_UPDATED message to clients for this modified sheet
 			if globalHub != nil {
-				globalSheetManager.QueueRowColUpdate(sheet.ProjectName, sheet.ID)
+				globalSheetManager.QueueRowColUpdate(sheet.ProjectName, sheet.Name)
 			}
 		}
 	}
@@ -3214,7 +3205,7 @@ func (s *Sheet) adjustScriptTagsOnDeleteCol(deleteIdx int) {
 			if newScript != cell.Script {
 				cell.Script = newScript
 				s.Data[rowKey][colKey] = cell
-				pending = append(pending, depUpd{s.ProjectName, s.ID, cell.CellID, newScript, rowKey, colKey})
+				pending = append(pending, depUpd{s.ProjectName, s.Name, cell.CellID, newScript, rowKey, colKey})
 			}
 		}
 	}
@@ -3227,11 +3218,11 @@ func (s *Sheet) adjustScriptTagsOnDeleteCol(deleteIdx int) {
 	}
 	// Send ROW_COL_UPDATED message to clients if any scripts were modified in this sheet
 	if len(pending) > 0 && globalHub != nil {
-		globalSheetManager.QueueRowColUpdate(s.ProjectName, s.ID)
+		globalSheetManager.QueueRowColUpdate(s.ProjectName, s.Name)
 	}
 	// Adjust cross-sheet references in sheets that reference this sheet
 	// Use scriptDeps to find which sheets have dependencies on this sheet
-	sheet_Key := s.ProjectName + "/" + s.ID
+	sheet_Key := s.ProjectName + "/" + s.Name
 	globalSheetManager.scriptDepsMu.RLock()
 	scriptIdentifiers, hasRefs := globalSheetManager.scriptDeps[sheet_Key]
 	globalSheetManager.scriptDepsMu.RUnlock()
@@ -3245,7 +3236,7 @@ func (s *Sheet) adjustScriptTagsOnDeleteCol(deleteIdx int) {
 	sheetsToUpdate := make([]*Sheet, 0)
 	globalSheetManager.mu.RLock()
 	for _, si := range scriptIdentifiers {
-		key := sheetKey(si.ScriptProjectName, si.ScriptSheetID)
+		key := sheetKey(si.ScriptProjectName, si.ScriptSheetName)
 		if !seenSheets[key] {
 			if sheet, ok := globalSheetManager.sheets[key]; ok && sheet != nil {
 				sheetsToUpdate = append(sheetsToUpdate, sheet)
@@ -3274,7 +3265,7 @@ func (s *Sheet) adjustScriptTagsOnDeleteCol(deleteIdx int) {
 					refSheet := submatches[2]
 
 					// Only adjust if referencing the current sheet
-					if refProject != s.ProjectName || refSheet != s.ID {
+					if refProject != s.ProjectName || refSheet != s.Name {
 						return match
 					}
 
@@ -3350,7 +3341,7 @@ func (s *Sheet) adjustScriptTagsOnDeleteCol(deleteIdx int) {
 			for rKey, rowMap := range sheet.Data {
 				for cKey, cell := range rowMap {
 					if cell.Script != "" {
-						updList = append(updList, depUpd2{sheet.ProjectName, sheet.ID, cell.CellID, cell.Script, rKey, cKey})
+						updList = append(updList, depUpd2{sheet.ProjectName, sheet.Name, cell.CellID, cell.Script, rKey, cKey})
 					}
 				}
 			}
@@ -3361,7 +3352,7 @@ func (s *Sheet) adjustScriptTagsOnDeleteCol(deleteIdx int) {
 			globalSheetManager.SaveSheet(sheet) // persist the column delete before clients fetch updated sheet
 			// Send ROW_COL_UPDATED message to clients for this modified sheet
 			if globalHub != nil {
-				globalSheetManager.QueueRowColUpdate(sheet.ProjectName, sheet.ID)
+				globalSheetManager.QueueRowColUpdate(sheet.ProjectName, sheet.Name)
 			}
 		}
 	}
@@ -3468,7 +3459,7 @@ func (s *Sheet) adjustScriptTagsOnMoveCol(fromIdx, destIdx int) {
 			if newScript != cell.Script {
 				cell.Script = newScript
 				s.Data[rowKey][colKey] = cell
-				pending = append(pending, depUpd{s.ProjectName, s.ID, cell.CellID, newScript, rowKey, colKey})
+				pending = append(pending, depUpd{s.ProjectName, s.Name, cell.CellID, newScript, rowKey, colKey})
 			}
 		}
 	}
@@ -3481,11 +3472,11 @@ func (s *Sheet) adjustScriptTagsOnMoveCol(fromIdx, destIdx int) {
 	}
 	// Send ROW_COL_UPDATED message to clients if any scripts were modified in this sheet
 	if len(pending) > 0 && globalHub != nil {
-		globalSheetManager.QueueRowColUpdate(s.ProjectName, s.ID)
+		globalSheetManager.QueueRowColUpdate(s.ProjectName, s.Name)
 	}
 	// Adjust cross-sheet references in sheets that reference this sheet
 	// Use scriptDeps to find which sheets have dependencies on this sheet
-	sheet_Key := s.ProjectName + "/" + s.ID
+	sheet_Key := s.ProjectName + "/" + s.Name
 	globalSheetManager.scriptDepsMu.RLock()
 	scriptIdentifiers, hasRefs := globalSheetManager.scriptDeps[sheet_Key]
 	globalSheetManager.scriptDepsMu.RUnlock()
@@ -3499,7 +3490,7 @@ func (s *Sheet) adjustScriptTagsOnMoveCol(fromIdx, destIdx int) {
 	sheetsToUpdate := make([]*Sheet, 0)
 	globalSheetManager.mu.RLock()
 	for _, si := range scriptIdentifiers {
-		key := sheetKey(si.ScriptProjectName, si.ScriptSheetID)
+		key := sheetKey(si.ScriptProjectName, si.ScriptSheetName)
 		if !seenSheets[key] {
 			if sheet, ok := globalSheetManager.sheets[key]; ok && sheet != nil {
 				sheetsToUpdate = append(sheetsToUpdate, sheet)
@@ -3528,7 +3519,7 @@ func (s *Sheet) adjustScriptTagsOnMoveCol(fromIdx, destIdx int) {
 					refSheet := submatches[2]
 
 					// Only adjust if referencing the current sheet
-					if refProject != s.ProjectName || refSheet != s.ID {
+					if refProject != s.ProjectName || refSheet != s.Name {
 						return match
 					}
 
@@ -3625,7 +3616,7 @@ func (s *Sheet) adjustScriptTagsOnMoveCol(fromIdx, destIdx int) {
 			for rKey, rowMap := range sheet.Data {
 				for cKey, cell := range rowMap {
 					if cell.Script != "" {
-						updList = append(updList, depUpd2{sheet.ProjectName, sheet.ID, cell.CellID, cell.Script, rKey, cKey})
+						updList = append(updList, depUpd2{sheet.ProjectName, sheet.Name, cell.CellID, cell.Script, rKey, cKey})
 					}
 				}
 			}
@@ -3636,7 +3627,7 @@ func (s *Sheet) adjustScriptTagsOnMoveCol(fromIdx, destIdx int) {
 			globalSheetManager.SaveSheet(sheet) // persist the column move before clients fetch updated sheet
 			// Send ROW_COL_UPDATED message to clients for this modified sheet
 			if globalHub != nil {
-				globalSheetManager.QueueRowColUpdate(sheet.ProjectName, sheet.ID)
+				globalSheetManager.QueueRowColUpdate(sheet.ProjectName, sheet.Name)
 			}
 		}
 	}
@@ -3655,69 +3646,125 @@ func (sm *SheetManager) ListSheets() []*Sheet {
 	return list
 }
 
+/*
 func (sm *SheetManager) RenameSheet(id, newName, user string) bool {
+	// Phase 1: locate sheet and remember old map key under manager lock
 	sm.mu.Lock()
-	defer sm.mu.Unlock()
-
-	// Find sheet across projects
 	var sheet *Sheet
-	for _, s := range sm.sheets {
-		if s != nil && s.ID == id {
+	var oldKey string
+	for k, s := range sm.sheets {
+		if s != nil && s.Name == id {
 			sheet = s
+			oldKey = k
 			break
 		}
 	}
+	sm.mu.Unlock()
+
 	if sheet == nil {
 		return false
 	}
 
+	// Phase 2: rename file + update sheet fields under sheet lock
 	sheet.mu.Lock()
 	oldName := sheet.Name
+	var dir string
+	if sheet.ProjectName != "" {
+		dir = filepath.Join(dataDir, sheet.ProjectName)
+	} else {
+		dir = dataDir
+	}
+	oldPath := filepath.Join(dir, oldName+".json")
+	newPath := filepath.Join(dir, newName+".json")
+	if err := os.Rename(oldPath, newPath); err != nil {
+		log.Printf("Error renaming sheet file from %s to %s: %v", oldPath, newPath, err)
+		sheet.mu.Unlock()
+		return false
+	}
 	sheet.Name = newName
 	sheet.mu.Unlock()
 
-	// Project-level audit only
+	// Phase 3: update manager map keys under short manager lock
+	sm.mu.Lock()
+	delete(sm.sheets, oldKey)
+	sm.sheets[sheetKey(sheet.ProjectName, newName)] = sheet
+	sm.mu.Unlock()
+
+	// Project-level audit
 	globalProjectAuditManager.Append(sheet.ProjectName, user, "RENAME_SHEET", "Renamed sheet from '"+oldName+"' to '"+newName+"'")
 
-	// Persist with existing key
+	// Update dependencies (no manager lock required)
+	sm.RenameSheetInDependencies(sheet.ProjectName, oldName, newName)
+	sm.RenameSheetInOptionsRangeDependencies(sheet.ProjectName, oldName, newName)
+
+	// Persist with new key without holding manager lock
 	sm.saveSheetLocked(sheet)
 	return true
 }
-
-// RenameSheetBy renames a sheet identified by id and project.
-func (sm *SheetManager) RenameSheetBy(id, project, newName, user string) bool {
+*/
+// RenameSheetBy renames a sheet identified by name and project.
+// This renames the actual file on disk and updates all dependency references.
+func (sm *SheetManager) RenameSheetBy(name, project, newName, user string) bool {
+	// Phase 1: locate sheet and remember old key under manager lock
 	sm.mu.Lock()
-	defer sm.mu.Unlock()
-
 	var sheet *Sheet
-	// Prefer composite key match
-	if s, ok := sm.sheets[sheetKey(project, id)]; ok {
+	var oldKey string
+	if s, ok := sm.sheets[sheetKey(project, name)]; ok {
 		sheet = s
+		oldKey = sheetKey(project, name)
 	} else {
-		for _, s := range sm.sheets {
-			if s != nil && s.ID == id && s.ProjectName == project {
+		for k, s := range sm.sheets {
+			if s != nil && s.Name == name && s.ProjectName == project {
 				sheet = s
+				oldKey = k
 				break
 			}
 		}
 	}
+	sm.mu.Unlock()
+
 	if sheet == nil {
 		return false
 	}
 
+	// Phase 2: rename file + update sheet fields under sheet lock
 	sheet.mu.Lock()
 	oldName := sheet.Name
+	var dir string
+	if sheet.ProjectName != "" {
+		dir = filepath.Join(dataDir, sheet.ProjectName)
+	} else {
+		dir = dataDir
+	}
+	oldPath := filepath.Join(dir, oldName+".json")
+	newPath := filepath.Join(dir, newName+".json")
+	if err := os.Rename(oldPath, newPath); err != nil {
+		log.Printf("Error renaming sheet file from %s to %s: %v", oldPath, newPath, err)
+		sheet.mu.Unlock()
+		return false
+	}
 	sheet.Name = newName
 	sheet.mu.Unlock()
 
-	// Project-level audit only
+	// Phase 3: update the sheets map key under short manager lock
+	sm.mu.Lock()
+	delete(sm.sheets, oldKey)
+	sm.sheets[sheetKey(project, newName)] = sheet
+	sm.mu.Unlock()
+
+	// Project-level audit
 	globalProjectAuditManager.Append(project, user, "RENAME_SHEET", "Renamed sheet from '"+oldName+"' to '"+newName+"'")
 
-	// Persist
+	// Update dependencies (no manager lock required)
+	sm.RenameSheetInDependencies(project, oldName, newName)
+	sm.RenameSheetInOptionsRangeDependencies(project, oldName, newName)
+
+	// Persist with new key without holding manager lock
 	sm.saveSheetLocked(sheet)
 	return true
 }
 
+/*
 func (sm *SheetManager) DeleteSheet(id string) bool {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
@@ -3725,7 +3772,7 @@ func (sm *SheetManager) DeleteSheet(id string) bool {
 	// Find entry by id
 	var sheet *Sheet
 	for _, s := range sm.sheets {
-		if s != nil && s.ID == id {
+		if s != nil && s.Name == id {
 			sheet = s
 			break
 		}
@@ -3751,17 +3798,18 @@ func (sm *SheetManager) DeleteSheet(id string) bool {
 	return true
 }
 
+*/
 // DeleteSheetBy deletes a sheet with id and project from memory and disk.
-func (sm *SheetManager) DeleteSheetBy(id, project string) bool {
+func (sm *SheetManager) DeleteSheetBy(name, project string) bool {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
 	var sheet *Sheet
-	if s, ok := sm.sheets[sheetKey(project, id)]; ok {
+	if s, ok := sm.sheets[sheetKey(project, name)]; ok {
 		sheet = s
 	} else {
 		for _, s := range sm.sheets {
-			if s != nil && s.ID == id && s.ProjectName == project {
+			if s != nil && s.Name == name && s.ProjectName == project {
 				sheet = s
 				break
 			}
@@ -3771,14 +3819,14 @@ func (sm *SheetManager) DeleteSheetBy(id, project string) bool {
 		return false
 	}
 
-	delete(sm.sheets, sheetKey(project, id))
+	delete(sm.sheets, sheetKey(project, name))
 
 	// Remove the sheet file
 	var filePath string
 	if sheet.ProjectName != "" {
-		filePath = filepath.Join(dataDir, sheet.ProjectName, id+".json")
+		filePath = filepath.Join(dataDir, sheet.ProjectName, name+".json")
 	} else {
-		filePath = getSheetFilePath(id)
+		filePath = getSheetFilePath(name)
 	}
 	if err := os.Remove(filePath); err != nil {
 		log.Printf("Error deleting sheet file %s: %v", filePath, err)
@@ -3790,16 +3838,16 @@ func (sm *SheetManager) DeleteSheetBy(id, project string) bool {
 // DeleteSheetsByProject removes all sheets in a given project from memory and disk.
 func (sm *SheetManager) DeleteSheetsByProject(projectName string) {
 	sm.mu.Lock()
-	// Collect ids to delete to avoid mutating map during iteration
-	ids := make([]string, 0)
-	for id, s := range sm.sheets {
+	// Collect names to delete to avoid mutating map during iteration
+	names := make([]string, 0)
+	for _, s := range sm.sheets {
 		if s.ProjectName == projectName {
-			ids = append(ids, id)
+			names = append(names, s.Name)
 		}
 	}
 	sm.mu.Unlock()
-	for _, id := range ids {
-		sm.DeleteSheet(id)
+	for _, name := range names {
+		sm.DeleteSheetBy(name, projectName)
 	}
 }
 
@@ -3811,7 +3859,7 @@ func (sm *SheetManager) SaveSheet(sheet *Sheet) {
 	// Build key from sheet fields safely
 	sheet.mu.RLock()
 	proj := sheet.ProjectName
-	id := sheet.ID
+	id := sheet.Name
 	sheet.mu.RUnlock()
 
 	key := sheetKey(proj, id)
@@ -3913,16 +3961,20 @@ func (sm *SheetManager) Load() {
 					return nil
 				}
 				file.Close()
-				// If project name missing in file, infer relative project path from DATA dir
-				if sheet.ProjectName == "" {
-					rel, relErr := filepath.Rel(dataDir, filepath.Dir(path))
-					if relErr == nil {
-						sheet.ProjectName = rel
-					} else {
-						sheet.ProjectName = topProject
-					}
+				//  infer relative project path from DATA dir
+				//if sheet.ProjectName == "" {
+				rel, relErr := filepath.Rel(dataDir, filepath.Dir(path))
+				if relErr == nil {
+					sheet.ProjectName = rel
+				} else {
+					sheet.ProjectName = topProject
 				}
-				sm.sheets[sheetKey(sheet.ProjectName, sheet.ID)] = &sheet
+				//}
+				//  use file name without extension
+				//if sheet.Name == "" {
+				sheet.Name = strings.TrimSuffix(d.Name(), filepath.Ext(d.Name()))
+				//}
+				sm.sheets[sheetKey(sheet.ProjectName, sheet.Name)] = &sheet
 				loadedCount++
 				return nil
 			})
@@ -3954,7 +4006,7 @@ func (sm *SheetManager) rebuildScriptDependencies() {
 
 		sheet.mu.RLock()
 		projectName := sheet.ProjectName
-		sheetID := sheet.ID
+		sheetName := sheet.Name
 
 		// Iterate with keys to capture row and column labels
 		for rowLabel, rowMap := range sheet.Data {
@@ -3964,12 +4016,12 @@ func (sm *SheetManager) rebuildScriptDependencies() {
 				}
 
 				// Extract dependencies for this script
-				deps := ExtractScriptDependencies(cell.Script, projectName, sheetID)
+				deps := ExtractScriptDependencies(cell.Script, projectName, sheetName)
 				if len(deps) == 0 {
 					// No explicit references found; add self cell as dependency
 					deps = append(deps, DependencyInfo{
 						Project: projectName,
-						Sheet:   sheetID,
+						Sheet:   sheetName,
 						Range:   colLabel + rowLabel,
 					})
 				}
@@ -3978,7 +4030,7 @@ func (sm *SheetManager) rebuildScriptDependencies() {
 					sheetKey := dep.Project + "/" + dep.Sheet
 					scriptIdent := ScriptIdentifier{
 						ScriptProjectName: projectName,
-						ScriptSheetID:     sheetID,
+						ScriptSheetName:   sheetName,
 						ScriptCellID:      cell.CellID,
 						ReferencedRange:   dep.Range,
 					}
@@ -4009,7 +4061,7 @@ func (sm *SheetManager) rebuildOptionsRangeDependencies() {
 
 		sheet.mu.RLock()
 		projectName := sheet.ProjectName
-		sheetID := sheet.ID
+		sheetName := sheet.Name
 
 		for rowLabel, rowMap := range sheet.Data {
 			for colLabel, cell := range rowMap {
@@ -4017,12 +4069,12 @@ func (sm *SheetManager) rebuildOptionsRangeDependencies() {
 					continue
 				}
 				// Parse the OptionsRange to determine which sheet it depends on
-				deps := parseOptionsRangeDependency(cell.OptionsRange, projectName, sheetID)
+				deps := parseOptionsRangeDependency(cell.OptionsRange, projectName, sheetName)
 				for _, dep := range deps {
 					depKey := dep.Project + "/" + dep.Sheet
 					sm.OptionsRangeDeps[depKey] = append(sm.OptionsRangeDeps[depKey], CellIdentifier{
 						ProjectName: projectName,
-						sheetID:     sheetID,
+						sheetName:   sheetName,
 						row:         rowLabel,
 						col:         colLabel,
 					})
@@ -4046,12 +4098,15 @@ func parseOptionsRangeDependency(optionsRange, currentProject, currentSheet stri
 	var deps []DependencyInfo
 
 	slashParts := strings.Split(optionsRange, "/")
-	if len(slashParts) == 3 {
-		// Cross-sheet reference: projectname/sheetid/A1:A10
+	if len(slashParts) >= 3 {
+		// Cross-sheet reference: project/.../sheetid/A1:A10
+		// The range is the last segment, sheet name is second-to-last,
+		// and the project path (may contain slashes for subfolders) is everything before.
+		n := len(slashParts)
 		deps = append(deps, DependencyInfo{
-			Project: slashParts[0],
-			Sheet:   slashParts[1],
-			Range:   slashParts[2],
+			Project: strings.Join(slashParts[:n-2], "/"),
+			Sheet:   slashParts[n-2],
+			Range:   slashParts[n-1],
 		})
 	} else {
 		// Same-sheet reference: A1:A10
@@ -4067,7 +4122,7 @@ func parseOptionsRangeDependency(optionsRange, currentProject, currentSheet stri
 
 // UpdateOptionsRangeDependencies updates the OptionsRange dependency map for a cell.
 // Should be called whenever a cell's OptionsRange is set or changed.
-func (sm *SheetManager) UpdateOptionsRangeDependencies(cellProjectName, cellSheetID, cellRow, cellCol, optionsRange string) {
+func (sm *SheetManager) UpdateOptionsRangeDependencies(cellProjectName, cellSheetName, cellRow, cellCol, optionsRange string) {
 	sm.OptionsRangeDepsMu.Lock()
 	defer sm.OptionsRangeDepsMu.Unlock()
 
@@ -4075,7 +4130,7 @@ func (sm *SheetManager) UpdateOptionsRangeDependencies(cellProjectName, cellShee
 	for depKey, cells := range sm.OptionsRangeDeps {
 		filtered := make([]CellIdentifier, 0, len(cells))
 		for _, c := range cells {
-			if c.ProjectName != cellProjectName || c.sheetID != cellSheetID || c.row != cellRow || c.col != cellCol {
+			if c.ProjectName != cellProjectName || c.sheetName != cellSheetName || c.row != cellRow || c.col != cellCol {
 				filtered = append(filtered, c)
 			}
 		}
@@ -4092,12 +4147,12 @@ func (sm *SheetManager) UpdateOptionsRangeDependencies(cellProjectName, cellShee
 	}
 
 	// Add new dependencies
-	deps := parseOptionsRangeDependency(optionsRange, cellProjectName, cellSheetID)
+	deps := parseOptionsRangeDependency(optionsRange, cellProjectName, cellSheetName)
 	for _, dep := range deps {
 		depKey := dep.Project + "/" + dep.Sheet
 		sm.OptionsRangeDeps[depKey] = append(sm.OptionsRangeDeps[depKey], CellIdentifier{
 			ProjectName: cellProjectName,
-			sheetID:     cellSheetID,
+			sheetName:   cellSheetName,
 			row:         cellRow,
 			col:         cellCol,
 		})
@@ -4121,11 +4176,13 @@ func (sm *SheetManager) RenameProjectInOptionsRangeDependencies(oldProject, newP
 			newDepKey = strings.Join(parts, "/")
 		}
 
-		// Update cell identifiers
+		// Update cell identifiers (including those in subfolders)
 		newCells := make([]CellIdentifier, 0, len(cells))
 		for _, c := range cells {
 			if c.ProjectName == oldProject {
 				c.ProjectName = newProject
+			} else if strings.HasPrefix(c.ProjectName, oldProject+"/") {
+				c.ProjectName = newProject + c.ProjectName[len(oldProject):]
 			}
 			newCells = append(newCells, c)
 		}
@@ -4166,6 +4223,70 @@ func (sm *SheetManager) RenameProjectInOptionsRangeDependencies(oldProject, newP
 	}
 }
 
+// RenameSheetInOptionsRangeDependencies updates OptionsRange dependency references when a sheet is renamed within a project.
+// It also updates the OptionsRange field in all cells that reference the old sheet name.
+func (sm *SheetManager) RenameSheetInOptionsRangeDependencies(projectName, oldSheetName, newSheetName string) {
+	sm.OptionsRangeDepsMu.Lock()
+	defer sm.OptionsRangeDepsMu.Unlock()
+
+	// Create new map with updated keys
+	newDeps := make(map[string][]CellIdentifier)
+
+	for depKey, cells := range sm.OptionsRangeDeps {
+		newDepKey := depKey
+		parts := strings.Split(depKey, "/")
+		// depKey format is "project/sheet"
+		if len(parts) >= 2 && parts[0] == projectName && parts[1] == oldSheetName {
+			parts[1] = newSheetName
+			newDepKey = strings.Join(parts, "/")
+		}
+
+		// Update cell identifiers that belong to the renamed sheet
+		newCells := make([]CellIdentifier, 0, len(cells))
+		for _, c := range cells {
+			if c.ProjectName == projectName && c.sheetName == oldSheetName {
+				c.sheetName = newSheetName
+			}
+			newCells = append(newCells, c)
+		}
+
+		newDeps[newDepKey] = newCells
+	}
+
+	sm.OptionsRangeDeps = newDeps
+
+	// Update OptionsRange field in all cells that reference the old sheet name
+	// Pattern: "projectname/oldSheetName/A1:A10" -> "projectname/newSheetName/A1:A10"
+	sm.mu.RLock()
+	sheetsToUpdate := make([]*Sheet, 0, len(sm.sheets))
+	for _, sheet := range sm.sheets {
+		sheetsToUpdate = append(sheetsToUpdate, sheet)
+	}
+	sm.mu.RUnlock()
+
+	for _, sheet := range sheetsToUpdate {
+		sheet.mu.Lock()
+		modified := false
+		for rowKey, rowMap := range sheet.Data {
+			for colKey, cell := range rowMap {
+				if strings.TrimSpace(cell.OptionsRange) != "" {
+					oldPattern := projectName + "/" + oldSheetName + "/"
+					if strings.HasPrefix(cell.OptionsRange, oldPattern) {
+						cell.OptionsRange = projectName + "/" + newSheetName + "/" + cell.OptionsRange[len(oldPattern):]
+						sheet.Data[rowKey][colKey] = cell
+						modified = true
+					}
+				}
+			}
+		}
+		sheet.mu.Unlock()
+
+		if modified {
+			sm.SaveSheet(sheet)
+		}
+	}
+}
+
 // adjustOptionsRangeOnInsertRow adjusts OptionsRange references in all cells when a row is inserted.
 // This handles same-sheet references inline and cross-sheet references via OptionsRangeDeps.
 func (s *Sheet) adjustOptionsRangeOnInsertRow(insertRow int) {
@@ -4179,7 +4300,7 @@ func (s *Sheet) adjustOptionsRangeOnInsertRow(insertRow int) {
 			if strings.TrimSpace(cell.OptionsRange) == "" {
 				continue
 			}
-			newRange := adjustRangeRefOnInsertRow(cell.OptionsRange, insertRow, s.ProjectName, s.ID, s.ProjectName, s.ID, sameSheetRangePattern, crossSheetRangePattern)
+			newRange := adjustRangeRefOnInsertRow(cell.OptionsRange, insertRow, s.ProjectName, s.Name, s.ProjectName, s.Name, sameSheetRangePattern, crossSheetRangePattern)
 			if newRange != cell.OptionsRange {
 				cell.OptionsRange = newRange
 				// Re-extract options from the new range
@@ -4194,7 +4315,7 @@ func (s *Sheet) adjustOptionsRangeOnInsertRow(insertRow int) {
 		// Re-extract options for modified cells and update deps
 		s.refreshOptionsFromRanges()
 		globalSheetManager.SaveSheet(s)
-		globalSheetManager.QueueRowColUpdate(s.ProjectName, s.ID)
+		globalSheetManager.QueueRowColUpdate(s.ProjectName, s.Name)
 	}
 
 	// Adjust cross-sheet OptionsRange references
@@ -4213,7 +4334,7 @@ func (s *Sheet) adjustOptionsRangeOnDeleteRow(deleteRow int) {
 			if strings.TrimSpace(cell.OptionsRange) == "" {
 				continue
 			}
-			newRange := adjustRangeRefOnDeleteRow(cell.OptionsRange, deleteRow, s.ProjectName, s.ID, s.ProjectName, s.ID, sameSheetRangePattern, crossSheetRangePattern)
+			newRange := adjustRangeRefOnDeleteRow(cell.OptionsRange, deleteRow, s.ProjectName, s.Name, s.ProjectName, s.Name, sameSheetRangePattern, crossSheetRangePattern)
 			if newRange != cell.OptionsRange {
 				cell.OptionsRange = newRange
 				s.Data[rowKey][colKey] = cell
@@ -4226,7 +4347,7 @@ func (s *Sheet) adjustOptionsRangeOnDeleteRow(deleteRow int) {
 	if modified {
 		s.refreshOptionsFromRanges()
 		globalSheetManager.SaveSheet(s)
-		globalSheetManager.QueueRowColUpdate(s.ProjectName, s.ID)
+		globalSheetManager.QueueRowColUpdate(s.ProjectName, s.Name)
 	}
 
 	s.adjustCrossSheetOptionsRangeOnDeleteRow(deleteRow)
@@ -4244,7 +4365,7 @@ func (s *Sheet) adjustOptionsRangeOnMoveRow(fromRow, destIndex int) {
 			if strings.TrimSpace(cell.OptionsRange) == "" {
 				continue
 			}
-			newRange := adjustRangeRefOnMoveRow(cell.OptionsRange, fromRow, destIndex, s.ProjectName, s.ID, s.ProjectName, s.ID, sameSheetRangePattern, crossSheetRangePattern)
+			newRange := adjustRangeRefOnMoveRow(cell.OptionsRange, fromRow, destIndex, s.ProjectName, s.Name, s.ProjectName, s.Name, sameSheetRangePattern, crossSheetRangePattern)
 			if newRange != cell.OptionsRange {
 				cell.OptionsRange = newRange
 				s.Data[rowKey][colKey] = cell
@@ -4257,7 +4378,7 @@ func (s *Sheet) adjustOptionsRangeOnMoveRow(fromRow, destIndex int) {
 	if modified {
 		s.refreshOptionsFromRanges()
 		globalSheetManager.SaveSheet(s)
-		globalSheetManager.QueueRowColUpdate(s.ProjectName, s.ID)
+		globalSheetManager.QueueRowColUpdate(s.ProjectName, s.Name)
 	}
 
 	s.adjustCrossSheetOptionsRangeOnMoveRow(fromRow, destIndex)
@@ -4275,7 +4396,7 @@ func (s *Sheet) adjustOptionsRangeOnInsertCol(insertIdx int) {
 			if strings.TrimSpace(cell.OptionsRange) == "" {
 				continue
 			}
-			newRange := adjustRangeRefOnInsertCol(cell.OptionsRange, insertIdx, s.ProjectName, s.ID, s.ProjectName, s.ID, sameSheetRangePattern, crossSheetRangePattern)
+			newRange := adjustRangeRefOnInsertCol(cell.OptionsRange, insertIdx, s.ProjectName, s.Name, s.ProjectName, s.Name, sameSheetRangePattern, crossSheetRangePattern)
 			if newRange != cell.OptionsRange {
 				cell.OptionsRange = newRange
 				s.Data[rowKey][colKey] = cell
@@ -4288,7 +4409,7 @@ func (s *Sheet) adjustOptionsRangeOnInsertCol(insertIdx int) {
 	if modified {
 		s.refreshOptionsFromRanges()
 		globalSheetManager.SaveSheet(s)
-		globalSheetManager.QueueRowColUpdate(s.ProjectName, s.ID)
+		globalSheetManager.QueueRowColUpdate(s.ProjectName, s.Name)
 	}
 
 	s.adjustCrossSheetOptionsRangeOnInsertCol(insertIdx)
@@ -4306,7 +4427,7 @@ func (s *Sheet) adjustOptionsRangeOnDeleteCol(deleteIdx int) {
 			if strings.TrimSpace(cell.OptionsRange) == "" {
 				continue
 			}
-			newRange := adjustRangeRefOnDeleteCol(cell.OptionsRange, deleteIdx, s.ProjectName, s.ID, s.ProjectName, s.ID, sameSheetRangePattern, crossSheetRangePattern)
+			newRange := adjustRangeRefOnDeleteCol(cell.OptionsRange, deleteIdx, s.ProjectName, s.Name, s.ProjectName, s.Name, sameSheetRangePattern, crossSheetRangePattern)
 			if newRange != cell.OptionsRange {
 				cell.OptionsRange = newRange
 				s.Data[rowKey][colKey] = cell
@@ -4319,7 +4440,7 @@ func (s *Sheet) adjustOptionsRangeOnDeleteCol(deleteIdx int) {
 	if modified {
 		s.refreshOptionsFromRanges()
 		globalSheetManager.SaveSheet(s)
-		globalSheetManager.QueueRowColUpdate(s.ProjectName, s.ID)
+		globalSheetManager.QueueRowColUpdate(s.ProjectName, s.Name)
 	}
 
 	s.adjustCrossSheetOptionsRangeOnDeleteCol(deleteIdx)
@@ -4337,7 +4458,7 @@ func (s *Sheet) adjustOptionsRangeOnMoveCol(fromIdx, destIdx int) {
 			if strings.TrimSpace(cell.OptionsRange) == "" {
 				continue
 			}
-			newRange := adjustRangeRefOnMoveCol(cell.OptionsRange, fromIdx, destIdx, s.ProjectName, s.ID, s.ProjectName, s.ID, sameSheetRangePattern, crossSheetRangePattern)
+			newRange := adjustRangeRefOnMoveCol(cell.OptionsRange, fromIdx, destIdx, s.ProjectName, s.Name, s.ProjectName, s.Name, sameSheetRangePattern, crossSheetRangePattern)
 			if newRange != cell.OptionsRange {
 				cell.OptionsRange = newRange
 				s.Data[rowKey][colKey] = cell
@@ -4350,7 +4471,7 @@ func (s *Sheet) adjustOptionsRangeOnMoveCol(fromIdx, destIdx int) {
 	if modified {
 		s.refreshOptionsFromRanges()
 		globalSheetManager.SaveSheet(s)
-		globalSheetManager.QueueRowColUpdate(s.ProjectName, s.ID)
+		globalSheetManager.QueueRowColUpdate(s.ProjectName, s.Name)
 	}
 
 	s.adjustCrossSheetOptionsRangeOnMoveCol(fromIdx, destIdx)
@@ -4388,7 +4509,7 @@ func (s *Sheet) refreshOptionsFromRanges() {
 
 	// Update OptionsRange dependencies for all modified cells
 	for _, ref := range toRefresh {
-		globalSheetManager.UpdateOptionsRangeDependencies(s.ProjectName, s.ID, ref.row, ref.col, ref.optionsRange)
+		globalSheetManager.UpdateOptionsRangeDependencies(s.ProjectName, s.Name, ref.row, ref.col, ref.optionsRange)
 	}
 }
 
@@ -4667,7 +4788,7 @@ func (s *Sheet) adjustCrossSheetOptionsRangeOnInsertRow(insertRow int) {
 	sameSheetRangePattern := regexp.MustCompile(`^([A-Z]+)(\d+):([A-Z]+)(\d+)$`)
 	crossSheetRangePattern := regexp.MustCompile(`^([^/]+)/([^/]+)/([A-Z]+)(\d+):([A-Z]+)(\d+)$`)
 
-	sheetKey := s.ProjectName + "/" + s.ID
+	sheetKey := s.ProjectName + "/" + s.Name
 	globalSheetManager.OptionsRangeDepsMu.RLock()
 	deps, hasDeps := globalSheetManager.OptionsRangeDeps[sheetKey]
 	globalSheetManager.OptionsRangeDepsMu.RUnlock()
@@ -4679,12 +4800,12 @@ func (s *Sheet) adjustCrossSheetOptionsRangeOnInsertRow(insertRow int) {
 	seenSheets := make(map[string]bool)
 	sheetsToUpdate := make([]*Sheet, 0)
 	for _, dep := range deps {
-		sk := dep.ProjectName + "::" + dep.sheetID
-		if dep.ProjectName == s.ProjectName && dep.sheetID == s.ID {
+		sk := dep.ProjectName + "::" + dep.sheetName
+		if dep.ProjectName == s.ProjectName && dep.sheetName == s.Name {
 			continue // Same sheet - already handled
 		}
 		if !seenSheets[sk] {
-			sheet := globalSheetManager.GetSheetBy(dep.sheetID, dep.ProjectName)
+			sheet := globalSheetManager.GetSheetBy(dep.sheetName, dep.ProjectName)
 			if sheet != nil {
 				sheetsToUpdate = append(sheetsToUpdate, sheet)
 				seenSheets[sk] = true
@@ -4700,7 +4821,7 @@ func (s *Sheet) adjustCrossSheetOptionsRangeOnInsertRow(insertRow int) {
 				if strings.TrimSpace(cell.OptionsRange) == "" {
 					continue
 				}
-				newRange := adjustRangeRefOnInsertRow(cell.OptionsRange, insertRow, s.ProjectName, s.ID, s.ProjectName, s.ID, sameSheetRangePattern, crossSheetRangePattern)
+				newRange := adjustRangeRefOnInsertRow(cell.OptionsRange, insertRow, s.ProjectName, s.Name, s.ProjectName, s.Name, sameSheetRangePattern, crossSheetRangePattern)
 				if newRange != cell.OptionsRange {
 					cell.OptionsRange = newRange
 					sheet.Data[rowKey][colKey] = cell
@@ -4713,7 +4834,7 @@ func (s *Sheet) adjustCrossSheetOptionsRangeOnInsertRow(insertRow int) {
 		if modified {
 			sheet.refreshOptionsFromRanges()
 			globalSheetManager.SaveSheet(sheet)
-			globalSheetManager.QueueRowColUpdate(sheet.ProjectName, sheet.ID)
+			globalSheetManager.QueueRowColUpdate(sheet.ProjectName, sheet.Name)
 		}
 	}
 }
@@ -4722,7 +4843,7 @@ func (s *Sheet) adjustCrossSheetOptionsRangeOnDeleteRow(deleteRow int) {
 	sameSheetRangePattern := regexp.MustCompile(`^([A-Z]+)(\d+):([A-Z]+)(\d+)$`)
 	crossSheetRangePattern := regexp.MustCompile(`^([^/]+)/([^/]+)/([A-Z]+)(\d+):([A-Z]+)(\d+)$`)
 
-	sheetKey := s.ProjectName + "/" + s.ID
+	sheetKey := s.ProjectName + "/" + s.Name
 	globalSheetManager.OptionsRangeDepsMu.RLock()
 	deps, hasDeps := globalSheetManager.OptionsRangeDeps[sheetKey]
 	globalSheetManager.OptionsRangeDepsMu.RUnlock()
@@ -4733,12 +4854,12 @@ func (s *Sheet) adjustCrossSheetOptionsRangeOnDeleteRow(deleteRow int) {
 	seenSheets := make(map[string]bool)
 	sheetsToUpdate := make([]*Sheet, 0)
 	for _, dep := range deps {
-		sk := dep.ProjectName + "::" + dep.sheetID
-		if dep.ProjectName == s.ProjectName && dep.sheetID == s.ID {
+		sk := dep.ProjectName + "::" + dep.sheetName
+		if dep.ProjectName == s.ProjectName && dep.sheetName == s.Name {
 			continue
 		}
 		if !seenSheets[sk] {
-			sheet := globalSheetManager.GetSheetBy(dep.sheetID, dep.ProjectName)
+			sheet := globalSheetManager.GetSheetBy(dep.sheetName, dep.ProjectName)
 			if sheet != nil {
 				sheetsToUpdate = append(sheetsToUpdate, sheet)
 				seenSheets[sk] = true
@@ -4754,7 +4875,7 @@ func (s *Sheet) adjustCrossSheetOptionsRangeOnDeleteRow(deleteRow int) {
 				if strings.TrimSpace(cell.OptionsRange) == "" {
 					continue
 				}
-				newRange := adjustRangeRefOnDeleteRow(cell.OptionsRange, deleteRow, s.ProjectName, s.ID, s.ProjectName, s.ID, sameSheetRangePattern, crossSheetRangePattern)
+				newRange := adjustRangeRefOnDeleteRow(cell.OptionsRange, deleteRow, s.ProjectName, s.Name, s.ProjectName, s.Name, sameSheetRangePattern, crossSheetRangePattern)
 				if newRange != cell.OptionsRange {
 					cell.OptionsRange = newRange
 					sheet.Data[rowKey][colKey] = cell
@@ -4767,7 +4888,7 @@ func (s *Sheet) adjustCrossSheetOptionsRangeOnDeleteRow(deleteRow int) {
 		if modified {
 			sheet.refreshOptionsFromRanges()
 			globalSheetManager.SaveSheet(sheet)
-			globalSheetManager.QueueRowColUpdate(sheet.ProjectName, sheet.ID)
+			globalSheetManager.QueueRowColUpdate(sheet.ProjectName, sheet.Name)
 		}
 	}
 }
@@ -4776,7 +4897,7 @@ func (s *Sheet) adjustCrossSheetOptionsRangeOnMoveRow(fromRow, destIndex int) {
 	sameSheetRangePattern := regexp.MustCompile(`^([A-Z]+)(\d+):([A-Z]+)(\d+)$`)
 	crossSheetRangePattern := regexp.MustCompile(`^([^/]+)/([^/]+)/([A-Z]+)(\d+):([A-Z]+)(\d+)$`)
 
-	sheetKey := s.ProjectName + "/" + s.ID
+	sheetKey := s.ProjectName + "/" + s.Name
 	globalSheetManager.OptionsRangeDepsMu.RLock()
 	deps, hasDeps := globalSheetManager.OptionsRangeDeps[sheetKey]
 	globalSheetManager.OptionsRangeDepsMu.RUnlock()
@@ -4787,12 +4908,12 @@ func (s *Sheet) adjustCrossSheetOptionsRangeOnMoveRow(fromRow, destIndex int) {
 	seenSheets := make(map[string]bool)
 	sheetsToUpdate := make([]*Sheet, 0)
 	for _, dep := range deps {
-		sk := dep.ProjectName + "::" + dep.sheetID
-		if dep.ProjectName == s.ProjectName && dep.sheetID == s.ID {
+		sk := dep.ProjectName + "::" + dep.sheetName
+		if dep.ProjectName == s.ProjectName && dep.sheetName == s.Name {
 			continue
 		}
 		if !seenSheets[sk] {
-			sheet := globalSheetManager.GetSheetBy(dep.sheetID, dep.ProjectName)
+			sheet := globalSheetManager.GetSheetBy(dep.sheetName, dep.ProjectName)
 			if sheet != nil {
 				sheetsToUpdate = append(sheetsToUpdate, sheet)
 				seenSheets[sk] = true
@@ -4808,7 +4929,7 @@ func (s *Sheet) adjustCrossSheetOptionsRangeOnMoveRow(fromRow, destIndex int) {
 				if strings.TrimSpace(cell.OptionsRange) == "" {
 					continue
 				}
-				newRange := adjustRangeRefOnMoveRow(cell.OptionsRange, fromRow, destIndex, s.ProjectName, s.ID, s.ProjectName, s.ID, sameSheetRangePattern, crossSheetRangePattern)
+				newRange := adjustRangeRefOnMoveRow(cell.OptionsRange, fromRow, destIndex, s.ProjectName, s.Name, s.ProjectName, s.Name, sameSheetRangePattern, crossSheetRangePattern)
 				if newRange != cell.OptionsRange {
 					cell.OptionsRange = newRange
 					sheet.Data[rowKey][colKey] = cell
@@ -4821,7 +4942,7 @@ func (s *Sheet) adjustCrossSheetOptionsRangeOnMoveRow(fromRow, destIndex int) {
 		if modified {
 			sheet.refreshOptionsFromRanges()
 			globalSheetManager.SaveSheet(sheet)
-			globalSheetManager.QueueRowColUpdate(sheet.ProjectName, sheet.ID)
+			globalSheetManager.QueueRowColUpdate(sheet.ProjectName, sheet.Name)
 		}
 	}
 }
@@ -4830,7 +4951,7 @@ func (s *Sheet) adjustCrossSheetOptionsRangeOnInsertCol(insertIdx int) {
 	sameSheetRangePattern := regexp.MustCompile(`^([A-Z]+)(\d+):([A-Z]+)(\d+)$`)
 	crossSheetRangePattern := regexp.MustCompile(`^([^/]+)/([^/]+)/([A-Z]+)(\d+):([A-Z]+)(\d+)$`)
 
-	sheetKey := s.ProjectName + "/" + s.ID
+	sheetKey := s.ProjectName + "/" + s.Name
 	globalSheetManager.OptionsRangeDepsMu.RLock()
 	deps, hasDeps := globalSheetManager.OptionsRangeDeps[sheetKey]
 	globalSheetManager.OptionsRangeDepsMu.RUnlock()
@@ -4841,12 +4962,12 @@ func (s *Sheet) adjustCrossSheetOptionsRangeOnInsertCol(insertIdx int) {
 	seenSheets := make(map[string]bool)
 	sheetsToUpdate := make([]*Sheet, 0)
 	for _, dep := range deps {
-		sk := dep.ProjectName + "::" + dep.sheetID
-		if dep.ProjectName == s.ProjectName && dep.sheetID == s.ID {
+		sk := dep.ProjectName + "::" + dep.sheetName
+		if dep.ProjectName == s.ProjectName && dep.sheetName == s.Name {
 			continue
 		}
 		if !seenSheets[sk] {
-			sheet := globalSheetManager.GetSheetBy(dep.sheetID, dep.ProjectName)
+			sheet := globalSheetManager.GetSheetBy(dep.sheetName, dep.ProjectName)
 			if sheet != nil {
 				sheetsToUpdate = append(sheetsToUpdate, sheet)
 				seenSheets[sk] = true
@@ -4862,7 +4983,7 @@ func (s *Sheet) adjustCrossSheetOptionsRangeOnInsertCol(insertIdx int) {
 				if strings.TrimSpace(cell.OptionsRange) == "" {
 					continue
 				}
-				newRange := adjustRangeRefOnInsertCol(cell.OptionsRange, insertIdx, s.ProjectName, s.ID, s.ProjectName, s.ID, sameSheetRangePattern, crossSheetRangePattern)
+				newRange := adjustRangeRefOnInsertCol(cell.OptionsRange, insertIdx, s.ProjectName, s.Name, s.ProjectName, s.Name, sameSheetRangePattern, crossSheetRangePattern)
 				if newRange != cell.OptionsRange {
 					cell.OptionsRange = newRange
 					sheet.Data[rowKey][colKey] = cell
@@ -4875,7 +4996,7 @@ func (s *Sheet) adjustCrossSheetOptionsRangeOnInsertCol(insertIdx int) {
 		if modified {
 			sheet.refreshOptionsFromRanges()
 			globalSheetManager.SaveSheet(sheet)
-			globalSheetManager.QueueRowColUpdate(sheet.ProjectName, sheet.ID)
+			globalSheetManager.QueueRowColUpdate(sheet.ProjectName, sheet.Name)
 		}
 	}
 }
@@ -4884,7 +5005,7 @@ func (s *Sheet) adjustCrossSheetOptionsRangeOnDeleteCol(deleteIdx int) {
 	sameSheetRangePattern := regexp.MustCompile(`^([A-Z]+)(\d+):([A-Z]+)(\d+)$`)
 	crossSheetRangePattern := regexp.MustCompile(`^([^/]+)/([^/]+)/([A-Z]+)(\d+):([A-Z]+)(\d+)$`)
 
-	sheetKey := s.ProjectName + "/" + s.ID
+	sheetKey := s.ProjectName + "/" + s.Name
 	globalSheetManager.OptionsRangeDepsMu.RLock()
 	deps, hasDeps := globalSheetManager.OptionsRangeDeps[sheetKey]
 	globalSheetManager.OptionsRangeDepsMu.RUnlock()
@@ -4895,12 +5016,12 @@ func (s *Sheet) adjustCrossSheetOptionsRangeOnDeleteCol(deleteIdx int) {
 	seenSheets := make(map[string]bool)
 	sheetsToUpdate := make([]*Sheet, 0)
 	for _, dep := range deps {
-		sk := dep.ProjectName + "::" + dep.sheetID
-		if dep.ProjectName == s.ProjectName && dep.sheetID == s.ID {
+		sk := dep.ProjectName + "::" + dep.sheetName
+		if dep.ProjectName == s.ProjectName && dep.sheetName == s.Name {
 			continue
 		}
 		if !seenSheets[sk] {
-			sheet := globalSheetManager.GetSheetBy(dep.sheetID, dep.ProjectName)
+			sheet := globalSheetManager.GetSheetBy(dep.sheetName, dep.ProjectName)
 			if sheet != nil {
 				sheetsToUpdate = append(sheetsToUpdate, sheet)
 				seenSheets[sk] = true
@@ -4916,7 +5037,7 @@ func (s *Sheet) adjustCrossSheetOptionsRangeOnDeleteCol(deleteIdx int) {
 				if strings.TrimSpace(cell.OptionsRange) == "" {
 					continue
 				}
-				newRange := adjustRangeRefOnDeleteCol(cell.OptionsRange, deleteIdx, s.ProjectName, s.ID, s.ProjectName, s.ID, sameSheetRangePattern, crossSheetRangePattern)
+				newRange := adjustRangeRefOnDeleteCol(cell.OptionsRange, deleteIdx, s.ProjectName, s.Name, s.ProjectName, s.Name, sameSheetRangePattern, crossSheetRangePattern)
 				if newRange != cell.OptionsRange {
 					cell.OptionsRange = newRange
 					sheet.Data[rowKey][colKey] = cell
@@ -4929,7 +5050,7 @@ func (s *Sheet) adjustCrossSheetOptionsRangeOnDeleteCol(deleteIdx int) {
 		if modified {
 			sheet.refreshOptionsFromRanges()
 			globalSheetManager.SaveSheet(sheet)
-			globalSheetManager.QueueRowColUpdate(sheet.ProjectName, sheet.ID)
+			globalSheetManager.QueueRowColUpdate(sheet.ProjectName, sheet.Name)
 		}
 	}
 }
@@ -4938,7 +5059,7 @@ func (s *Sheet) adjustCrossSheetOptionsRangeOnMoveCol(fromIdx, destIdx int) {
 	sameSheetRangePattern := regexp.MustCompile(`^([A-Z]+)(\d+):([A-Z]+)(\d+)$`)
 	crossSheetRangePattern := regexp.MustCompile(`^([^/]+)/([^/]+)/([A-Z]+)(\d+):([A-Z]+)(\d+)$`)
 
-	sheetKey := s.ProjectName + "/" + s.ID
+	sheetKey := s.ProjectName + "/" + s.Name
 	globalSheetManager.OptionsRangeDepsMu.RLock()
 	deps, hasDeps := globalSheetManager.OptionsRangeDeps[sheetKey]
 	globalSheetManager.OptionsRangeDepsMu.RUnlock()
@@ -4949,12 +5070,12 @@ func (s *Sheet) adjustCrossSheetOptionsRangeOnMoveCol(fromIdx, destIdx int) {
 	seenSheets := make(map[string]bool)
 	sheetsToUpdate := make([]*Sheet, 0)
 	for _, dep := range deps {
-		sk := dep.ProjectName + "::" + dep.sheetID
-		if dep.ProjectName == s.ProjectName && dep.sheetID == s.ID {
+		sk := dep.ProjectName + "::" + dep.sheetName
+		if dep.ProjectName == s.ProjectName && dep.sheetName == s.Name {
 			continue
 		}
 		if !seenSheets[sk] {
-			sheet := globalSheetManager.GetSheetBy(dep.sheetID, dep.ProjectName)
+			sheet := globalSheetManager.GetSheetBy(dep.sheetName, dep.ProjectName)
 			if sheet != nil {
 				sheetsToUpdate = append(sheetsToUpdate, sheet)
 				seenSheets[sk] = true
@@ -4970,7 +5091,7 @@ func (s *Sheet) adjustCrossSheetOptionsRangeOnMoveCol(fromIdx, destIdx int) {
 				if strings.TrimSpace(cell.OptionsRange) == "" {
 					continue
 				}
-				newRange := adjustRangeRefOnMoveCol(cell.OptionsRange, fromIdx, destIdx, s.ProjectName, s.ID, s.ProjectName, s.ID, sameSheetRangePattern, crossSheetRangePattern)
+				newRange := adjustRangeRefOnMoveCol(cell.OptionsRange, fromIdx, destIdx, s.ProjectName, s.Name, s.ProjectName, s.Name, sameSheetRangePattern, crossSheetRangePattern)
 				if newRange != cell.OptionsRange {
 					cell.OptionsRange = newRange
 					sheet.Data[rowKey][colKey] = cell
@@ -4983,7 +5104,7 @@ func (s *Sheet) adjustCrossSheetOptionsRangeOnMoveCol(fromIdx, destIdx int) {
 		if modified {
 			sheet.refreshOptionsFromRanges()
 			globalSheetManager.SaveSheet(sheet)
-			globalSheetManager.QueueRowColUpdate(sheet.ProjectName, sheet.ID)
+			globalSheetManager.QueueRowColUpdate(sheet.ProjectName, sheet.Name)
 		}
 	}
 }
@@ -5021,7 +5142,6 @@ func (sm *SheetManager) DuplicateProject(sourceProject, newProject, newOwner str
 		}
 
 		clone := &Sheet{
-			ID:          s.ID,
 			Name:        s.Name,
 			Owner:       newOwner,
 			ProjectName: newProject,
@@ -5047,7 +5167,7 @@ func (sm *SheetManager) DuplicateProject(sourceProject, newProject, newOwner str
 		}
 		s.mu.RUnlock()
 		// Register and persist
-		sm.sheets[sheetKey(newProject, clone.ID)] = clone
+		sm.sheets[sheetKey(newProject, clone.Name)] = clone
 		sm.saveSheetLocked(clone)
 	}
 	return nil
@@ -5055,8 +5175,8 @@ func (sm *SheetManager) DuplicateProject(sourceProject, newProject, newOwner str
 
 // updateOptionsForDependentCells updates options for combo box/multiple selection cells
 // that depend on the modified cell's sheet via OptionsRange
-func updateOptionsForDependentCells(projectName, sheetID, row, col string) {
-	sheetKey := projectName + "/" + sheetID
+func updateOptionsForDependentCells(projectName, sheetName, row, col string) {
+	sheetKey := projectName + "/" + sheetName
 
 	// Get cells that depend on this sheet for their options
 	globalSheetManager.OptionsRangeDepsMu.RLock()
@@ -5076,9 +5196,9 @@ func updateOptionsForDependentCells(projectName, sheetID, row, col string) {
 	sheetMap := make(map[string]*sheetCells)
 
 	for _, dep := range deps {
-		sk := dep.ProjectName + "::" + dep.sheetID
+		sk := dep.ProjectName + "::" + dep.sheetName
 		if sheetMap[sk] == nil {
-			depSheet := globalSheetManager.GetSheetBy(dep.sheetID, dep.ProjectName)
+			depSheet := globalSheetManager.GetSheetBy(dep.sheetName, dep.ProjectName)
 			if depSheet == nil {
 				continue
 			}
@@ -5166,7 +5286,7 @@ func updateOptionsForDependentCells(projectName, sheetID, row, col string) {
 				if optionsChanged {
 					// Queue this cell for script execution if it has dependent scripts
 					globalSheetManager.CellsModifiedByScriptQueueMu.Lock()
-					globalSheetManager.CellsModifiedByScriptQueue = append(globalSheetManager.CellsModifiedByScriptQueue, CellIdentifier{dep.ProjectName, dep.sheetID, dep.row, dep.col})
+					globalSheetManager.CellsModifiedByScriptQueue = append(globalSheetManager.CellsModifiedByScriptQueue, CellIdentifier{dep.ProjectName, dep.sheetName, dep.row, dep.col})
 					globalSheetManager.CellsModifiedByScriptQueueMu.Unlock()
 				}
 			}
@@ -5174,7 +5294,7 @@ func updateOptionsForDependentCells(projectName, sheetID, row, col string) {
 
 		if modified {
 			globalSheetManager.SaveSheet(sheet)
-			globalSheetManager.QueueRowColUpdate(sheet.ProjectName, sheet.ID)
+			globalSheetManager.QueueRowColUpdate(sheet.ProjectName, sheet.Name)
 		}
 	}
 }

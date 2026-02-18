@@ -71,7 +71,7 @@ export default function Settings() {
   const savePermissions = async () => {
     if (!isOwner) return;
     try {
-      const res = await authenticatedFetch(apiUrl(`/api/sheet/permissions?sheet_id=${encodeURIComponent(id)}${project ? `&project=${encodeURIComponent(project)}` : ''}`), {
+      const res = await authenticatedFetch(apiUrl(`/api/sheet/permissions?sheet_name=${encodeURIComponent(id)}${project ? `&project=${encodeURIComponent(project)}` : ''}`), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ editors }),
@@ -98,7 +98,7 @@ export default function Settings() {
       const res = await authenticatedFetch(apiUrl('/api/sheet/transfer_owner'), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(project ? { sheet_id: id, new_owner: newOwner, project_name: project } : { sheet_id: id, new_owner: newOwner }),
+        body: JSON.stringify(project ? { sheet_name: id, new_owner: newOwner, project_name: project } : { sheet_name: id, new_owner: newOwner }),
       });
       if (!res.ok) {
         const text = await res.text();
@@ -145,7 +145,7 @@ export default function Settings() {
             <ArrowLeft className="me-1" />
           </button>
           <span className="navbar-text ms-2 d-flex align-items-center fw-bold">
-            <SettingsIcon className="me-2" /> Settings · {sheet.name || id}
+            <SettingsIcon className="me-2" /> Settings · {id}
           </span>
           <div className="ms-auto d-flex align-items-center">
             <span className="navbar-text me-3 d-flex align-items-center">

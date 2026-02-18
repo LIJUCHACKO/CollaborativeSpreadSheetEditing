@@ -154,7 +154,7 @@ export default function Dashboard() {
                 setIsCreating(false);
                 fetchSheets();
                 const path = currentPath;
-                navigate(path ? `/sheet/${sheet.id}?project=${encodeURIComponent(path)}` : `/sheet/${sheet.id}`);
+                navigate(path ? `/sheet/${sheet.name}?project=${encodeURIComponent(path)}` : `/sheet/${sheet.name}`);
             } else if (res.status === 401) {
                 clearAuth();
                 alert('Your session has expired. Please log in again.');
@@ -393,7 +393,7 @@ export default function Dashboard() {
     };
 
     const startRenaming = (sheet) => {
-        setEditingSheetId(sheet.id);
+        setEditingSheetId(sheet.name);
         setEditingSheetName(sheet.name);
     };
 
@@ -413,7 +413,7 @@ export default function Dashboard() {
             const res = await authenticatedFetch(`http://${host}:8082/api/sheets`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(project ? { id: sheetId, name: editingSheetName, project_name: project } : { id: sheetId, name: editingSheetName }),
+                body: JSON.stringify(currentPath ? { id: sheetId, name: editingSheetName, project_name: currentPath } : { id: sheetId, name: editingSheetName }),
             });
             if (res.status === 403) {
                 alert('Only the sheet owner can rename this sheet.');
@@ -438,7 +438,7 @@ export default function Dashboard() {
     };
 
     const startCopying = async (sheet) => {
-        setCopyingSheetId(sheet.id);
+        setCopyingSheetId(sheet.name);
         setCopyName(sheet.name ? `${sheet.name} (Copy)` : 'Copy');
         try {
             const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
@@ -475,7 +475,7 @@ export default function Dashboard() {
         try {
             const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
             const body = {
-                source_id: sheet.id,
+                source_id: sheet.name,
                 source_project: sourceProject,
                 target_project: targetProject,
                 name: copyName || sheet.name,
@@ -491,9 +491,9 @@ export default function Dashboard() {
                 // If current list is filtered by project and target is same, refresh
                 fetchSheets();
                 // Navigate to new sheet in target project
-                if (newSheet?.id) {
+                if (newSheet?.name) {
                     const destProject = targetProject;
-                    window.open(`/sheet/${newSheet.id}?project=${encodeURIComponent(destProject)}`);
+                    window.open(`/sheet/${newSheet.name}?project=${encodeURIComponent(destProject)}`);
                 }
             } else if (res.status === 401) {
                 clearAuth();
@@ -693,16 +693,15 @@ export default function Dashboard() {
                             <tr style={{background: 'lightgray'}}>
                                 <th scope="col">Sheet Name</th>
                                 <th scope="col">Owner Name</th>
-                                <th scope="col">ID</th>
                                 <th scope="col" className="text-end">Actions</th>
                             </tr>
                         </thead>
                         <tbody>
                             {displayedSheets.map((sheet) => (
-                                <React.Fragment key={sheet.id}>
+                                <React.Fragment key={sheet.name}>
                                 <tr style={{ cursor: 'pointer' }}>
-                                    <td onClick={() => !editingSheetId &&  window.open(project ? `/sheet/${sheet.id}?project=${encodeURIComponent(project)}` : `/sheet/${sheet.id}`)}>
-                                        {editingSheetId === sheet.id ? (
+                                    <td onClick={() => !editingSheetId &&  window.open(project ? `/sheet/${sheet.name}?project=${encodeURIComponent(project)}` : `/sheet/${sheet.name}`)}>
+                                        {editingSheetId === sheet.name ? (
                                             <input
                                                 type="text"
                                                 className="form-control form-control-sm"
@@ -711,7 +710,7 @@ export default function Dashboard() {
                                                 onClick={(e) => e.stopPropagation()}
                                                 onKeyDown={(e) => {
                                                     if (e.key === 'Enter') {
-                                                        renameSheet(sheet.id);
+                                                        renameSheet(sheet.name);
                                                     } else if (e.key === 'Escape') {
                                                         cancelRenaming();
                                                     }
@@ -722,14 +721,13 @@ export default function Dashboard() {
                                             sheet.name
                                         )}
                                     </td>
-                                    <td onClick={() => !editingSheetId &&  window.open(project ? `/sheet/${sheet.id}?project=${encodeURIComponent(project)}` : `/sheet/${sheet.id}`)}>{sheet.owner}</td>
-                                    <td className="font-mono" onClick={() => !editingSheetId &&  window.open(project ? `/sheet/${sheet.id}?project=${encodeURIComponent(project)}` : `/sheet/${sheet.id}`)}>{sheet.id}</td>
+                                    <td onClick={() => !editingSheetId &&  window.open(project ? `/sheet/${sheet.name}?project=${encodeURIComponent(project)}` : `/sheet/${sheet.name}`)}>{sheet.owner}</td>
                                     <td className="text-end">
-                                        {editingSheetId === sheet.id ? (
+                                        {editingSheetId === sheet.name ? (
                                             <>
                                                 <button
                                                     className="btn btn-sm btn-success me-2"
-                                                    onClick={(ev) => { ev.stopPropagation(); renameSheet(sheet.id); }}
+                                                    onClick={(ev) => { ev.stopPropagation(); renameSheet(sheet.name); }}
                                                 >
                                                     Save
                                                 </button>
@@ -759,7 +757,7 @@ export default function Dashboard() {
                                                 {sheet.owner === username && (
                                                     <button
                                                         className="btn btn-sm btn-outline-danger"
-                                                        onClick={(ev) => { ev.stopPropagation(); deleteSheet(sheet.id); }}
+                                                        onClick={(ev) => { ev.stopPropagation(); deleteSheet(sheet.name); }}
                                                     >
                                                         <Trash2 size={14} className="me-1" /> Delete
                                                     </button>
@@ -768,9 +766,9 @@ export default function Dashboard() {
                                         )}
                                     </td>
                                 </tr>
-                                {copyingSheetId === sheet.id && (
+                                {copyingSheetId === sheet.name && (
                                     <tr>
-                                        <td colSpan="4">
+                                        <td colSpan="3">
                                             <div className="d-flex align-items-center gap-2">
                                                 <select className="form-select form-select-sm" value={targetProject} onChange={(e)=>setTargetProject(e.target.value)} style={{ maxWidth: 220 }}>
                                                     <option value="">Select target project</option>
@@ -789,7 +787,7 @@ export default function Dashboard() {
                             ))}
                             {displayedSheets.length === 0 && (
                                 <tr>
-                                    <td colSpan="4" className="text-center text-muted py-4">No sheets found.</td>
+                                    <td colSpan="3" className="text-center text-muted py-4">No sheets found.</td>
                                 </tr>
                             )}
                         </tbody>

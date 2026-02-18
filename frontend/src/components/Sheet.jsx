@@ -204,7 +204,7 @@ export default function Sheet() {
         const noOfRows = uniqueRows.length;
         const noOfCols = uniqueCols.length;
         const rangeText = getSelectedRange() 
-        // Combine projectName, sheet_id, and rangeText in the format {{projectname/sheet_id/rangeText}}
+        // Combine projectName, sheet_name, and rangeText in the format {{projectname/sheet_name/rangeText}}
         const combinedRangeText = rangeText ? `${projectName}/${id}/${rangeText}` : '';
         //console.log('Copied selection:',  values);
         // Send selection values to backend so other instances of the same user can paste
@@ -212,7 +212,7 @@ export default function Sheet() {
             const payload = {
                 Rows: noOfRows,
                 Cols: noOfCols,
-                sheet_id: id,
+                sheet_name: id,
                 values,
                 scripts,
                 cellTypes,
@@ -221,7 +221,7 @@ export default function Sheet() {
                 optionSelectedArray,
                 rangeText: combinedRangeText,
             };
-            ws.current.send(JSON.stringify({ type: 'SELECTION_COPIED', sheet_id: id, payload }));
+            ws.current.send(JSON.stringify({ type: 'SELECTION_COPIED', sheet_name: id, payload }));
         }
         setIsSelectingWithShift(false);
     }
@@ -464,20 +464,20 @@ export default function Sheet() {
                     options_range: cell.optionsRange,
                     user: username 
                 };
-                ws.current.send(JSON.stringify({ type: 'UPDATE_CELL_TYPE', sheet_id: id, payload }));
+                ws.current.send(JSON.stringify({ type: 'UPDATE_CELL_TYPE', sheet_name: id, payload }));
             });
             // Send script updates after cell type; backend will execute and broadcast updated values
             Object.entries(scriptUpdates).forEach(([key, cell]) => {
                 const [rowStr, colLabel] = key.split('-');
                 const payload = { row: rowStr, col: colLabel, script: cell.script, user: username };
-                ws.current.send(JSON.stringify({ type: 'UPDATE_CELL_SCRIPT', sheet_id: id, payload }));
+                ws.current.send(JSON.stringify({ type: 'UPDATE_CELL_SCRIPT', sheet_name: id, payload }));
             });
             // Send value updates for cells without scripts in source
             Object.entries(updates).forEach(([key, cell]) => {
                 if (scriptUpdates[key]) return; // skip value update if a script will define the value
                 const [rowStr, colLabel] = key.split('-');
                 const payload = { row: rowStr, col: colLabel, value: cell.value, user: username };
-                ws.current.send(JSON.stringify({ type: 'UPDATE_CELL', sheet_id: id, payload }));
+                ws.current.send(JSON.stringify({ type: 'UPDATE_CELL', sheet_name: id, payload }));
             });
         }
 
@@ -625,7 +625,7 @@ export default function Sheet() {
     const handleDownloadXlsx = async () => {
         try {
             const projQS = projectName ? `&project=${encodeURIComponent(projectName)}` : '';
-            const res = await authenticatedFetch(apiUrl(`/api/export?sheet_id=${encodeURIComponent(id)}${projQS}`), {
+            const res = await authenticatedFetch(apiUrl(`/api/export?sheet_name=${encodeURIComponent(id)}${projQS}`), {
                 method: 'GET',
             });
 
@@ -683,7 +683,7 @@ export default function Sheet() {
             user: username
         };
 
-        ws.current.send(JSON.stringify({ type: 'UPDATE_CELL_TYPE', sheet_id: id, payload }));
+        ws.current.send(JSON.stringify({ type: 'UPDATE_CELL_TYPE', sheet_name: id, payload }));
         setShowCellTypeDialog(false);
         setCellTypeDialogCell(null);
     };
@@ -796,7 +796,7 @@ export default function Sheet() {
                 option_selected: selectedOptions,
                 user: username
             };
-            ws.current.send(JSON.stringify({ type: 'UPDATE_CELL_OPTIONS', sheet_id: id, payload }));
+            ws.current.send(JSON.stringify({ type: 'UPDATE_CELL_OPTIONS', sheet_name: id, payload }));
         }
         
         // Close dialog
@@ -890,7 +890,7 @@ export default function Sheet() {
                 // SEND initial PING after 5 secs  (connection disconnects in firefox )
                 function sendInitialPing() {
                     if (socket.readyState === WebSocket.OPEN) {
-                        socket.send(JSON.stringify({ type: 'PING', sheet_id: id }));
+                        socket.send(JSON.stringify({ type: 'PING', sheet_name: id }));
                     }
                 }
 
@@ -986,7 +986,7 @@ export default function Sheet() {
                             ));
                         }
                     } else if (msg.type === 'SELECTION_SHARED') {
-                        const { Rows, Cols, sheet_id, values, scripts, cellTypes, optionsArray, optionsRangeArray, optionSelectedArray, rangeText } = msg.payload || {};
+                        const { Rows, Cols, sheet_name, values, scripts, cellTypes, optionsArray, optionsRangeArray, optionSelectedArray, rangeText } = msg.payload || {};
                         if (Rows && Cols && Array.isArray(values)) {
                             setCopiedBlock({ 
                                 Rows, 
@@ -1079,11 +1079,7 @@ export default function Sheet() {
         if (sheet.audit_log) {
             setAuditLog(sheet.audit_log);
         }
-        if (sheet.name) {
-            setSheetName(sheet.name);
-        } else {
-            setSheetName(id);
-        }
+        setSheetName(id);
         if (sheet.project_name) {
             setProjectName(sheet.project_name);
         }
@@ -1158,7 +1154,7 @@ export default function Sheet() {
         if (canEdit && ws.current && ws.current.readyState === WebSocket.OPEN) {
             const msg = {
                 type: 'UPDATE_CELL',
-                sheet_id: id,
+                sheet_name: id,
                 payload: { row: String(r), col: String(c), value, user: username }
             };
             ws.current.send(JSON.stringify(msg));
@@ -1181,7 +1177,7 @@ export default function Sheet() {
             console.log('WS sending script update');
             const msg = {
                 type: 'UPDATE_CELL_SCRIPT',
-                sheet_id: id,
+                sheet_name: id,
                 payload: { row: String(r), col: String(c), script, user: username, row_span: Number(rowSpan) || 1, col_span: Number(colSpan) || 1 }
             };
             ws.current.send(JSON.stringify(msg));
@@ -1200,7 +1196,7 @@ export default function Sheet() {
             updateCellState(row, col, oldValue, username);
             // Send to server
             if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-                ws.current.send(JSON.stringify({ type: 'UPDATE_CELL', sheet_id: id, payload: { row, col, value: oldValue, user: username } }));
+                ws.current.send(JSON.stringify({ type: 'UPDATE_CELL', sheet_name: id, payload: { row, col, value: oldValue, user: username } }));
             }
             // Move to redo stack
             setRedoStack(prev => [...prev, last]);
@@ -1234,7 +1230,7 @@ export default function Sheet() {
                     if (hasCellTypeChange) {
                         ws.current.send(JSON.stringify({ 
                             type: 'UPDATE_CELL_TYPE', 
-                            sheet_id: id, 
+                            sheet_name: id, 
                             payload: { 
                                 row: String(ch.row), 
                                 col: String(ch.col), 
@@ -1246,7 +1242,7 @@ export default function Sheet() {
                         }));
                     }
                     // Send value update
-                    ws.current.send(JSON.stringify({ type: 'UPDATE_CELL', sheet_id: id, payload: { row: String(ch.row), col: String(ch.col), value: ch.oldValue, user: username } }));
+                    ws.current.send(JSON.stringify({ type: 'UPDATE_CELL', sheet_name: id, payload: { row: String(ch.row), col: String(ch.col), value: ch.oldValue, user: username } }));
                 }
             }
             setRedoStack(prev => [...prev, last]);
@@ -1257,7 +1253,7 @@ export default function Sheet() {
             updateCellScriptState(row, col, oldValue, username);
             // Send to server
             if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-                ws.current.send(JSON.stringify({ type: 'UPDATE_CELL_SCRIPT', sheet_id: id, payload: { row, col, script: oldValue, user: username} }));
+                ws.current.send(JSON.stringify({ type: 'UPDATE_CELL_SCRIPT', sheet_name: id, payload: { row, col, script: oldValue, user: username} }));
             }
             setRedoStack(prev => [...prev, last]);
             setUndoStack(prev => prev.slice(0, -1));
@@ -1278,7 +1274,7 @@ export default function Sheet() {
             if (ws.current && ws.current.readyState === WebSocket.OPEN) {
                 ws.current.send(JSON.stringify({
                     type: 'UPDATE_CELL_OPTIONS',
-                    sheet_id: id,
+                    sheet_name: id,
                     payload: { row, col, value: oldValue, option_selected: oldSelected, user: username }
                 }));
             }
@@ -1287,7 +1283,7 @@ export default function Sheet() {
         } else if (last.type === 'insert_row') {
             const { insertedRow } = last;
             if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-                ws.current.send(JSON.stringify({ type: 'DELETE_ROW', sheet_id: id, payload: { row: String(insertedRow), user: username } }));
+                ws.current.send(JSON.stringify({ type: 'DELETE_ROW', sheet_name: id, payload: { row: String(insertedRow), user: username } }));
             }
             setRedoStack(prev => [...prev, last]);
             setUndoStack(prev => prev.slice(0, -1));
@@ -1296,14 +1292,14 @@ export default function Sheet() {
             // Inverse move: move the row currently at destIndex back to original fromRow
             const inverseTarget = (fromRow < destIndex) ? (fromRow - 1) : fromRow;
             if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-                ws.current.send(JSON.stringify({ type: 'MOVE_ROW', sheet_id: id, payload: { fromRow: String(destIndex), targetRow: String(inverseTarget), user: username } }));
+                ws.current.send(JSON.stringify({ type: 'MOVE_ROW', sheet_name: id, payload: { fromRow: String(destIndex), targetRow: String(inverseTarget), user: username } }));
             }
             setRedoStack(prev => [...prev, last]);
             setUndoStack(prev => prev.slice(0, -1));
         } else if (last.type === 'insert_col') {
             const { newCol } = last;
             if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-                ws.current.send(JSON.stringify({ type: 'DELETE_COL', sheet_id: id, payload: { col: String(newCol), user: username } }));
+                ws.current.send(JSON.stringify({ type: 'DELETE_COL', sheet_name: id, payload: { col: String(newCol), user: username } }));
             }
             setRedoStack(prev => [...prev, last]);
             setUndoStack(prev => prev.slice(0, -1));
@@ -1311,7 +1307,7 @@ export default function Sheet() {
             const { row } = last;
             // Re-insert the deleted row at its original position
             if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-                ws.current.send(JSON.stringify({ type: 'INSERT_ROW', sheet_id: id, payload: { targetRow: String(Number(row) - 1), user: username } }));
+                ws.current.send(JSON.stringify({ type: 'INSERT_ROW', sheet_name: id, payload: { targetRow: String(Number(row) - 1), user: username } }));
             }
             setRedoStack(prev => [...prev, last]);
             setUndoStack(prev => prev.slice(0, -1));
@@ -1320,7 +1316,7 @@ export default function Sheet() {
             // Re-insert the deleted column to the right of its previous left neighbor (fallback to current first column)
             const targetCol = targetLeft ?? colLabelAt(0);
             if (targetCol && ws.current && ws.current.readyState === WebSocket.OPEN) {
-                ws.current.send(JSON.stringify({ type: 'INSERT_COL', sheet_id: id, payload: { targetCol: String(targetCol), user: username } }));
+                ws.current.send(JSON.stringify({ type: 'INSERT_COL', sheet_name: id, payload: { targetCol: String(targetCol), user: username } }));
             }
             setRedoStack(prev => [...prev, last]);
             setUndoStack(prev => prev.slice(0, -1));
@@ -1339,7 +1335,7 @@ export default function Sheet() {
                 }
                 const targetLabelPrime = colLabelAt(targetIdxPrime);
                 if (targetLabelPrime) {
-                    ws.current.send(JSON.stringify({ type: 'MOVE_COL', sheet_id: id, payload: { fromCol: String(destLabel), targetCol: String(targetLabelPrime), user: username } }));
+                    ws.current.send(JSON.stringify({ type: 'MOVE_COL', sheet_name: id, payload: { fromCol: String(destLabel), targetCol: String(targetLabelPrime), user: username } }));
                 }
             }
             setRedoStack(prev => [...prev, last]);
@@ -1355,7 +1351,7 @@ export default function Sheet() {
             const { row, col, oldValue, newValue } = last;
             updateCellState(row, col, newValue, username);
             if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-                ws.current.send(JSON.stringify({ type: 'UPDATE_CELL', sheet_id: id, payload: { row, col, value: newValue, user: username } }));
+                ws.current.send(JSON.stringify({ type: 'UPDATE_CELL', sheet_name: id, payload: { row, col, value: newValue, user: username } }));
             }
             setUndoStack(prev => [...prev, last]);
             setRedoStack(prev => prev.slice(0, -1));
@@ -1388,7 +1384,7 @@ export default function Sheet() {
                     if (hasCellTypeChange) {
                         ws.current.send(JSON.stringify({ 
                             type: 'UPDATE_CELL_TYPE', 
-                            sheet_id: id, 
+                            sheet_name: id, 
                             payload: { 
                                 row: String(ch.row), 
                                 col: String(ch.col), 
@@ -1400,7 +1396,7 @@ export default function Sheet() {
                         }));
                     }
                     // Send value update
-                    ws.current.send(JSON.stringify({ type: 'UPDATE_CELL', sheet_id: id, payload: { row: String(ch.row), col: String(ch.col), value: ch.newValue, user: username } }));
+                    ws.current.send(JSON.stringify({ type: 'UPDATE_CELL', sheet_name: id, payload: { row: String(ch.row), col: String(ch.col), value: ch.newValue, user: username } }));
                 }
             }
             setUndoStack(prev => [...prev, last]);
@@ -1409,7 +1405,7 @@ export default function Sheet() {
             const { row, col, oldValue, newValue } = last;
             updateCellScriptState(row, col, newValue, username);
             if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-                ws.current.send(JSON.stringify({ type: 'UPDATE_CELL_SCRIPT', sheet_id: id, payload: { row, col, script: newValue, user: username } }));
+                ws.current.send(JSON.stringify({ type: 'UPDATE_CELL_SCRIPT', sheet_name: id, payload: { row, col, script: newValue, user: username } }));
             }
             setUndoStack(prev => [...prev, last]);
             setRedoStack(prev => prev.slice(0, -1));
@@ -1430,7 +1426,7 @@ export default function Sheet() {
             if (ws.current && ws.current.readyState === WebSocket.OPEN) {
                 ws.current.send(JSON.stringify({
                     type: 'UPDATE_CELL_OPTIONS',
-                    sheet_id: id,
+                    sheet_name: id,
                     payload: { row, col, value: newValue, option_selected: newSelected, user: username }
                 }));
             }
@@ -1440,7 +1436,7 @@ export default function Sheet() {
             const { insertedRow } = last;
             // Re-insert the row at the same position (target = insertedRow - 1)
             if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-                ws.current.send(JSON.stringify({ type: 'INSERT_ROW', sheet_id: id, payload: { targetRow: String(Number(insertedRow) - 1), user: username } }));
+                ws.current.send(JSON.stringify({ type: 'INSERT_ROW', sheet_name: id, payload: { targetRow: String(Number(insertedRow) - 1), user: username } }));
             }
             setUndoStack(prev => [...prev, last]);
             setRedoStack(prev => prev.slice(0, -1));
@@ -1448,21 +1444,21 @@ export default function Sheet() {
             const { fromRow, targetRow, destIndex } = last;
             // Reapply original move
             if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-                ws.current.send(JSON.stringify({ type: 'MOVE_ROW', sheet_id: id, payload: { fromRow: String(fromRow), targetRow: String(targetRow), user: username } }));
+                ws.current.send(JSON.stringify({ type: 'MOVE_ROW', sheet_name: id, payload: { fromRow: String(fromRow), targetRow: String(targetRow), user: username } }));
             }
             setUndoStack(prev => [...prev, last]);
             setRedoStack(prev => prev.slice(0, -1));
         } else if (last.type === 'insert_col') {
             const { targetCol } = last;
             if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-                ws.current.send(JSON.stringify({ type: 'INSERT_COL', sheet_id: id, payload: { targetCol: String(targetCol), user: username } }));
+                ws.current.send(JSON.stringify({ type: 'INSERT_COL', sheet_name: id, payload: { targetCol: String(targetCol), user: username } }));
             }
             setUndoStack(prev => [...prev, last]);
             setRedoStack(prev => prev.slice(0, -1));
         } else if (last.type === 'move_col') {
             const { fromCol, targetCol } = last;
             if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-                ws.current.send(JSON.stringify({ type: 'MOVE_COL', sheet_id: id, payload: { fromCol: String(fromCol), targetCol: String(targetCol), user: username } }));
+                ws.current.send(JSON.stringify({ type: 'MOVE_COL', sheet_name: id, payload: { fromCol: String(fromCol), targetCol: String(targetCol), user: username } }));
             }
             setUndoStack(prev => [...prev, last]);
             setRedoStack(prev => prev.slice(0, -1));
@@ -1470,7 +1466,7 @@ export default function Sheet() {
             const { row } = last;
             // Reapply deletion of the row
             if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-                ws.current.send(JSON.stringify({ type: 'DELETE_ROW', sheet_id: id, payload: { row: String(row), user: username } }));
+                ws.current.send(JSON.stringify({ type: 'DELETE_ROW', sheet_name: id, payload: { row: String(row), user: username } }));
             }
             setUndoStack(prev => [...prev, last]);
             setRedoStack(prev => prev.slice(0, -1));
@@ -1478,7 +1474,7 @@ export default function Sheet() {
             const { col } = last;
             // Reapply deletion of the column
             if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-                ws.current.send(JSON.stringify({ type: 'DELETE_COL', sheet_id: id, payload: { col: String(col), user: username } }));
+                ws.current.send(JSON.stringify({ type: 'DELETE_COL', sheet_name: id, payload: { col: String(col), user: username } }));
             }
             setUndoStack(prev => [...prev, last]);
             setRedoStack(prev => prev.slice(0, -1));
@@ -1533,10 +1529,10 @@ export default function Sheet() {
         if ((type === 'col' || type === 'row') && ws.current && ws.current.readyState === WebSocket.OPEN && label && typeof lastSize === 'number' && canEdit) {
             if (type === 'col') {
                 const payload = { col: label, width: lastSize, user: username };
-                ws.current.send(JSON.stringify({ type: 'RESIZE_COL', sheet_id: id, payload }));
+                ws.current.send(JSON.stringify({ type: 'RESIZE_COL', sheet_name: id, payload }));
             } else if (type === 'row') {
                 const payload = { row: String(label), height: lastSize, user: username };
-                ws.current.send(JSON.stringify({ type: 'RESIZE_ROW', sheet_id: id, payload }));
+                ws.current.send(JSON.stringify({ type: 'RESIZE_ROW', sheet_name: id, payload }));
             }
         }
         dragRef.current = { type: null, label: null, startPos: 0, startSize: 0 };
@@ -1579,7 +1575,7 @@ export default function Sheet() {
                     italic: !!styleItalic,
                     user: username,
                 };
-                ws.current.send(JSON.stringify({ type: 'UPDATE_CELL_STYLE', sheet_id: id, payload }));
+                ws.current.send(JSON.stringify({ type: 'UPDATE_CELL_STYLE', sheet_name: id, payload }));
             }
         }
     };
@@ -1761,7 +1757,7 @@ export default function Sheet() {
             // Push undo entry for structural move
             setUndoStack(prev => [...prev, { type: 'move_row', fromRow: Number(cutRow), targetRow: Number(targetRow), destIndex }]);
             setRedoStack([]);
-            ws.current.send(JSON.stringify({ type: 'MOVE_ROW', sheet_id: id, payload }));
+            ws.current.send(JSON.stringify({ type: 'MOVE_ROW', sheet_name: id, payload }));
         }
 
         setCutRow(null);
@@ -1781,7 +1777,7 @@ export default function Sheet() {
                 setUndoStack(prev => [...prev, { type: 'move_col', fromCol: String(cutCol), targetCol: String(targetCol), destIndex: destIdx }]);
                 setRedoStack([]);
             }
-            ws.current.send(JSON.stringify({ type: 'MOVE_COL', sheet_id: id, payload }));
+            ws.current.send(JSON.stringify({ type: 'MOVE_COL', sheet_name: id, payload }));
         }
         setCutCol(null);
     };
@@ -1794,7 +1790,7 @@ export default function Sheet() {
             const insertedRow = Number(targetRow) + 1;
             setUndoStack(prev => [...prev, { type: 'insert_row', insertedRow }]);
             setRedoStack([]);
-            ws.current.send(JSON.stringify({ type: 'INSERT_ROW', sheet_id: id, payload }));
+            ws.current.send(JSON.stringify({ type: 'INSERT_ROW', sheet_name: id, payload }));
         }
     };
 
@@ -1806,7 +1802,7 @@ export default function Sheet() {
             // The inserted row will be row 1
             setUndoStack(prev => [...prev, { type: 'insert_row', insertedRow: 1 }]);
             setRedoStack([]);
-            ws.current.send(JSON.stringify({ type: 'INSERT_ROW', sheet_id: id, payload }));
+            ws.current.send(JSON.stringify({ type: 'INSERT_ROW', sheet_name: id, payload }));
         }
     };
 
@@ -1824,7 +1820,7 @@ export default function Sheet() {
                     setRedoStack([]);
                 }
             }
-            ws.current.send(JSON.stringify({ type: 'INSERT_COL', sheet_id: id, payload }));
+            ws.current.send(JSON.stringify({ type: 'INSERT_COL', sheet_name: id, payload }));
         }
     };
 
@@ -1837,7 +1833,7 @@ export default function Sheet() {
             // New column label will be 'A'
             setUndoStack(prev => [...prev, { type: 'insert_col', newCol: String('A'), targetCol: String('') }]);
             setRedoStack([]);
-            ws.current.send(JSON.stringify({ type: 'INSERT_COL', sheet_id: id, payload }));
+            ws.current.send(JSON.stringify({ type: 'INSERT_COL', sheet_name: id, payload }));
         }
     };
 
@@ -1847,7 +1843,7 @@ export default function Sheet() {
         if (!isRowEmpty(rowLabel)) { alert('Cannot delete: row is not empty.'); return; }
         if (canEdit && ws.current && ws.current.readyState === WebSocket.OPEN) {
             const payload = { row: String(rowLabel), user: username };
-            ws.current.send(JSON.stringify({ type: 'DELETE_ROW', sheet_id: id, payload }));
+            ws.current.send(JSON.stringify({ type: 'DELETE_ROW', sheet_name: id, payload }));
             // Push undo entry to allow reinsertion at the same index
             setUndoStack(prev => [...prev, { type: 'delete_row', row: Number(rowLabel) }]);
             setRedoStack([]);
@@ -1859,7 +1855,7 @@ export default function Sheet() {
         if (!isColEmpty(colLabel)) { alert('Cannot delete: column is not empty.'); return; }
         if (canEdit && ws.current && ws.current.readyState === WebSocket.OPEN) {
             const payload = { col: String(colLabel), user: username };
-            ws.current.send(JSON.stringify({ type: 'DELETE_COL', sheet_id: id, payload }));
+            ws.current.send(JSON.stringify({ type: 'DELETE_COL', sheet_name: id, payload }));
             // Push undo entry with left-neighbor hint for reinsertion
             const idx = colIndexMap[String(colLabel)] ?? -1;
             const leftLabel = idx > 0 ? colLabelAt(idx - 1) : null;
@@ -2311,7 +2307,7 @@ export default function Sheet() {
                                     const oldVal = (entry.old_value ?? '').toString();
                                     ws.current.send(JSON.stringify({
                                         type: 'UPDATE_CELL',
-                                        sheet_id: id,
+                                        sheet_name: id,
                                         payload: { row, col, value: oldVal, user: username, revert: true }
                                     }));
                                     // Notify entry.user with a chat message
@@ -2319,7 +2315,7 @@ export default function Sheet() {
                                         const msg = `Your change to cell ${col}${row} was reverted by ${username}.`;
                                         ws.current.send(JSON.stringify({
                                             type: 'CHAT_MESSAGE',
-                                            sheet_id: id,
+                                            sheet_name: id,
                                             payload: {
                                                 text: msg,
                                                 user: username,
@@ -3370,9 +3366,19 @@ export default function Sheet() {
                                                                         </button>
                                                                         <button
                                                                             className="block w-full text-left px-2 py-1 hover:bg-gray-100 rounded"
-                                                                            disabled={!canEdit || !contextMenu.cell || (data[`${contextMenu.cell.row}-${contextMenu.cell.col}`]?.locked_by?.startsWith('script-span '))}
+                                                                            disabled={(() => {
+                                                                                const key = `${contextMenu.cell?.row}-${contextMenu.cell?.col}`;
+                                                                                const cell = data[key] || {};
+                                                                                const isLockedBySpan = (cell.locked_by || '').startsWith('script-span ');
+                                                                                const isOptionType = cell.cell_type === 2 || cell.cell_type === 3;
+                                                                                return !canEdit || !contextMenu.cell || isLockedBySpan || isOptionType;
+                                                                            })()}
                                                                             onClick={() => {
-                                                                                if (!canEdit || !contextMenu.cell || (data[`${contextMenu.cell.row}-${contextMenu.cell.col}`]?.locked_by?.startsWith('script-span '))) return;
+                                                                                const key = `${contextMenu.cell?.row}-${contextMenu.cell?.col}`;
+                                                                                const cell = data[key] || {};
+                                                                                const isLockedBySpan = (cell.locked_by || '').startsWith('script-span ');
+                                                                                const isOptionType = cell.cell_type === 2 || cell.cell_type === 3;
+                                                                                if (!canEdit || !contextMenu.cell || isLockedBySpan || isOptionType) return;
                                                                                 openScriptPopup(contextMenu.cell.row, contextMenu.cell.col);
                                                                                 closeContextMenu();
                                                                             }}
@@ -3428,7 +3434,7 @@ export default function Sheet() {
                                                                                                 const key = `${r}-${colLabel}`;
                                                                                                 if (!data[key]?.locked) {
                                                                                                     const payload = { row: String(r), col: String(colLabel), user: username };
-                                                                                                    ws.current.send(JSON.stringify({ type: 'LOCK_CELL', sheet_id: id, payload }));
+                                                                                                    ws.current.send(JSON.stringify({ type: 'LOCK_CELL', sheet_name: id, payload }));
                                                                                                 }
                                                                                             }
                                                                                         }
@@ -3459,7 +3465,7 @@ export default function Sheet() {
                                                                                                 const key = `${r}-${colLabel}`;
                                                                                                 if (data[key]?.locked && !(data[key]?.locked_by?.startsWith('script-span '))) {
                                                                                                     const payload = { row: String(r), col: String(colLabel), user: username };
-                                                                                                    ws.current.send(JSON.stringify({ type: 'UNLOCK_CELL', sheet_id: id, payload }));
+                                                                                                    ws.current.send(JSON.stringify({ type: 'UNLOCK_CELL', sheet_name: id, payload }));
                                                                                                 }
                                                                                             }
                                                                                         }
@@ -3536,7 +3542,7 @@ export default function Sheet() {
                                         )}
                                         {chatMessages.map((m, idx) => {
                                             const isRead = m.read_by && m.read_by[username];
-                                            const hasSheetInfo = m.sheet_id || m.sheet_name;
+                                            const hasSheetInfo = m.sheet_name;
                                             return (
                                             <div 
                                                 key={`${m.timestamp || idx}-${m.user}-${idx}`} 
@@ -3552,14 +3558,14 @@ export default function Sheet() {
                                                         cursor: hasSheetInfo ? 'pointer' : 'default'
                                                     }}
                                                     onClick={async () => {
-                                                        if (hasSheetInfo && m.sheet_id && m.project_name) {
+                                                        if (hasSheetInfo && m.sheet_name && m.project_name) {
                                                             // Verify sheet exists before navigation
                                                             try {
                                                                 const projQS = m.project_name ? `?project=${encodeURIComponent(m.project_name)}` : '';
-                                                                const res = await authenticatedFetch(apiUrl(`/api/sheet/${encodeURIComponent(m.sheet_id)}${projQS}`));
+                                                                const res = await authenticatedFetch(apiUrl(`/api/sheet/${encodeURIComponent(m.sheet_name)}${projQS}`));
                                                                 
                                                                 if (res.status === 404) {
-                                                                    alert(`Sheet "${m.sheet_name || m.sheet_id}" no longer exists.`);
+                                                                    alert(`Sheet "${m.sheet_name}" no longer exists.`);
                                                                     return;
                                                                 }
                                                                 
@@ -3577,13 +3583,13 @@ export default function Sheet() {
                                                                 if (ws.current && ws.current.readyState === WebSocket.OPEN && !isRead) {
                                                                     ws.current.send(JSON.stringify({ 
                                                                         type: 'CHAT_READ', 
-                                                                        sheet_id: id, 
+                                                                        sheet_name: id, 
                                                                         payload: { timestamp: m.timestamp, user: username } 
                                                                     }));
                                                                 }
                                                                 
                                                                 // Navigate to the sheet
-                                                                navigate(`/sheet/${m.sheet_id}?project=${encodeURIComponent(m.project_name)}`);
+                                                                navigate(`/sheet/${m.sheet_name}?project=${encodeURIComponent(m.project_name)}`);
                                                             } catch (err) {
                                                                 console.error('Error verifying sheet:', err);
                                                                 alert('Unable to verify sheet existence. Please try again.');
@@ -3634,7 +3640,7 @@ export default function Sheet() {
                                                         const text = chatInput.trim();
                                                         if (text) {
                                                             const to = chatRecipient || 'all';
-                                                            ws.current.send(JSON.stringify({ type: 'CHAT_MESSAGE', sheet_id: id, payload: { text, user: username, to } }));
+                                                            ws.current.send(JSON.stringify({ type: 'CHAT_MESSAGE', sheet_name: id, payload: { text, user: username, to } }));
                                                             setChatInput('');
                                                         }
                                                     }
@@ -3649,7 +3655,7 @@ export default function Sheet() {
                                                     const text = chatInput.trim();
                                                     if (text) {
                                                         const to = chatRecipient || 'all';
-                                                        ws.current.send(JSON.stringify({ type: 'CHAT_MESSAGE', sheet_id: id, payload: { text, user: username, to } }));
+                                                        ws.current.send(JSON.stringify({ type: 'CHAT_MESSAGE', sheet_name: id, payload: { text, user: username, to } }));
                                                         setChatInput('');
                                                     }
                                                 }

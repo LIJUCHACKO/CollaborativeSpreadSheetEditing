@@ -9,11 +9,11 @@ import (
 
 // Message defines the structure of data exchanged via WebSocket
 type Message struct {
-	Type    string          `json:"type"`
-	SheetID string          `json:"sheet_id"`
-	Project string          `json:"project,omitempty"`
-	Payload json.RawMessage `json:"payload"`
-	User    string          `json:"user,omitempty"` // Username of the sender
+	Type      string          `json:"type"`
+	SheetName string          `json:"sheet_name"`
+	Project   string          `json:"project,omitempty"`
+	Payload   json.RawMessage `json:"payload"`
+	User      string          `json:"user,omitempty"` // Username of the sender
 }
 
 // Hub maintains the set of active clients and broadcasts messages to the clients.
@@ -45,16 +45,16 @@ func (h *Hub) run() {
 	for {
 		select {
 		case client := <-h.register:
-			roomID := sheetKey(client.projectName, client.sheetID)
+			roomID := sheetKey(client.projectName, client.sheetName)
 			if h.rooms[roomID] == nil {
 				h.rooms[roomID] = make(map[*Client]bool)
 			}
 			h.rooms[roomID][client] = true
-			log.Printf("Client registered to sheet %s (project %s): %s", client.sheetID, client.projectName, client.userID)
+			log.Printf("Client registered to sheet %s (project %s): %s", client.sheetName, client.projectName, client.userID)
 
 			// Send current state to the new client
 			// In a real app, this should be handled safely with a mutex on the sheet
-			sheet := globalSheetManager.GetSheetBy(client.sheetID, client.projectName)
+			sheet := globalSheetManager.GetSheetBy(client.sheetName, client.projectName)
 			if sheet != nil {
 				// Clean up zombie script locks before sending sheet to client
 				removeLocksWithMissingCellID(sheet)
@@ -70,12 +70,12 @@ func (h *Hub) run() {
 				// Also send global chat history independent of sheet
 				history := globalChatManager.HistoryFor(client.userID)
 				chatPayload, _ := json.Marshal(history)
-				client.send <- msgToBytes(&Message{Type: "CHAT_HISTORY", SheetID: "", Payload: chatPayload, User: "system"})
+				client.send <- msgToBytes(&Message{Type: "CHAT_HISTORY", SheetName: "", Payload: chatPayload, User: "system"})
 
 			}
 
 		case client := <-h.unregister:
-			roomID := sheetKey(client.projectName, client.sheetID)
+			roomID := sheetKey(client.projectName, client.sheetName)
 			if clients, ok := h.rooms[roomID]; ok {
 				if _, ok := clients[client]; ok {
 					delete(clients, client)
@@ -83,7 +83,7 @@ func (h *Hub) run() {
 					if len(clients) == 0 {
 						delete(h.rooms, roomID)
 					}
-					log.Printf("Client unregistered from sheet %s (project %s)", client.sheetID, client.projectName)
+					log.Printf("Client unregistered from sheet %s (project %s)", client.sheetName, client.projectName)
 				}
 			}
 		case message := <-h.broadcast:
@@ -95,7 +95,7 @@ func (h *Hub) run() {
 
 			// Helper: deny non-editors for mutating operations
 			denyIfNotEditor := func() bool {
-				sheet := globalSheetManager.GetSheetBy(message.SheetID, message.Project)
+				sheet := globalSheetManager.GetSheetBy(message.SheetName, message.Project)
 				if sheet == nil {
 					return true
 				}
@@ -105,8 +105,8 @@ func (h *Hub) run() {
 						"type":   message.Type,
 					})
 					// Send denial only to the sender
-					toSend = &Message{Type: "EDIT_DENIED", SheetID: message.SheetID, Payload: deniedPayload, User: message.User}
-					if clients, ok := h.rooms[sheetKey(message.Project, message.SheetID)]; ok {
+					toSend = &Message{Type: "EDIT_DENIED", SheetName: message.SheetName, Payload: deniedPayload, User: message.User}
+					if clients, ok := h.rooms[sheetKey(message.Project, message.SheetName)]; ok {
 						for client := range clients {
 							if client.userID != message.User {
 								continue
@@ -138,16 +138,16 @@ func (h *Hub) run() {
 					Revert bool   `json:"revert,omitempty"`
 				}
 				if err := json.Unmarshal(message.Payload, &update); err == nil {
-					sheet := globalSheetManager.GetSheetBy(message.SheetID, message.Project)
+					sheet := globalSheetManager.GetSheetBy(message.SheetName, message.Project)
 					if sheet != nil {
 						sheet.SetCell(update.Row, update.Col, update.Value, message.User, update.Revert)
 						// Broadcast updated sheet snapshot with constructed details
 						payload, _ := json.Marshal(sheet.SnapshotForClient())
 						toSend = &Message{
-							Type:    "ROW_COL_UPDATED",
-							SheetID: message.SheetID,
-							Payload: payload,
-							User:    message.User,
+							Type:      "ROW_COL_UPDATED",
+							SheetName: message.SheetName,
+							Payload:   payload,
+							User:      message.User,
 						}
 					}
 				} else {
@@ -166,16 +166,16 @@ func (h *Hub) run() {
 					User       string `json:"user"`
 				}
 				if err := json.Unmarshal(message.Payload, &st); err == nil {
-					sheet := globalSheetManager.GetSheetBy(message.SheetID, message.Project)
+					sheet := globalSheetManager.GetSheetBy(message.SheetName, message.Project)
 					if sheet != nil {
 						sheet.SetCellStyle(st.Row, st.Col, st.Background, st.Bold, st.Italic, message.User)
 						// Broadcast updated sheet snapshot with constructed details
 						payload, _ := json.Marshal(sheet.SnapshotForClient())
 						toSend = &Message{
-							Type:    "ROW_COL_UPDATED",
-							SheetID: message.SheetID,
-							Payload: payload,
-							User:    message.User,
+							Type:      "ROW_COL_UPDATED",
+							SheetName: message.SheetName,
+							Payload:   payload,
+							User:      message.User,
 						}
 					}
 				} else {
@@ -184,7 +184,7 @@ func (h *Hub) run() {
 
 			} else if message.Type == "UPDATE_CELL_TYPE" {
 				// Only owner can change cell type
-				sheet := globalSheetManager.GetSheetBy(message.SheetID, message.Project)
+				sheet := globalSheetManager.GetSheetBy(message.SheetName, message.Project)
 				if sheet == nil {
 					continue
 				}
@@ -194,12 +194,12 @@ func (h *Hub) run() {
 						"type":   message.Type,
 					})
 					toSend = &Message{
-						Type:    "EDIT_DENIED",
-						SheetID: message.SheetID,
-						Payload: deniedPayload,
-						User:    message.User,
+						Type:      "EDIT_DENIED",
+						SheetName: message.SheetName,
+						Payload:   deniedPayload,
+						User:      message.User,
 					}
-					if clients, ok := h.rooms[sheetKey(message.Project, message.SheetID)]; ok {
+					if clients, ok := h.rooms[sheetKey(message.Project, message.SheetName)]; ok {
 						for client := range clients {
 							if client.userID != message.User {
 								continue
@@ -228,10 +228,10 @@ func (h *Hub) run() {
 						// Broadcast updated sheet snapshot with constructed details
 						payload, _ := json.Marshal(sheet.SnapshotForClient())
 						toSend = &Message{
-							Type:    "ROW_COL_UPDATED",
-							SheetID: message.SheetID,
-							Payload: payload,
-							User:    message.User,
+							Type:      "ROW_COL_UPDATED",
+							SheetName: message.SheetName,
+							Payload:   payload,
+							User:      message.User,
 						}
 					} else {
 						deniedPayload, _ := json.Marshal(map[string]string{
@@ -239,10 +239,10 @@ func (h *Hub) run() {
 							"type":   message.Type,
 						})
 						toSend = &Message{
-							Type:    "EDIT_DENIED",
-							SheetID: message.SheetID,
-							Payload: deniedPayload,
-							User:    message.User,
+							Type:      "EDIT_DENIED",
+							SheetName: message.SheetName,
+							Payload:   deniedPayload,
+							User:      message.User,
 						}
 					}
 				} else {
@@ -262,7 +262,7 @@ func (h *Hub) run() {
 					User           string `json:"user"`
 				}
 				if err := json.Unmarshal(message.Payload, &opts); err == nil {
-					sheet := globalSheetManager.GetSheetBy(message.SheetID, message.Project)
+					sheet := globalSheetManager.GetSheetBy(message.SheetName, message.Project)
 					if sheet != nil {
 						// Get old value before update
 						var oldValue string
@@ -291,10 +291,10 @@ func (h *Hub) run() {
 						// Broadcast the update
 						payload, _ := json.Marshal(sheet.SnapshotForClient())
 						toSend = &Message{
-							Type:    "ROW_COL_UPDATED",
-							SheetID: message.SheetID,
-							Payload: payload,
-							User:    message.User,
+							Type:      "ROW_COL_UPDATED",
+							SheetName: message.SheetName,
+							Payload:   payload,
+							User:      message.User,
 						}
 					}
 				} else {
@@ -316,7 +316,7 @@ func (h *Hub) run() {
 				}
 				//println("Received UPDATE_CELL_SCRIPT message")
 				if err := json.Unmarshal(message.Payload, &update); err == nil {
-					sheet := globalSheetManager.GetSheetBy(message.SheetID, message.Project)
+					sheet := globalSheetManager.GetSheetBy(message.SheetName, message.Project)
 					if sheet != nil {
 						sheet.SetCellScript(update.Row, update.Col, update.Script, message.User, update.Revert, update.RowSpan, update.ColSpan)
 						//println("Updated cell script to:")
@@ -324,10 +324,10 @@ func (h *Hub) run() {
 						//println("for cell", update.Row, update.Col)
 						payload, _ := json.Marshal(sheet.SnapshotForClient())
 						toSend = &Message{
-							Type:    "ROW_COL_UPDATED",
-							SheetID: message.SheetID,
-							Payload: payload,
-							User:    message.User,
+							Type:      "ROW_COL_UPDATED",
+							SheetName: message.SheetName,
+							Payload:   payload,
+							User:      message.User,
 						}
 
 					}
@@ -341,16 +341,16 @@ func (h *Hub) run() {
 					User string `json:"user"`
 				}
 				if err := json.Unmarshal(message.Payload, &req); err == nil {
-					sheet := globalSheetManager.GetSheetBy(message.SheetID, message.Project)
+					sheet := globalSheetManager.GetSheetBy(message.SheetName, message.Project)
 					if sheet != nil {
 						if sheet.LockCell(req.Row, req.Col, message.User) {
 							// Broadcast full sheet state with constructed details
 							payload, _ := json.Marshal(sheet.SnapshotForClient())
 							toSend = &Message{
-								Type:    "ROW_COL_UPDATED",
-								SheetID: message.SheetID,
-								Payload: payload,
-								User:    message.User,
+								Type:      "ROW_COL_UPDATED",
+								SheetName: message.SheetName,
+								Payload:   payload,
+								User:      message.User,
 							}
 						} else {
 							deniedPayload, _ := json.Marshal(map[string]string{
@@ -359,10 +359,10 @@ func (h *Hub) run() {
 								"reason": "owner-only",
 							})
 							toSend = &Message{
-								Type:    "LOCK_DENIED",
-								SheetID: message.SheetID,
-								Payload: deniedPayload,
-								User:    message.User,
+								Type:      "LOCK_DENIED",
+								SheetName: message.SheetName,
+								Payload:   deniedPayload,
+								User:      message.User,
 							}
 						}
 					}
@@ -376,15 +376,15 @@ func (h *Hub) run() {
 					User string `json:"user"`
 				}
 				if err := json.Unmarshal(message.Payload, &req); err == nil {
-					sheet := globalSheetManager.GetSheetBy(message.SheetID, message.Project)
+					sheet := globalSheetManager.GetSheetBy(message.SheetName, message.Project)
 					if sheet != nil {
 						if sheet.UnlockCell(req.Row, req.Col, message.User) {
 							payload, _ := json.Marshal(sheet.SnapshotForClient())
 							toSend = &Message{
-								Type:    "ROW_COL_UPDATED",
-								SheetID: message.SheetID,
-								Payload: payload,
-								User:    message.User,
+								Type:      "ROW_COL_UPDATED",
+								SheetName: message.SheetName,
+								Payload:   payload,
+								User:      message.User,
 							}
 						} else {
 							deniedPayload, _ := json.Marshal(map[string]string{
@@ -393,10 +393,10 @@ func (h *Hub) run() {
 								"reason": "owner-only",
 							})
 							toSend = &Message{
-								Type:    "UNLOCK_DENIED",
-								SheetID: message.SheetID,
-								Payload: deniedPayload,
-								User:    message.User,
+								Type:      "UNLOCK_DENIED",
+								SheetName: message.SheetName,
+								Payload:   deniedPayload,
+								User:      message.User,
 							}
 						}
 					}
@@ -413,16 +413,16 @@ func (h *Hub) run() {
 					User  string `json:"user"`
 				}
 				if err := json.Unmarshal(message.Payload, &update); err == nil {
-					sheet := globalSheetManager.GetSheetBy(message.SheetID, message.Project)
+					sheet := globalSheetManager.GetSheetBy(message.SheetName, message.Project)
 					if sheet != nil {
 						sheet.SetColWidth(update.Col, update.Width, message.User)
 						// Broadcast updated sheet snapshot with constructed details
 						payload, _ := json.Marshal(sheet.SnapshotForClient())
 						toSend = &Message{
-							Type:    "ROW_COL_UPDATED",
-							SheetID: message.SheetID,
-							Payload: payload,
-							User:    message.User,
+							Type:      "ROW_COL_UPDATED",
+							SheetName: message.SheetName,
+							Payload:   payload,
+							User:      message.User,
 						}
 					}
 				} else {
@@ -438,16 +438,16 @@ func (h *Hub) run() {
 					User   string `json:"user"`
 				}
 				if err := json.Unmarshal(message.Payload, &update); err == nil {
-					sheet := globalSheetManager.GetSheetBy(message.SheetID, message.Project)
+					sheet := globalSheetManager.GetSheetBy(message.SheetName, message.Project)
 					if sheet != nil {
 						sheet.SetRowHeight(update.Row, update.Height, message.User)
 						// Broadcast updated sheet snapshot with constructed details
 						payload, _ := json.Marshal(sheet.SnapshotForClient())
 						toSend = &Message{
-							Type:    "ROW_COL_UPDATED",
-							SheetID: message.SheetID,
-							Payload: payload,
-							User:    message.User,
+							Type:      "ROW_COL_UPDATED",
+							SheetName: message.SheetName,
+							Payload:   payload,
+							User:      message.User,
 						}
 					}
 				} else {
@@ -463,17 +463,17 @@ func (h *Hub) run() {
 					User      string `json:"user"`
 				}
 				if err := json.Unmarshal(message.Payload, &mv); err == nil {
-					sheet := globalSheetManager.GetSheetBy(message.SheetID, message.Project)
+					sheet := globalSheetManager.GetSheetBy(message.SheetName, message.Project)
 					if sheet != nil {
 						moved := sheet.MoveRowBelow(mv.FromRow, mv.TargetRow, message.User)
 						if moved {
 							// Broadcast updated sheet snapshot with constructed details
 							payload, _ := json.Marshal(sheet.SnapshotForClient())
 							toSend = &Message{
-								Type:    "ROW_MOVED",
-								SheetID: message.SheetID,
-								Payload: payload,
-								User:    message.User,
+								Type:      "ROW_MOVED",
+								SheetName: message.SheetName,
+								Payload:   payload,
+								User:      message.User,
 							}
 						}
 					}
@@ -490,16 +490,16 @@ func (h *Hub) run() {
 					User      string `json:"user"`
 				}
 				if err := json.Unmarshal(message.Payload, &mv); err == nil {
-					sheet := globalSheetManager.GetSheetBy(message.SheetID, message.Project)
+					sheet := globalSheetManager.GetSheetBy(message.SheetName, message.Project)
 					if sheet != nil {
 						moved := sheet.MoveColumnRight(mv.FromCol, mv.TargetCol, message.User)
 						if moved {
 							payload, _ := json.Marshal(sheet.SnapshotForClient())
 							toSend = &Message{
-								Type:    "COL_MOVED",
-								SheetID: message.SheetID,
-								Payload: payload,
-								User:    message.User,
+								Type:      "COL_MOVED",
+								SheetName: message.SheetName,
+								Payload:   payload,
+								User:      message.User,
 							}
 						}
 					}
@@ -515,16 +515,16 @@ func (h *Hub) run() {
 					User      string `json:"user"`
 				}
 				if err := json.Unmarshal(message.Payload, &ins); err == nil {
-					sheet := globalSheetManager.GetSheetBy(message.SheetID, message.Project)
+					sheet := globalSheetManager.GetSheetBy(message.SheetName, message.Project)
 					if sheet != nil {
 						inserted := sheet.InsertRowBelow(ins.TargetRow, message.User)
 						if inserted {
 							payload, _ := json.Marshal(sheet.SnapshotForClient())
 							toSend = &Message{
-								Type:    "ROW_COL_UPDATED",
-								SheetID: message.SheetID,
-								Payload: payload,
-								User:    message.User,
+								Type:      "ROW_COL_UPDATED",
+								SheetName: message.SheetName,
+								Payload:   payload,
+								User:      message.User,
 							}
 						}
 					}
@@ -540,16 +540,16 @@ func (h *Hub) run() {
 					User      string `json:"user"`
 				}
 				if err := json.Unmarshal(message.Payload, &ins); err == nil {
-					sheet := globalSheetManager.GetSheetBy(message.SheetID, message.Project)
+					sheet := globalSheetManager.GetSheetBy(message.SheetName, message.Project)
 					if sheet != nil {
 						inserted := sheet.InsertColumnRight(ins.TargetCol, message.User)
 						if inserted {
 							payload, _ := json.Marshal(sheet.SnapshotForClient())
 							toSend = &Message{
-								Type:    "ROW_COL_UPDATED",
-								SheetID: message.SheetID,
-								Payload: payload,
-								User:    message.User,
+								Type:      "ROW_COL_UPDATED",
+								SheetName: message.SheetName,
+								Payload:   payload,
+								User:      message.User,
 							}
 						}
 					}
@@ -565,16 +565,16 @@ func (h *Hub) run() {
 					User string `json:"user"`
 				}
 				if err := json.Unmarshal(message.Payload, &req); err == nil {
-					sheet := globalSheetManager.GetSheetBy(message.SheetID, message.Project)
+					sheet := globalSheetManager.GetSheetBy(message.SheetName, message.Project)
 					if sheet != nil {
 						deleted := sheet.DeleteRowAt(req.Row, message.User)
 						if deleted {
 							payload, _ := json.Marshal(sheet.SnapshotForClient())
 							toSend = &Message{
-								Type:    "ROW_COL_UPDATED",
-								SheetID: message.SheetID,
-								Payload: payload,
-								User:    message.User,
+								Type:      "ROW_COL_UPDATED",
+								SheetName: message.SheetName,
+								Payload:   payload,
+								User:      message.User,
 							}
 						}
 					}
@@ -590,16 +590,16 @@ func (h *Hub) run() {
 					User string `json:"user"`
 				}
 				if err := json.Unmarshal(message.Payload, &req); err == nil {
-					sheet := globalSheetManager.GetSheetBy(message.SheetID, message.Project)
+					sheet := globalSheetManager.GetSheetBy(message.SheetName, message.Project)
 					if sheet != nil {
 						deleted := sheet.DeleteColumnAt(req.Col, message.User)
 						if deleted {
 							payload, _ := json.Marshal(sheet.SnapshotForClient())
 							toSend = &Message{
-								Type:    "ROW_COL_UPDATED",
-								SheetID: message.SheetID,
-								Payload: payload,
-								User:    message.User,
+								Type:      "ROW_COL_UPDATED",
+								SheetName: message.SheetName,
+								Payload:   payload,
+								User:      message.User,
 							}
 						}
 					}
@@ -611,10 +611,10 @@ func (h *Hub) run() {
 				// Forward selection range/values only to the same user's clients within the sheet room
 				// Payload is forwarded as-is; clients will interpret it and render boundaries / clipboard
 				toSend = &Message{
-					Type:    "SELECTION_SHARED",
-					SheetID: message.SheetID,
-					Payload: message.Payload,
-					User:    message.User,
+					Type:      "SELECTION_SHARED",
+					SheetName: message.SheetName,
+					Payload:   message.Payload,
+					User:      message.User,
 				}
 				//fmt.Println("received selection to broadcast:", string(message.Payload))
 				for _, clients := range h.rooms {
@@ -641,15 +641,11 @@ func (h *Hub) run() {
 				}
 				if err := json.Unmarshal(message.Payload, &chat); err == nil {
 					// Get sheet information
-					sheet := globalSheetManager.GetSheetBy(message.SheetID, message.Project)
-					sheetName := ""
+					sheetName := message.SheetName
 					projectName := message.Project
-					if sheet != nil {
-						sheetName = sheet.Name
-					}
-					appended := globalChatManager.Append(message.User, chat.Text, chat.To, message.SheetID, sheetName, projectName)
+					appended := globalChatManager.Append(message.User, chat.Text, chat.To, sheetName, projectName)
 					payload, _ := json.Marshal(appended)
-					toSend = &Message{Type: "CHAT_APPENDED", SheetID: "", Payload: payload, User: message.User}
+					toSend = &Message{Type: "CHAT_APPENDED", SheetName: "", Payload: payload, User: message.User}
 					// Broadcast
 					if appended.To == "" || appended.To == "all" {
 						// broadcast to everyone
@@ -697,7 +693,7 @@ func (h *Hub) run() {
 						for _, msg := range history {
 							if msg.Timestamp.Equal(timestamp) {
 								payload, _ := json.Marshal(msg)
-								toSend = &Message{Type: "CHAT_UPDATED", SheetID: "", Payload: payload, User: message.User}
+								toSend = &Message{Type: "CHAT_UPDATED", SheetName: "", Payload: payload, User: message.User}
 								for _, clients := range h.rooms {
 									for client := range clients {
 										select {
@@ -719,14 +715,14 @@ func (h *Hub) run() {
 			} else if message.Type == "PING" {
 				// Optional: reply with a PONG only to sender to confirm connectivity
 				toSend = &Message{
-					Type:    "PONG",
-					SheetID: message.SheetID,
-					Payload: nil,
-					User:    message.User,
+					Type:      "PONG",
+					SheetName: message.SheetName,
+					Payload:   nil,
+					User:      message.User,
 				}
 			}
 
-			if clients, ok := h.rooms[sheetKey(message.Project, message.SheetID)]; ok {
+			if clients, ok := h.rooms[sheetKey(message.Project, message.SheetName)]; ok {
 				for client := range clients {
 					// Don't send back to sender? Or do? usually do for confirmation,
 					// but for optimizing latency we might optimistically update frontend.
@@ -754,7 +750,7 @@ func (h *Hub) HasActiveConnectionsForProject(projectPath string) bool {
 	for roomID := range h.rooms {
 		if len(h.rooms[roomID]) > 0 {
 			// Parse the roomID to extract the project part
-			// roomID format is "project:sheetID"
+			// roomID format is "project:sheetName"
 			// We need to check if the room's project starts with projectPath
 			for client := range h.rooms[roomID] {
 				if client.projectName == projectPath {
