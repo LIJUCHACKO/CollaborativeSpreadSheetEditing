@@ -2,7 +2,6 @@ import React, { useEffect, useState, useRef } from 'react';
 import { useNavigate, useParams, Link } from 'react-router-dom';
 import {
     FileSpreadsheet,
-    Plus,
     Search,
     LogOut,
     User,
@@ -10,10 +9,25 @@ import {
     Trash2,
     Edit2,
     History,
-    ArrowLeft
+    ArrowLeft,
+    Copy,
+    ClipboardPaste,
+    X
 } from 'lucide-react';
 import 'bootstrap/dist/css/bootstrap.min.css';
 import { isSessionValid, clearAuth, authenticatedFetch, getUsername } from '../utils/auth';
+
+// Shared clipboard helpers using localStorage
+function getClipboard() {
+    try {
+        const raw = localStorage.getItem('app_clipboard');
+        return raw ? JSON.parse(raw) : null;
+    } catch { return null; }
+}
+function setClipboardStorage(data) {
+    if (data) localStorage.setItem('app_clipboard', JSON.stringify(data));
+    else localStorage.removeItem('app_clipboard');
+}
 
 export default function Dashboard() {
     const { project } = useParams();
@@ -27,10 +41,11 @@ export default function Dashboard() {
     const [searchQuery, setSearchQuery] = useState('');
     const [editingSheetId, setEditingSheetId] = useState(null);
     const [editingSheetName, setEditingSheetName] = useState('');
-    const [copyingSheetId, setCopyingSheetId] = useState(null);
-    const [copyName, setCopyName] = useState('');
-    const [targetProject, setTargetProject] = useState('');
-    const [projectsList, setProjectsList] = useState([]);
+
+    // Shared clipboard: {type:'folder'|'sheet', sourcePath, sourceSheetId?}
+    const [clipboard, setClipboard] = useState(() => getClipboard());
+    const [pastingTarget, setPastingTarget] = useState(null); // '__here__' for current folder, or subfolder name
+    const [pasteName, setPasteName] = useState('');
 
     // Audit sidebar state
     const [auditLog, setAuditLog] = useState([]);
@@ -67,6 +82,17 @@ export default function Dashboard() {
         }, 60000);
         return () => clearInterval(sessionCheckInterval);
     }, [project, username, navigate]);
+
+    // Sync clipboard from localStorage (cross-tab and same-tab navigation)
+    useEffect(() => {
+        const syncClipboard = () => setClipboard(getClipboard());
+        window.addEventListener('storage', syncClipboard);
+        window.addEventListener('focus', syncClipboard);
+        return () => {
+            window.removeEventListener('storage', syncClipboard);
+            window.removeEventListener('focus', syncClipboard);
+        };
+    }, []);
 
     useEffect(() => {
         if (isAuditOpen && auditLogRef.current) {
@@ -337,6 +363,119 @@ export default function Dashboard() {
         }
     };
 
+    // --- Unified clipboard (shared via localStorage) ---
+    const handleCopyFolder = (folderName) => {
+        const base = currentPath || '';
+        const fullPath = base ? `${base}/${folderName}` : folderName;
+        const data = { type: 'folder', sourcePath: fullPath };
+        setClipboard(data);
+        setClipboardStorage(data);
+        cancelPaste();
+    };
+
+    const handleCopySheet = (sheet) => {
+        const data = { type: 'sheet', sourcePath: currentPath || project || '', sourceSheetId: sheet.name };
+        setClipboard(data);
+        setClipboardStorage(data);
+        cancelPaste();
+    };
+
+    const clearClipboardFn = () => {
+        setClipboard(null);
+        setClipboardStorage(null);
+        cancelPaste();
+    };
+
+    const startPaste = (target) => {
+        // target: '__here__' for current folder, or subfolder name for paste-inside
+        setPastingTarget(target || '__here__');
+        if (!clipboard) return;
+        if (clipboard.type === 'sheet') {
+            setPasteName(clipboard.sourceSheetId || '');
+        } else {
+            const srcName = clipboard.sourcePath?.split('/').pop() || '';
+            setPasteName(srcName ? srcName + '_copy' : '');
+        }
+    };
+
+    const cancelPaste = () => {
+        setPastingTarget(null);
+        setPasteName('');
+    };
+
+    const confirmPaste = async () => {
+        if (!clipboard) return;
+        const name = pasteName.trim();
+        if (!name) return;
+        const base = currentPath || '';
+        const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
+
+        try {
+            let body;
+            if (clipboard.type === 'sheet') {
+                // Determine target folder
+                let targetFolder;
+                if (pastingTarget && pastingTarget !== '__here__') {
+                    targetFolder = base ? `${base}/${pastingTarget}` : pastingTarget;
+                } else {
+                    targetFolder = base;
+                }
+                if (!targetFolder) {
+                    alert('Cannot paste a sheet at the root level. Navigate into a project first.');
+                    return;
+                }
+                body = {
+                    source_type: 'sheet',
+                    source_path: clipboard.sourcePath,
+                    source_sheet_id: clipboard.sourceSheetId,
+                    dest_path: targetFolder,
+                    dest_name: name,
+                };
+            } else {
+                // folder paste
+                let destPath;
+                if (pastingTarget && pastingTarget !== '__here__') {
+                    destPath = base ? `${base}/${pastingTarget}/${name}` : `${pastingTarget}/${name}`;
+                } else {
+                    destPath = base ? `${base}/${name}` : name;
+                }
+                // Prevent pasting inside itself
+                if (destPath === clipboard.sourcePath || destPath.startsWith(clipboard.sourcePath + '/')) {
+                    alert('Cannot paste a folder inside itself.');
+                    return;
+                }
+                body = {
+                    source_type: 'folder',
+                    source_path: clipboard.sourcePath,
+                    dest_path: destPath,
+                };
+            }
+            const res = await authenticatedFetch(`http://${host}:8082/api/projects/paste`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+            if (res.ok) {
+                cancelPaste();
+                fetchFolders();
+                fetchSheets();
+            } else if (res.status === 409) {
+                const text = await res.text();
+                alert(text || 'Destination already exists');
+            } else if (res.status === 401) {
+                clearAuth();
+                alert('Your session has expired. Please log in again.');
+                navigate('/');
+            } else {
+                const text = await res.text();
+                alert(text || 'Failed to paste');
+            }
+        } catch (e) {
+            console.error('paste failed', e);
+            alert('Unexpected error pasting folder');
+        }
+    };
+
     const toggleAuditSidebar = () => {
         if (isAuditOpen) {
             if (auditLogRef.current) {
@@ -437,77 +576,7 @@ export default function Dashboard() {
         }
     };
 
-    const startCopying = async (sheet) => {
-        setCopyingSheetId(sheet.name);
-        setCopyName(sheet.name ? `${sheet.name} (Copy)` : 'Copy');
-        try {
-            const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
-            const res = await authenticatedFetch(`http://${host}:8082/api/projects`);
-            if (res.ok) {
-                const list = await res.json();
-                const names = Array.isArray(list) ? list.map(p => p.name) : [];
-                setProjectsList(names);
-                // Preselect different project if current project exists
-                if (project && names.length > 0) {
-                    const alt = names.find(n => n !== project) || names[0];
-                    setTargetProject(alt);
-                } else if (names.length > 0) {
-                    setTargetProject(names[0]);
-                }
-            }
-        } catch (e) {
-            // ignore fetch error
-        }
-    };
-
-    const cancelCopying = () => {
-        setCopyingSheetId(null);
-        setCopyName('');
-        setTargetProject('');
-    };
-
-    const copySheetToProject = async (sheet) => {
-        const sourceProject = project || sheet.project_name || '';
-        if (!targetProject) {
-            alert('Select target project');
-            return;
-        }
-        try {
-            const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
-            const body = {
-                source_id: sheet.name,
-                source_project: sourceProject,
-                target_project: targetProject,
-                name: copyName || sheet.name,
-            };
-            const res = await authenticatedFetch(`http://${host}:8082/api/sheet/copy`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(body),
-            });
-            if (res.ok) {
-                const newSheet = await res.json();
-                cancelCopying();
-                // If current list is filtered by project and target is same, refresh
-                fetchSheets();
-                // Navigate to new sheet in target project
-                if (newSheet?.name) {
-                    const destProject = targetProject;
-                    window.open(`/sheet/${newSheet.name}?project=${encodeURIComponent(destProject)}`);
-                }
-            } else if (res.status === 401) {
-                clearAuth();
-                alert('Your session has expired. Please log in again.');
-                navigate('/');
-            } else {
-                const text = await res.text();
-                alert(text || 'Failed to copy sheet');
-            }
-        } catch (e) {
-            console.error('copy sheet failed', e);
-            alert('Unexpected error copying sheet');
-        }
-    };
+    // (Old startCopying/cancelCopying/copySheetToProject removed — unified into clipboard above)
 
     const displayedSheets = React.useMemo(() => {
         const list = sheets.slice();
@@ -750,9 +819,9 @@ export default function Dashboard() {
                                                 )}
                                                 <button
                                                     className="btn btn-sm btn-outline-primary me-2"
-                                                    onClick={(ev) => { ev.stopPropagation(); startCopying(sheet); }}
+                                                    onClick={(ev) => { ev.stopPropagation(); handleCopySheet(sheet); }}
                                                 >
-                                                    <Plus size={14} className="me-1" /> Copy
+                                                    <Copy size={14} className="me-1" /> Copy
                                                 </button>
                                                 {sheet.owner === username && (
                                                     <button
@@ -766,23 +835,6 @@ export default function Dashboard() {
                                         )}
                                     </td>
                                 </tr>
-                                {copyingSheetId === sheet.name && (
-                                    <tr>
-                                        <td colSpan="3">
-                                            <div className="d-flex align-items-center gap-2">
-                                                <select className="form-select form-select-sm" value={targetProject} onChange={(e)=>setTargetProject(e.target.value)} style={{ maxWidth: 220 }}>
-                                                    <option value="">Select target project</option>
-                                                    {projectsList.map((pname)=> (
-                                                        <option key={pname} value={pname}>{pname}</option>
-                                                    ))}
-                                                </select>
-                                                <input type="text" className="form-control form-control-sm" value={copyName} onChange={(e)=>setCopyName(e.target.value)} placeholder="Copy name" style={{ maxWidth: 260 }} />
-                                                <button className="btn btn-sm btn-success" onClick={(ev)=>{ ev.stopPropagation(); copySheetToProject(sheet); }}>Copy Here</button>
-                                                <button className="btn btn-sm btn-secondary" onClick={(ev)=>{ ev.stopPropagation(); cancelCopying(); }}>Cancel</button>
-                                            </div>
-                                        </td>
-                                    </tr>
-                                )}
                                 </React.Fragment>
                             ))}
                             {displayedSheets.length === 0 && (
@@ -797,6 +849,34 @@ export default function Dashboard() {
                 {currentPath && (
                     <div className="mb-6">
                         <div><h2>SubFolders</h2></div>
+                        {clipboard && (
+                            <div className="mb-3 p-2 bg-white border border-success rounded shadow-sm d-flex align-items-center gap-2 flex-wrap">
+                                <span className="text-muted small">
+                                    Clipboard ({clipboard.type === 'sheet' ? 'Sheet' : 'Folder'}): <strong>{clipboard.type === 'sheet' ? `${clipboard.sourcePath}/${clipboard.sourceSheetId}` : clipboard.sourcePath}</strong>
+                                </span>
+                                {pastingTarget === '__here__' ? (
+                                    <>
+                                        <input
+                                            type="text"
+                                            className="form-control form-control-sm"
+                                            placeholder="Paste name"
+                                            value={pasteName}
+                                            onChange={(e) => setPasteName(e.target.value)}
+                                            style={{ maxWidth: 220 }}
+                                        />
+                                        <button className="btn btn-sm btn-success" disabled={!pasteName.trim()} onClick={confirmPaste}>Paste</button>
+                                        <button className="btn btn-sm btn-secondary" onClick={cancelPaste}>Cancel</button>
+                                    </>
+                                ) : (
+                                    <button className="btn btn-sm btn-outline-success" onClick={() => startPaste('__here__')}>
+                                        <ClipboardPaste size={14} className="me-1" /> Paste Here
+                                    </button>
+                                )}
+                                <button className="btn btn-sm btn-outline-secondary ms-auto" onClick={clearClipboardFn}>
+                                    <X size={14} className="me-1" /> Clear
+                                </button>
+                            </div>
+                        )}
                         <div className="p-3 bg-white border rounded-2xl shadow-sm">
                             <div className="d-flex align-items-end gap-2 mb-3">
                                 <input
@@ -811,7 +891,10 @@ export default function Dashboard() {
                             </div>
                             {folders.length > 0 ? (
                                 <div className="d-flex flex-wrap gap-2">
-                                    {folders.map((name) => (
+                                    {folders.map((name) => {
+                                        const fullPath = currentPath ? `${currentPath}/${name}` : name;
+                                        const isClipboardSrc = clipboard && clipboard.type === 'folder' && clipboard.sourcePath === fullPath;
+                                        return (
                                         <div key={name} className="d-flex align-items-center gap-1">
                                             {editingFolderName === name ? (
                                                 <>
@@ -830,6 +913,22 @@ export default function Dashboard() {
                                                     <button className="btn btn-sm btn-success" onClick={() => renameFolder(name)}>Save</button>
                                                     <button className="btn btn-sm btn-secondary" onClick={cancelRenamingFolder}>Cancel</button>
                                                 </>
+                                            ) : pastingTarget === name ? (
+                                                <div className="d-flex align-items-center gap-1">
+                                                    <span className="small text-muted">
+                                                        Paste {clipboard?.type === 'sheet' ? 'sheet' : 'folder'} into <strong>{name}</strong>:
+                                                    </span>
+                                                    <input
+                                                        type="text"
+                                                        className="form-control form-control-sm"
+                                                        placeholder="Paste name"
+                                                        value={pasteName}
+                                                        onChange={(e) => setPasteName(e.target.value)}
+                                                        style={{ width: '150px' }}
+                                                    />
+                                                    <button className="btn btn-sm btn-success" disabled={!pasteName.trim()} onClick={confirmPaste}>Paste</button>
+                                                    <button className="btn btn-sm btn-secondary" onClick={cancelPaste}>Cancel</button>
+                                                </div>
                                             ) : (
                                                 <>
                                                     <button className="btn btn-sm btn-outline-primary" onClick={() => goToFolder(name)}>
@@ -838,10 +937,19 @@ export default function Dashboard() {
                                                     <button className="btn btn-sm btn-outline-secondary" onClick={() => startRenamingFolder(name)} title="Rename folder">
                                                         <Edit2 size={14} />
                                                     </button>
+                                                    <button className={`btn btn-sm ${isClipboardSrc ? 'btn-primary' : 'btn-outline-secondary'}`} onClick={() => handleCopyFolder(name)} title="Copy folder">
+                                                        <Copy size={14} />
+                                                    </button>
+                                                    {clipboard && !isClipboardSrc && (
+                                                        <button className="btn btn-sm btn-outline-success" onClick={() => startPaste(name)} title="Paste inside this folder">
+                                                            <ClipboardPaste size={14} />
+                                                        </button>
+                                                    )}
                                                 </>
                                             )}
                                         </div>
-                                    ))}
+                                        );
+                                    })}
                                 </div>
                             ) : (
                                 <div className="text-muted small">No subfolders</div>

@@ -5109,24 +5109,36 @@ func (s *Sheet) adjustCrossSheetOptionsRangeOnMoveCol(fromIdx, destIdx int) {
 	}
 }
 
-// DuplicateProject duplicates all sheets in source project into a new project name.
-// The newOwner will be set as the owner for all duplicated sheets (and ensured in editors).
-func (sm *SheetManager) DuplicateProject(sourceProject, newProject, newOwner string) error {
-	if sourceProject == "" || newProject == "" {
-		return fmt.Errorf("source and new project names required")
-	}
-	// Ensure top-level destination directory
-	if err := os.MkdirAll(filepath.Join(dataDir, newProject), 0755); err != nil {
-		return fmt.Errorf("failed to create dest project dir: %w", err)
+// CopyPasteProject copies all sheets from sourcePath to destPath, rewriting cross-sheet
+// references from the source prefix to the destination prefix.
+// sourcePath can be a top-level project or a subfolder (e.g. "proj/sub1").
+// destPath is the full destination path (e.g. "proj2" or "proj/sub2").
+// The newOwner will be set as owner for all copied sheets (and ensured in editors).
+// Returns error if destPath is inside sourcePath (pasting into itself).
+func (sm *SheetManager) CopyPasteProject(sourcePath, destPath, newOwner string) error {
+	if sourcePath == "" || destPath == "" {
+		return fmt.Errorf("source and destination paths required")
 	}
 
-	// rewriteRef replaces every occurrence of the sourceProject prefix in a cross-sheet
-	// reference string (Script or OptionsRange) with newProject.
-	// Cross-sheet refs are written as "sourceProject/..." so a simple prefix replacement is safe.
+	// Prevent pasting inside itself: destPath must not equal sourcePath or be a child of it
+	if destPath == sourcePath || strings.HasPrefix(destPath, sourcePath+"/") {
+		return fmt.Errorf("cannot paste a folder inside itself")
+	}
+
+	// Ensure top-level destination directory
+	if err := os.MkdirAll(filepath.Join(dataDir, destPath), 0755); err != nil {
+		return fmt.Errorf("failed to create dest directory: %w", err)
+	}
+
+	// rewriteRef replaces every occurrence of the sourcePath prefix in a cross-sheet
+	// reference string (Script or OptionsRange) with destPath.
+	// Cross-sheet refs are written as "sourcePath/..." so a simple prefix replacement is safe.
 	rewriteRef := func(ref string) string {
-		oldPrefix := sourceProject + "/"
-		newPrefix := newProject + "/"
-		return strings.ReplaceAll(ref, oldPrefix, newPrefix)
+		oldPrefix := sourcePath + "/"
+		newPrefix := destPath + "/"
+		// Also handle exact match (e.g. "sourcePath/sheetId/A1")
+		ref = strings.ReplaceAll(ref, oldPrefix, newPrefix)
+		return ref
 	}
 
 	sm.mu.Lock()
@@ -5136,21 +5148,20 @@ func (sm *SheetManager) DuplicateProject(sourceProject, newProject, newOwner str
 		if s == nil {
 			continue
 		}
-		// Include the top-level project sheets AND all subfolder sheets
-		// (subfolder sheets have ProjectName like "sourceProject/subA/subB")
-		if s.ProjectName != sourceProject && !strings.HasPrefix(s.ProjectName, sourceProject+"/") {
+		// Include sheets at the source level AND all subfolder sheets
+		if s.ProjectName != sourcePath && !strings.HasPrefix(s.ProjectName, sourcePath+"/") {
 			continue
 		}
 
-		// Compute the ProjectName for the clone: replace the leading sourceProject with newProject
+		// Compute the ProjectName for the clone: replace the leading sourcePath with destPath
 		var cloneProjectName string
-		if s.ProjectName == sourceProject {
-			cloneProjectName = newProject
+		if s.ProjectName == sourcePath {
+			cloneProjectName = destPath
 		} else {
-			cloneProjectName = newProject + s.ProjectName[len(sourceProject):]
+			cloneProjectName = destPath + s.ProjectName[len(sourcePath):]
 		}
 
-		// Ensure the subfolder directory exists in the new project tree
+		// Ensure the subfolder directory exists in the new tree
 		if err := os.MkdirAll(filepath.Join(dataDir, cloneProjectName), 0755); err != nil {
 			return fmt.Errorf("failed to create subfolder %s: %w", cloneProjectName, err)
 		}
@@ -5179,16 +5190,16 @@ func (sm *SheetManager) DuplicateProject(sourceProject, newProject, newOwner str
 			AuditLog:    append([]AuditEntry{}, s.AuditLog...),
 		}
 
-		// Deep copy cell data, rewriting any intra-project cross-sheet references
+		// Deep copy cell data, rewriting any cross-sheet references from source to dest
 		s.mu.RLock()
 		for r, cols := range s.Data {
 			clone.Data[r] = make(map[string]Cell, len(cols))
 			for c, cell := range cols {
-				// Rewrite Script: replace {{sourceProject/...}} with {{newProject/...}}
+				// Rewrite Script: replace {{sourcePath/...}} with {{destPath/...}}
 				if strings.TrimSpace(cell.Script) != "" {
 					cell.Script = rewriteRef(cell.Script)
 				}
-				// Rewrite OptionsRange: replace sourceProject/... with newProject/...
+				// Rewrite OptionsRange: replace sourcePath/... with destPath/...
 				if strings.TrimSpace(cell.OptionsRange) != "" {
 					cell.OptionsRange = rewriteRef(cell.OptionsRange)
 				}

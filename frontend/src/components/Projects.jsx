@@ -1,8 +1,20 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { authenticatedFetch, isSessionValid, clearAuth, getUsername, apiUrl } from '../utils/auth';
-import { FolderPlus, Edit2, Trash2, Search, User, LogOut, Folder, Lock } from 'lucide-react';
+import { Copy, ClipboardPaste, Edit2, Trash2, Search, User, LogOut, Folder, Lock, X } from 'lucide-react';
 import 'bootstrap/dist/css/bootstrap.min.css';
+
+// Shared clipboard helpers using localStorage
+function getClipboard() {
+  try {
+    const raw = localStorage.getItem('app_clipboard');
+    return raw ? JSON.parse(raw) : null;
+  } catch { return null; }
+}
+function setClipboardStorage(data) {
+  if (data) localStorage.setItem('app_clipboard', JSON.stringify(data));
+  else localStorage.removeItem('app_clipboard');
+}
 
 export default function Projects() {
   const [projects, setProjects] = useState([]);
@@ -12,8 +24,9 @@ export default function Projects() {
   const [editingProject, setEditingProject] = useState(null);
   const [deleteProject, setDeleteProject] = useState(null);
   const [deleteConfirm, setDeleteConfirm] = useState('');
-  const [duplicateProject, setDuplicateProject] = useState(null);
-  const [duplicateName, setDuplicateName] = useState('');
+  const [clipboard, setClipboard] = useState(() => getClipboard()); // {type:'folder'|'sheet', sourcePath, sourceSheetId?}
+  const [pastingTarget, setPastingTarget] = useState(null); // project name or '__project_root__'
+  const [pasteName, setPasteName] = useState('');
   // ...existing code...
   const navigate = useNavigate();
   const username = getUsername();
@@ -34,6 +47,17 @@ export default function Projects() {
     fetchProjects();
     return () => clearInterval(interval);
   }, [username, navigate]);
+
+  // Sync clipboard from localStorage (cross-tab and same-tab navigation)
+  useEffect(() => {
+    const syncClipboard = () => setClipboard(getClipboard());
+    window.addEventListener('storage', syncClipboard);
+    window.addEventListener('focus', syncClipboard);
+    return () => {
+      window.removeEventListener('storage', syncClipboard);
+      window.removeEventListener('focus', syncClipboard);
+    };
+  }, []);
 
   const fetchProjects = async () => {
     try {
@@ -138,43 +162,83 @@ export default function Projects() {
     setDeleteConfirm('');
   };
 
-  const startDuplicate = (projectName) => {
-    setDuplicateProject(projectName);
-    setDuplicateName(projectName ? projectName + '_copy' : '');
+  const handleCopy = (projectName) => {
+    const data = { type: 'folder', sourcePath: projectName };
+    setClipboard(data);
+    setClipboardStorage(data);
+    // Clear any paste UI that might be open
+    setPastingTarget(null);
+    setPasteName('');
   };
 
-  const cancelDuplicate = () => {
-    setDuplicateProject(null);
-    setDuplicateName('');
+  const clearClipboard = () => {
+    setClipboard(null);
+    setClipboardStorage(null);
+    cancelPaste();
   };
 
-  const confirmDuplicate = async () => {
-    const source = duplicateProject;
-    const newName = duplicateName.trim();
-    if (!source || !newName) return;
+  const startPaste = (targetContext) => {
+    // targetContext: '__project_root__' for top-level, or project name for inside that project
+    setPastingTarget(targetContext || '__project_root__');
+    const srcName = clipboard?.sourcePath?.split('/').pop() || '';
+    setPasteName(srcName ? srcName + '_copy' : '');
+  };
+
+  const cancelPaste = () => {
+    setPastingTarget(null);
+    setPasteName('');
+  };
+
+  const confirmPaste = async () => {
+    if (!clipboard) return;
+    const name = pasteName.trim();
+    if (!name) return;
+
+    let destPath;
+    if (pastingTarget === '__project_root__') {
+      // Paste as new top-level project
+      destPath = name;
+    } else {
+      // Paste inside an existing project
+      destPath = pastingTarget + '/' + name;
+    }
+
+    const source = clipboard.sourcePath;
+    // For folders: prevent pasting inside itself
+    if (clipboard.type === 'folder') {
+      if (destPath === source || destPath.startsWith(source + '/')) {
+        alert('Cannot paste a folder inside itself.');
+        return;
+      }
+    }
+
     try {
-      const res = await authenticatedFetch(apiUrl('/api/projects/duplicate'), {
+      const body = clipboard.type === 'sheet'
+        ? { source_type: 'sheet', source_path: clipboard.sourcePath, source_sheet_id: clipboard.sourceSheetId, dest_path: pastingTarget === '__project_root__' ? name : pastingTarget, dest_name: name }
+        : { source_type: 'folder', source_path: source, dest_path: destPath };
+
+      const res = await authenticatedFetch(apiUrl('/api/projects/paste'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ source_name: source, new_name: newName }),
+        body: JSON.stringify(body),
       });
       if (res.ok) {
-        cancelDuplicate();
+        cancelPaste();
         fetchProjects();
       } else if (res.status === 409) {
         const text = await res.text();
-        alert(text || 'Destination project already exists');
+        alert(text || 'Destination already exists');
       } else if (res.status === 401) {
         clearAuth();
         alert('Your session has expired. Please log in again.');
         navigate('/');
       } else {
         const text = await res.text();
-        alert(text || 'Failed to duplicate project');
+        alert(text || 'Failed to paste');
       }
     } catch (e) {
-      console.error('duplicate project failed', e);
-      alert('Unexpected error duplicating project');
+      console.error('paste failed', e);
+      alert('Unexpected error pasting');
     }
   };
 
@@ -265,6 +329,31 @@ export default function Projects() {
         </div>
         </div>
 
+        {clipboard && (
+          <div className="mb-4 p-3 bg-white border border-success rounded-2xl shadow-sm d-flex align-items-center gap-3 flex-wrap">
+            <span className="text-muted small">
+              Clipboard: <strong>{clipboard.type === 'sheet' ? `Sheet: ${clipboard.sourceSheetId}` : clipboard.sourcePath}</strong>
+              {clipboard.type === 'sheet' && clipboard.sourcePath && <span className="ms-1">(from {clipboard.sourcePath})</span>}
+            </span>
+            {pastingTarget === '__project_root__' ? (
+              <>
+                <input type="text" className="form-control form-control-sm" placeholder="New project name" value={pasteName} onChange={(e)=>setPasteName(e.target.value)} style={{ maxWidth: 220 }} />
+                <button className="btn btn-sm btn-success" disabled={!pasteName.trim()} onClick={confirmPaste}>Paste</button>
+                <button className="btn btn-sm btn-secondary" onClick={cancelPaste}>Cancel</button>
+              </>
+            ) : (
+              clipboard.type === 'folder' && (
+                <button className="btn btn-sm btn-outline-success" onClick={() => startPaste('__project_root__')}>
+                  <ClipboardPaste size={14} className="me-1" /> Paste as New Project
+                </button>
+              )
+            )}
+            <button className="btn btn-sm btn-outline-secondary ms-auto" onClick={clearClipboard}>
+              <X size={14} className="me-1" /> Clear
+            </button>
+          </div>
+        )}
+
         <div className="bg-white border border-gray-200 rounded-2xl shadow-sm overflow-hidden">
           <table className="table mb-0">
             <thead>
@@ -297,11 +386,12 @@ export default function Projects() {
                         <button className="btn btn-sm btn-danger" disabled={deleteConfirm.trim()!==p.name} onClick={(ev)=>{ev.stopPropagation(); confirmDelete();}}>Confirm</button>
                         <button className="btn btn-sm btn-secondary" onClick={(ev)=>{ev.stopPropagation(); cancelDelete();}}>Cancel</button>
                       </div>
-                    ) : duplicateProject === p.name ? (
+                    ) : pastingTarget === p.name ? (
                       <div className="d-inline-flex align-items-center gap-2">
-                        <input type="text" className="form-control form-control-sm" placeholder={`New project name`} value={duplicateName} onChange={(e)=>setDuplicateName(e.target.value)} style={{ maxWidth: 220 }} />
-                        <button className="btn btn-sm btn-success" disabled={!duplicateName.trim()} onClick={(ev)=>{ev.stopPropagation(); confirmDuplicate();}}>Duplicate</button>
-                        <button className="btn btn-sm btn-secondary" onClick={(ev)=>{ev.stopPropagation(); cancelDuplicate();}}>Cancel</button>
+                        <span className="text-muted small me-1">Paste into <strong>{p.name}/</strong>:</span>
+                        <input type="text" className="form-control form-control-sm" placeholder={`Name inside ${p.name}`} value={pasteName} onChange={(e)=>setPasteName(e.target.value)} style={{ maxWidth: 220 }} onClick={(e)=>e.stopPropagation()} />
+                        <button className="btn btn-sm btn-success" disabled={!pasteName.trim()} onClick={(ev)=>{ev.stopPropagation(); confirmPaste();}}>Paste</button>
+                        <button className="btn btn-sm btn-secondary" onClick={(ev)=>{ev.stopPropagation(); cancelPaste();}}>Cancel</button>
                       </div>
                     ) : (
                       <>
@@ -310,10 +400,14 @@ export default function Projects() {
                             <Edit2 size={14} className="me-1"/> Rename
                           </button>
                         )}
-                        <button className="btn btn-sm btn-outline-primary me-2" onClick={(ev)=>{ev.stopPropagation(); startDuplicate(p.name);}}>
-                          <FolderPlus size={14} className="me-1"/> Duplicate
+                        <button className={`btn btn-sm me-2 ${clipboard?.sourcePath === p.name && clipboard?.type === 'folder' ? 'btn-primary' : 'btn-outline-secondary'}`} onClick={(ev)=>{ev.stopPropagation(); handleCopy(p.name);}}>
+                          <Copy size={14} className="me-1"/> {clipboard?.sourcePath === p.name && clipboard?.type === 'folder' ? 'Copied' : 'Copy'}
                         </button>
-                        {/* Audit button removed */}
+                        {clipboard && !(clipboard.type === 'folder' && clipboard.sourcePath === p.name) && (
+                          <button className="btn btn-sm btn-outline-success me-2" onClick={(ev)=>{ev.stopPropagation(); startPaste(p.name);}} title={`Paste inside ${p.name}`}>
+                            <ClipboardPaste size={14} className="me-1"/> Paste Inside
+                          </button>
+                        )}
                         {p.owner === username && (
                           <button className="btn btn-sm btn-outline-danger" onClick={(ev)=>{ev.stopPropagation(); requestDelete(p.name);}}>
                             <Trash2 size={14} className="me-1"/> Delete

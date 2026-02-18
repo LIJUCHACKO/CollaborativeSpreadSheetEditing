@@ -1066,8 +1066,8 @@ func main() {
 		}
 	})
 
-	// Duplicate a project: copy all sheets to a new project
-	http.HandleFunc("/api/projects/duplicate", func(w http.ResponseWriter, r *http.Request) {
+	// Copy-Paste a project or subfolder: copy all sheets to a new location with a new name
+	http.HandleFunc("/api/projects/paste", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
@@ -1088,37 +1088,96 @@ func main() {
 		}
 
 		var req struct {
-			Source string `json:"source_name"`
-			New    string `json:"new_name"`
+			SourceType    string `json:"source_type"`    // "folder" (default) or "sheet"
+			SourcePath    string `json:"source_path"`    // for folder: "project32io" or "project32io/sub1"; for sheet: project path
+			SourceSheetID string `json:"source_sheet_id"` // only for source_type=sheet
+			DestPath      string `json:"dest_path"`      // for folder: full dest path; for sheet: target project/folder path
+			DestName      string `json:"dest_name"`      // only for source_type=sheet: new sheet name
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Source == "" || req.New == "" {
-			http.Error(w, "source_name and new_name required", http.StatusBadRequest)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			return
+		}
+		if req.SourceType == "" {
+			req.SourceType = "folder"
+		}
+
+		if req.SourceType == "sheet" {
+			// --- Paste a single sheet into a target folder ---
+			if req.SourceSheetID == "" || req.DestPath == "" {
+				http.Error(w, "source_sheet_id and dest_path required for sheet paste", http.StatusBadRequest)
+				return
+			}
+			newName := req.DestName
+			if newName == "" {
+				newName = req.SourceSheetID
+			}
+			// Ensure target folder exists on disk
+			destDir := filepath.Join(dataDir, req.DestPath)
+			if _, err := os.Stat(destDir); os.IsNotExist(err) {
+				http.Error(w, "Destination folder not found", http.StatusNotFound)
+				return
+			}
+			newSheet := globalSheetManager.CopySheetToProject(req.SourceSheetID, req.SourcePath, req.DestPath, newName, username)
+			if newSheet == nil {
+				http.Error(w, "Source sheet not found", http.StatusNotFound)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{"message": "Sheet pasted successfully", "name": newSheet.Name})
+			topProject := strings.SplitN(req.DestPath, "/", 2)[0]
+			globalProjectAuditManager.Append(topProject, username, "PASTE_SHEET", "Pasted sheet '"+req.SourceSheetID+"' from '"+req.SourcePath+"' to '"+req.DestPath+"' as '"+newSheet.Name+"'")
+			return
+		}
+
+		// --- Paste a folder/project ---
+		if req.SourcePath == "" || req.DestPath == "" {
+			http.Error(w, "source_path and dest_path required", http.StatusBadRequest)
+			return
+		}
+
+		// Prevent pasting inside itself
+		if req.DestPath == req.SourcePath || strings.HasPrefix(req.DestPath, req.SourcePath+"/") {
+			http.Error(w, "Cannot paste a folder inside itself", http.StatusBadRequest)
 			return
 		}
 
 		// Ensure source exists
-		if _, err := os.Stat(filepath.Join(dataDir, req.Source)); os.IsNotExist(err) {
-			http.Error(w, "Source project not found", http.StatusNotFound)
+		if _, err := os.Stat(filepath.Join(dataDir, req.SourcePath)); os.IsNotExist(err) {
+			http.Error(w, "Source path not found", http.StatusNotFound)
 			return
 		}
 		// Ensure destination doesn't exist
-		if _, err := os.Stat(filepath.Join(dataDir, req.New)); err == nil {
-			http.Error(w, "Destination project already exists", http.StatusConflict)
+		if _, err := os.Stat(filepath.Join(dataDir, req.DestPath)); err == nil {
+			http.Error(w, "Destination already exists", http.StatusConflict)
 			return
 		}
 
-		// Set new project's owner to the duplicating user
-		globalProjectMeta.SetOwner(req.New, username)
+		// Copy the folder structure on disk (empty folders that may not have sheets)
+		srcAbs := filepath.Join(dataDir, req.SourcePath)
+		destAbs := filepath.Join(dataDir, req.DestPath)
+		if err := copyDirStructure(srcAbs, destAbs); err != nil {
+			log.Printf("copy dir structure error: %v", err)
+		}
 
-		if err := globalSheetManager.DuplicateProject(req.Source, req.New, username); err != nil {
+		// If this is a top-level project paste, set owner
+		destParts := strings.SplitN(req.DestPath, "/", 2)
+		destTopProject := destParts[0]
+		if len(destParts) == 1 {
+			// Top-level project paste - set owner
+			globalProjectMeta.SetOwner(destTopProject, username)
+		}
+
+		if err := globalSheetManager.CopyPasteProject(req.SourcePath, req.DestPath, username); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"message": "Project duplicated"})
-		// Project-level audit: project duplication (on destination project)
-		globalProjectAuditManager.Append(req.New, username, "DUPLICATE_PROJECT", "Duplicated from project '"+req.Source+"'")
+		json.NewEncoder(w).Encode(map[string]string{"message": "Pasted successfully"})
+		// Audit
+		topProject := strings.SplitN(req.DestPath, "/", 2)[0]
+		globalProjectAuditManager.Append(topProject, username, "PASTE_PROJECT", "Pasted from '"+req.SourcePath+"' to '"+req.DestPath+"'")
 	})
 
 	// Project audit API: list audit entries for a project
@@ -1491,6 +1550,25 @@ func main() {
 	if err != nil {
 		log.Fatal("ListenAndServe: ", err)
 	}
+}
+
+// copyDirStructure recursively copies the directory tree from src to dst,
+// creating all subdirectories. It does NOT copy files (sheets are handled by CopyPasteProject).
+func copyDirStructure(src, dst string) error {
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			return nil // skip files, only create directories
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		return os.MkdirAll(target, 0755)
+	})
 }
 
 // corsMiddleware ensures CORS headers are present on every response, including errors
