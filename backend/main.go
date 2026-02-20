@@ -716,6 +716,112 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]string{"message": "permission updated"})
 	})
 
+	// ── Admin: POST /api/admin/project/transfer  (change owner of a project)
+	http.HandleFunc("/api/admin/project/transfer", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		token := r.Header.Get("Authorization")
+		caller, err := globalUserManager.ValidateToken(token)
+		if err != nil {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if !globalUserManager.IsAdminUser(caller) {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+		var req struct {
+			Project  string `json:"project"`
+			NewOwner string `json:"new_owner"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if strings.TrimSpace(req.Project) == "" || strings.TrimSpace(req.NewOwner) == "" {
+			http.Error(w, "project and new_owner are required", http.StatusBadRequest)
+			return
+		}
+		if !globalUserManager.Exists(req.NewOwner) {
+			http.Error(w, "new owner does not exist", http.StatusBadRequest)
+			return
+		}
+
+		// Update project meta owner
+		globalProjectMeta.SetOwner(req.Project, req.NewOwner)
+		// Append project-level audit entry
+		globalProjectAuditManager.Append(req.Project, caller, "TRANSFER_PROJECT_OWNER", "Transferred project ownership to "+req.NewOwner)
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"message": "project owner updated"})
+	})
+
+	// ── Admin: POST /api/admin/sheet/transfer  (change owner of a sheet)
+	http.HandleFunc("/api/admin/sheet/transfer", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		token := r.Header.Get("Authorization")
+		caller, err := globalUserManager.ValidateToken(token)
+		if err != nil {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if !globalUserManager.IsAdminUser(caller) {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+		var req struct {
+			Project   string `json:"project"`
+			SheetName string `json:"sheet_name"`
+			NewOwner  string `json:"new_owner"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if strings.TrimSpace(req.SheetName) == "" || strings.TrimSpace(req.NewOwner) == "" {
+			http.Error(w, "sheet_name and new_owner are required", http.StatusBadRequest)
+			return
+		}
+		if !globalUserManager.Exists(req.NewOwner) {
+			http.Error(w, "new owner does not exist", http.StatusBadRequest)
+			return
+		}
+
+		sheet := globalSheetManager.GetSheetBy(req.SheetName, req.Project)
+		if sheet == nil {
+			http.Error(w, "sheet not found", http.StatusNotFound)
+			return
+		}
+
+		sheet.TransferOwnershipbyAdmin(req.NewOwner)
+		globalSheetManager.SaveSheet(sheet)
+		if req.Project != "" {
+			globalProjectAuditManager.Append(req.Project, caller, "TRANSFER_SHEET_OWNER", "Transferred ownership of sheet '"+sheet.Name+"' to "+req.NewOwner)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"message": "sheet owner updated"})
+	})
+
 	http.HandleFunc("/api/sheets", func(w http.ResponseWriter, r *http.Request) {
 		// Simple CORS
 		w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -1622,8 +1728,9 @@ func main() {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			if !sheet.UpdatePermissions(req.Editors, username) {
-				http.Error(w, "Forbidden: owner only", http.StatusForbidden)
+			isAdmin := globalUserManager.IsAdminUser(username)
+			if !sheet.UpdatePermissions(req.Editors, username, isAdmin) {
+				http.Error(w, "Forbidden: owner or admin only", http.StatusForbidden)
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
@@ -1667,7 +1774,9 @@ func main() {
 			http.Error(w, "sheet_name and new_owner required", http.StatusBadRequest)
 			return
 		}
+		isAdmin := globalUserManager.IsAdminUser(username)
 		sheet := globalSheetManager.GetSheetBy(req.SheetName, req.ProjectName)
+
 		if sheet == nil {
 			http.Error(w, "Sheet not found", http.StatusNotFound)
 			return
@@ -1676,7 +1785,7 @@ func main() {
 			http.Error(w, "new_owner does not exist", http.StatusBadRequest)
 			return
 		}
-		if !sheet.TransferOwnership(req.NewOwner, username) {
+		if !sheet.TransferOwnership(req.NewOwner, username, isAdmin) {
 			http.Error(w, "Forbidden: owner only", http.StatusForbidden)
 			return
 		}

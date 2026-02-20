@@ -109,6 +109,34 @@ type Sheet struct {
 	mu          sync.RWMutex
 }
 
+// TransferOwnership updates the owner of the sheet and ensures
+// the new owner is present in the editors list while preserving
+// any existing permissions.
+func (s *Sheet) TransferOwnershipbyAdmin(newOwner string) {
+	if newOwner == "" {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.Owner = newOwner
+
+	// Ensure new owner is in editors
+	perms := s.Permissions
+	hasOwner := false
+	for _, e := range perms.Editors {
+		if e == newOwner {
+			hasOwner = true
+			break
+		}
+	}
+	if !hasOwner {
+		perms.Editors = append(perms.Editors, newOwner)
+	}
+	s.Permissions = perms
+}
+
 func (s *Sheet) IsEditor(user string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -511,7 +539,6 @@ func (s *Sheet) SetCellStyle(row, col, background string, bold, italic bool, use
 	globalSheetManager.SaveSheet(s)
 }
 
-
 // IsCellLocked returns whether the given cell is locked.
 func (s *Sheet) IsCellLocked(row, col string) bool {
 	s.mu.RLock()
@@ -618,12 +645,12 @@ func (s *Sheet) SetRowHeight(row string, height int, user string) {
 	globalSheetManager.SaveSheet(s)
 }
 
-// UpdatePermissions sets editors list; only owner may change settings.
+// UpdatePermissions sets editors list; owner or admin may change settings.
 // Ensures owner is always in editors.
-func (s *Sheet) UpdatePermissions(editors []string, performedBy string) bool {
+func (s *Sheet) UpdatePermissions(editors []string, performedBy string, isAdmin bool) bool {
 	s.mu.Lock()
 	//defer s.mu.Unlock()
-	if performedBy != s.Owner {
+	if !isAdmin && performedBy != s.Owner {
 		s.mu.Unlock()
 		return false
 	}
@@ -664,12 +691,12 @@ func (s *Sheet) UpdatePermissions(editors []string, performedBy string) bool {
 	return true
 }
 
-// TransferOwnership changes the owner to newOwner; only current owner may transfer.
+// TransferOwnership changes the owner to newOwner; owner or admin may transfer.
 // New owner is ensured in editors list.
-func (s *Sheet) TransferOwnership(newOwner, performedBy string) bool {
+func (s *Sheet) TransferOwnership(newOwner, performedBy string, isAdmin bool) bool {
 	s.mu.Lock()
 	//defer s.mu.Unlock()
-	if performedBy != s.Owner {
+	if !isAdmin && performedBy != s.Owner {
 		s.mu.Unlock()
 		return false
 	}
@@ -1750,7 +1777,6 @@ func (s *Sheet) adjustAuditColsOnDelete(deleteIdx int) {
 	}
 }
 
-
 func (sm *SheetManager) ListSheets() []*Sheet {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
@@ -2104,5 +2130,3 @@ func (sm *SheetManager) Load() {
 	// Rebuild OptionsRange dependency map from loaded sheets
 	sm.rebuildOptionsRangeDependencies()
 }
-
-

@@ -269,6 +269,12 @@ func (sm *SheetManager) QueueRowColUpdate(projectName, sheetName string) {
 
 func (s *Sheet) SetCellScript(row, col, script, user string, reverted bool, rowSpan int, colSpan int) {
 	s.mu.Lock()
+	// Only sheet owner may modify scripts
+	if user != s.Owner {
+		s.mu.Unlock()
+		return
+	}
+
 	// ensure row map
 	if s.Data[row] == nil {
 		s.Data[row] = make(map[string]Cell)

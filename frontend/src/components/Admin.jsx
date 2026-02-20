@@ -17,6 +17,16 @@ export default function Admin() {
   const [newPw, setNewPw] = useState('');
   const [pwMsg, setPwMsg] = useState('');
 
+  // Ownership transfer state
+  const [projectName, setProjectName] = useState('');
+  const [projectNewOwner, setProjectNewOwner] = useState('');
+  const [projectTransferMsg, setProjectTransferMsg] = useState('');
+
+  const [sheetProject, setSheetProject] = useState('');
+  const [sheetName, setSheetName] = useState('');
+  const [sheetNewOwner, setSheetNewOwner] = useState('');
+  const [sheetTransferMsg, setSheetTransferMsg] = useState('');
+
   useEffect(() => {
     if (!username || !isSessionValid()) {
       clearAuth();
@@ -132,6 +142,59 @@ export default function Admin() {
     } catch (_) {}
     clearAuth();
     navigate('/');
+  };
+
+  const submitProjectTransfer = async (e) => {
+    e.preventDefault();
+    setProjectTransferMsg('');
+    const proj = projectName.trim();
+    const owner = projectNewOwner.trim();
+    if (!proj || !owner) {
+      setProjectTransferMsg('Project and new owner are required');
+      return;
+    }
+    try {
+      const res = await authenticatedFetch(apiUrl('/api/admin/project/transfer'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ project: proj, new_owner: owner }),
+      });
+      if (res.ok) {
+        setProjectTransferMsg('Project owner updated successfully');
+      } else {
+        const text = await res.text();
+        setProjectTransferMsg(text || 'Failed to update project owner');
+      }
+    } catch (err) {
+      setProjectTransferMsg('Network error');
+    }
+  };
+
+  const submitSheetTransfer = async (e) => {
+    e.preventDefault();
+    setSheetTransferMsg('');
+    const proj = sheetProject.trim();
+    const sname = sheetName.trim();
+    const owner = sheetNewOwner.trim();
+    if (!sname || !owner) {
+      setSheetTransferMsg('Sheet name and new owner are required');
+      return;
+    }
+    try {
+      const res = await authenticatedFetch(apiUrl('/api/admin/sheet/transfer'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ project: proj, sheet_name: sname, new_owner: owner }),
+      });
+      if (res.ok) {
+        setSheetTransferMsg('Sheet owner updated successfully');
+      } else {
+        const text = await res.text();
+        setSheetTransferMsg(text || 'Failed to update sheet owner');
+      }
+    } catch (err) {
+      setSheetTransferMsg('Network error');
+    }
   };
 
   return (
@@ -268,6 +331,44 @@ export default function Admin() {
             </table>
           </div>
         )}
+
+        {/* Ownership transfer section */}
+        <div className="row mt-4 g-3">
+          <div className="mb-0 mt-1">
+            <div className="card shadow-sm border-0 h-100">
+              <div className="card-body">
+                <h5 className="card-title">Transfer Project Ownership</h5>
+                <p className="text-muted small mb-3">Change the owner of an entire project.</p>
+                <form onSubmit={submitProjectTransfer} className="vstack gap-2">
+                  <input
+                    type="text"
+                    className="form-control form-control-sm"
+                    placeholder="Project name (folder name in DATA)"
+                    value={projectName}
+                    onChange={e => setProjectName(e.target.value)}
+                  />
+                  <input
+                    type="text"
+                    className="form-control form-control-sm"
+                    placeholder="New owner username"
+                    value={projectNewOwner}
+                    onChange={e => setProjectNewOwner(e.target.value)}
+                  />
+                  <button type="submit" className="btn btn-sm btn-primary align-self-start">
+                    Transfer Project Owner
+                  </button>
+                  {projectTransferMsg && (
+                    <div className="small mt-1 {projectTransferMsg.includes('successfully') ? 'text-success' : 'text-danger'}">
+                      {projectTransferMsg}
+                    </div>
+                  )}
+                </form>
+              </div>
+            </div>
+          </div>
+
+          
+        </div>
 
         <div className="mt-4 p-3 bg-white border rounded small text-muted">
           <strong>Notes:</strong>

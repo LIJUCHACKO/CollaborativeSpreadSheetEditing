@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate, useParams, useLocation } from 'react-router-dom';
-import { isSessionValid, clearAuth, getUsername, authenticatedFetch, apiUrl } from '../utils/auth';
+import { isSessionValid, clearAuth, getUsername, authenticatedFetch, apiUrl, isAdmin } from '../utils/auth';
 import { ArrowLeft, Settings as SettingsIcon, User, Save, Lock } from 'lucide-react';
 import 'bootstrap/dist/css/bootstrap.min.css';
 
@@ -10,6 +10,7 @@ export default function Settings() {
   const navigate = useNavigate();
   const location = useLocation();
   const username = getUsername();
+  const admin = isAdmin();
   const project = (() => {
     try {
       const params = new URLSearchParams(location.search);
@@ -24,6 +25,7 @@ export default function Settings() {
   const [editors, setEditors] = useState([]);
   const [newOwner, setNewOwner] = useState('');
   const isOwner = sheet && sheet.owner === username;
+  const canManage = admin || isOwner;
 
   useEffect(() => {
     if (!username || !isSessionValid()) {
@@ -69,7 +71,7 @@ export default function Settings() {
   };
 
   const savePermissions = async () => {
-    if (!isOwner) return;
+  if (!canManage) return;
     try {
       const res = await authenticatedFetch(apiUrl(`/api/sheet/permissions?sheet_name=${encodeURIComponent(id)}${project ? `&project=${encodeURIComponent(project)}` : ''}`), {
         method: 'PUT',
@@ -89,7 +91,7 @@ export default function Settings() {
   };
 
   const transferOwnership = async () => {
-    if (!isOwner) return;
+  if (!canManage) return;
     if (!newOwner || newOwner === sheet.owner) {
       alert('Select a different user as new owner');
       return;
@@ -164,20 +166,20 @@ export default function Settings() {
               className="form-select form-select-sm"
               value={newOwner}
               onChange={(e) => setNewOwner(e.target.value)}
-              disabled={!isOwner}
+		      disabled={!canManage}
             >
               <option value="">Select new owner</option>
               {users.map(u => (
                 <option key={u} value={u}>{u}</option>
               ))}
             </select>
-            <button className="btn btn-sm btn-outline-primary d-flex align-items-center" onClick={transferOwnership} disabled={!isOwner}>
+            <button className="btn btn-sm btn-outline-primary d-flex align-items-center" onClick={transferOwnership} disabled={!canManage}>
               <Save size={14} className="me-1" /> Transfer
             </button>
           </div>
-          {!isOwner && (
-            <p className="text-muted mt-2">Only the owner can transfer ownership.</p>
-          )}
+          {!canManage && (
+      <p className="text-muted mt-2">Only the owner or an admin can transfer ownership.</p>
+    )}
         </div>
 
         <div className="bg-white border border-gray-200 rounded-2xl shadow-sm p-4">
@@ -191,8 +193,8 @@ export default function Settings() {
                     key={`editor-${u}`}
                     type="button"
                     className={`btn btn-sm ${editors.includes(u) ? 'btn-success' : 'btn-outline-secondary'}`}
-                    onClick={() => isOwner && setEditors(prev => toggleItem(prev, u))}
-                    disabled={!isOwner}
+        onClick={() => canManage && setEditors(prev => toggleItem(prev, u))}
+        disabled={!canManage}
                   >
                     {u}
                   </button>
@@ -201,13 +203,13 @@ export default function Settings() {
             </div>
           </div>
           <div className="d-flex justify-content-end">
-            <button className="btn btn-sm btn-outline-primary d-flex align-items-center" onClick={savePermissions} disabled={!isOwner}>
+            <button className="btn btn-sm btn-outline-primary d-flex align-items-center" onClick={savePermissions} disabled={!canManage}>
               <Save size={14} className="me-1" /> Save Permissions
             </button>
           </div>
-          {!isOwner && (
-            <p className="text-muted mt-2">Only the owner can modify permissions.</p>
-          )}
+          {!canManage && (
+      <p className="text-muted mt-2">Only the owner or an admin can modify permissions.</p>
+    )}
         </div>
       </main>
     </div>

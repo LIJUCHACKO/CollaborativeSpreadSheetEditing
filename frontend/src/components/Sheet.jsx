@@ -19,7 +19,7 @@ import {
     Undo2,
     Redo2
 } from 'lucide-react';
-import { Lock } from 'lucide-react';
+import { Lock, Code, ChevronDown } from 'lucide-react';
 import { isSessionValid, clearAuth, getUsername, authenticatedFetch, apiUrl } from '../utils/auth';
 import 'bootstrap/dist/css/bootstrap.min.css';
 export default function Sheet() {
@@ -2437,14 +2437,14 @@ export default function Sheet() {
                                         const { row, col } = scriptPopup;
                                         const key = row && col ? `${row}-${col}` : null;
                                         const isLocked = key ? (data[key]?.locked === true) : false;
-                                        if (!canEdit || isLocked) { closeScriptPopup(); return; }
+                                        if (!canEdit || isLocked || owner !== username) { closeScriptPopup(); return; }
                                         if (!row || !col) { closeScriptPopup(); return; }
                                         updateCellScriptState(row, col, scriptText, username, scriptRowSpan, scriptColSpan);
                                         handleScriptChange(row, col, scriptText, scriptRowSpan, scriptColSpan);
                                         closeScriptPopup();
                                     }}
-                                    disabled={!canEdit || (scriptPopup.row && scriptPopup.col ? (data[`${scriptPopup.row}-${scriptPopup.col}`]?.locked === true) : false)}
-                                    title="Apply script"
+                                    disabled={!canEdit || owner !== username || (scriptPopup.row && scriptPopup.col ? (data[`${scriptPopup.row}-${scriptPopup.col}`]?.locked === true) : false)}
+                                    title="Apply script (owner only)"
                                 >
                                     Apply Script
                                 </button>
@@ -3304,8 +3304,49 @@ export default function Sheet() {
                                                         }}
                                                     />
                                                     
+                                                    {cell.script && (
+                                                        <span
+                                                            title="Script Cell"
+                                                            style={{
+                                                                position: 'absolute',
+                                                                top: 2,
+                                                                left: 2,
+                                                                zIndex: 60,
+                                                                background: 'rgba(243, 248, 255, 0.95)',
+                                                                borderRadius: '4px',
+                                                                padding: '0px 0px',
+                                                                display: 'inline-flex',
+                                                                alignItems: 'center',
+                                                                lineHeight: 1,
+                                                                boxShadow: '0 0 0 0px rgba(0,0,0,0.05)',
+                                                                pointerEvents: 'none'
+                                                            }}
+                                                        >
+                                                            <Code size={12} color="#2563eb" />
+                                                        </span>
+                                                    )}
+                                                    {(cell.cell_type === 2 || cell.cell_type === 3) && (
+                                                        <span
+                                                            title={cell.cell_type === 2 ? "ComboBox Cell" : "Multiple Selection Cell"}
+                                                            style={{
+                                                                position: 'absolute',
+                                                                top: 2,
+                                                                left: 2,
+                                                                zIndex: 60,
+                                                                background: 'rgba(232, 244, 253, 0.95)',
+                                                                borderRadius: '4px',
+                                                                padding: '0px 0px',
+                                                                display: 'inline-flex',
+                                                                alignItems: 'center',
+                                                                lineHeight: 1,
+                                                                boxShadow: '0 0 0 0px rgba(0,0,0,0.05)',
+                                                                pointerEvents: 'none'
+                                                            }}
+                                                        >
+                                                            <ChevronDown size={12} color="#0ea5e9" />
+                                                        </span>
+                                                    )}
                                                     {cell.locked && (
-                                                        // Lock icon but not visible to be fixed
                                                         <span
                                                             title="Locked"
                                                             style={{
@@ -3385,23 +3426,7 @@ export default function Sheet() {
                                                                         >
                                                                             Edit Script
                                                                         </button>
-                                                                        {contextMenu.cell && (() => {
-                                                                            const cellKey = `${contextMenu.cell.row}-${contextMenu.cell.col}`;
-                                                                            const cell = data[cellKey] || {};
-                                                                            return (cell.cell_type === 2 || cell.cell_type === 3) && (
-                                                                                <button
-                                                                                    className="block w-full text-left px-2 py-1 hover:bg-gray-100 rounded"
-                                                                                    disabled={!canEdit || cell.locked}
-                                                                                    onClick={() => {
-                                                                                        if (!canEdit || cell.locked) return;
-                                                                                        openOptionDialog(contextMenu.cell.row, contextMenu.cell.col);
-                                                                                        closeContextMenu();
-                                                                                    }}
-                                                                                >
-                                                                                    Select Options
-                                                                                </button>
-                                                                            );
-                                                                        })()}
+                                                                        
                                                                         {isOwner && contextMenu.cell && (
                                                                             <button
                                                                                 className="block w-full text-left px-2 py-1 hover:bg-gray-100 rounded"
