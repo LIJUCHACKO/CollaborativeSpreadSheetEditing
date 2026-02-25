@@ -574,6 +574,70 @@ func (s *Sheet) adjustOptionsRangeOnMoveRow(fromRow, destIndex int) {
 	s.adjustCrossSheetOptionsRangeOnMoveRow(fromRow, destIndex)
 }
 
+// adjustOptionsRangeOnMoveRowBlock adjusts OptionsRange references for a block move.
+// blockStart is the original first row, blockSize is the number of rows, insertStart is the destination.
+func (s *Sheet) adjustOptionsRangeOnMoveRowBlock(blockStart, blockSize, insertStart int) {
+	sameSheetRangePattern := regexp.MustCompile(`^([A-Z]+)(\d+):([A-Z]+)(\d+)$`)
+	crossSheetRangePattern := regexp.MustCompile(`^([^/]+)/([^/]+)/([A-Z]+)(\d+):([A-Z]+)(\d+)$`)
+
+	s.mu.Lock()
+	modified := false
+	for rowKey, rowMap := range s.Data {
+		for colKey, cell := range rowMap {
+			if strings.TrimSpace(cell.OptionsRange) == "" {
+				continue
+			}
+			newRange := adjustRangeRefOnMoveRowBlock(cell.OptionsRange, blockStart, blockSize, insertStart, s.ProjectName, s.Name, s.ProjectName, s.Name, sameSheetRangePattern, crossSheetRangePattern)
+			if newRange != cell.OptionsRange {
+				cell.OptionsRange = newRange
+				s.Data[rowKey][colKey] = cell
+				modified = true
+			}
+		}
+	}
+	s.mu.Unlock()
+
+	if modified {
+		s.refreshOptionsFromRanges()
+		globalSheetManager.SaveSheet(s)
+		globalSheetManager.QueueRowColUpdate(s.ProjectName, s.Name)
+	}
+
+	s.adjustCrossSheetOptionsRangeOnMoveRowBlock(blockStart, blockSize, insertStart)
+}
+
+// adjustOptionsRangeOnDeleteRowBlock adjusts OptionsRange references for a block delete.
+// blockStart is the first row deleted, blockSize is the number of contiguous rows deleted.
+func (s *Sheet) adjustOptionsRangeOnDeleteRowBlock(blockStart, blockSize int) {
+	sameSheetRangePattern := regexp.MustCompile(`^([A-Z]+)(\d+):([A-Z]+)(\d+)$`)
+	crossSheetRangePattern := regexp.MustCompile(`^([^/]+)/([^/]+)/([A-Z]+)(\d+):([A-Z]+)(\d+)$`)
+
+	s.mu.Lock()
+	modified := false
+	for rowKey, rowMap := range s.Data {
+		for colKey, cell := range rowMap {
+			if strings.TrimSpace(cell.OptionsRange) == "" {
+				continue
+			}
+			newRange := adjustRangeRefOnDeleteRowBlock(cell.OptionsRange, blockStart, blockSize, s.ProjectName, s.Name, s.ProjectName, s.Name, sameSheetRangePattern, crossSheetRangePattern)
+			if newRange != cell.OptionsRange {
+				cell.OptionsRange = newRange
+				s.Data[rowKey][colKey] = cell
+				modified = true
+			}
+		}
+	}
+	s.mu.Unlock()
+
+	if modified {
+		s.refreshOptionsFromRanges()
+		globalSheetManager.SaveSheet(s)
+		globalSheetManager.QueueRowColUpdate(s.ProjectName, s.Name)
+	}
+
+	s.adjustCrossSheetOptionsRangeOnDeleteRowBlock(blockStart, blockSize)
+}
+
 // adjustOptionsRangeOnInsertCol adjusts OptionsRange references in all cells when a column is inserted.
 func (s *Sheet) adjustOptionsRangeOnInsertCol(insertIdx int) {
 	sameSheetRangePattern := regexp.MustCompile(`^([A-Z]+)(\d+):([A-Z]+)(\d+)$`)
@@ -826,6 +890,104 @@ func adjustSameSheetRangeOnMoveRow(rangeStr string, fromRow, destIndex int, patt
 
 	row1 = adjustRow(row1)
 	row2 = adjustRow(row2)
+	return fmt.Sprintf("%s%d:%s%d", col1, row1, col2, row2)
+}
+
+func adjustRangeRefOnMoveRowBlock(rangeStr string, blockStart, blockSize, insertStart int, refProject, refSheet, curProject, curSheet string, samePattern, crossPattern *regexp.Regexp) string {
+	slashParts := strings.Split(rangeStr, "/")
+	if len(slashParts) == 3 {
+		rProject := slashParts[0]
+		rSheet := slashParts[1]
+		rRange := slashParts[2]
+		if rProject != curProject || rSheet != curSheet {
+			return rangeStr
+		}
+		newRange := adjustSameSheetRangeOnMoveRowBlock(rRange, blockStart, blockSize, insertStart, samePattern)
+		return rProject + "/" + rSheet + "/" + newRange
+	}
+	return adjustSameSheetRangeOnMoveRowBlock(rangeStr, blockStart, blockSize, insertStart, samePattern)
+}
+
+func adjustSameSheetRangeOnMoveRowBlock(rangeStr string, blockStart, blockSize, insertStart int, pattern *regexp.Regexp) string {
+	m := pattern.FindStringSubmatch(rangeStr)
+	if m == nil {
+		return rangeStr
+	}
+	col1 := m[1]
+	row1 := atoiSafe(m[2])
+	col2 := m[3]
+	row2 := atoiSafe(m[4])
+
+	adjustRow := func(r int) int {
+		blockEnd := blockStart + blockSize - 1
+		if r >= blockStart && r <= blockEnd {
+			return insertStart + (r - blockStart)
+		}
+		if blockStart < insertStart {
+			if r > blockEnd && r < insertStart+blockSize {
+				return r - blockSize
+			}
+		} else if blockStart > insertStart {
+			if r >= insertStart && r < blockStart {
+				return r + blockSize
+			}
+		}
+		return r
+	}
+
+	row1 = adjustRow(row1)
+	row2 = adjustRow(row2)
+	return fmt.Sprintf("%s%d:%s%d", col1, row1, col2, row2)
+}
+
+func adjustRangeRefOnDeleteRowBlock(rangeStr string, blockStart, blockSize int, refProject, refSheet, curProject, curSheet string, samePattern, crossPattern *regexp.Regexp) string {
+	slashParts := strings.Split(rangeStr, "/")
+	if len(slashParts) == 3 {
+		rProject := slashParts[0]
+		rSheet := slashParts[1]
+		rRange := slashParts[2]
+		if rProject != curProject || rSheet != curSheet {
+			return rangeStr
+		}
+		newRange := adjustSameSheetRangeOnDeleteRowBlock(rRange, blockStart, blockSize, samePattern)
+		return rProject + "/" + rSheet + "/" + newRange
+	}
+	return adjustSameSheetRangeOnDeleteRowBlock(rangeStr, blockStart, blockSize, samePattern)
+}
+
+func adjustSameSheetRangeOnDeleteRowBlock(rangeStr string, blockStart, blockSize int, pattern *regexp.Regexp) string {
+	m := pattern.FindStringSubmatch(rangeStr)
+	if m == nil {
+		return rangeStr
+	}
+	col1 := m[1]
+	row1 := atoiSafe(m[2])
+	col2 := m[3]
+	row2 := atoiSafe(m[4])
+	blockEnd := blockStart + blockSize - 1
+
+	if blockStart <= row1 && blockEnd >= row2 {
+		// Entire range deleted - keep as is
+		return rangeStr
+	}
+	if blockStart >= row1 && blockEnd <= row2 {
+		// Block is within range - shrink
+		row2 -= blockSize
+	} else if blockStart <= row1 && blockEnd >= row1 && blockEnd < row2 {
+		// Block overlaps start of range
+		row1 = blockStart
+		row2 -= blockSize
+	} else if blockStart > row1 && blockStart <= row2 && blockEnd >= row2 {
+		// Block overlaps end of range
+		row2 = blockStart - 1
+	} else {
+		if row1 > blockEnd {
+			row1 -= blockSize
+		}
+		if row2 > blockEnd {
+			row2 -= blockSize
+		}
+	}
 	return fmt.Sprintf("%s%d:%s%d", col1, row1, col2, row2)
 }
 
@@ -1120,6 +1282,114 @@ func (s *Sheet) adjustCrossSheetOptionsRangeOnMoveRow(fromRow, destIndex int) {
 					continue
 				}
 				newRange := adjustRangeRefOnMoveRow(cell.OptionsRange, fromRow, destIndex, s.ProjectName, s.Name, s.ProjectName, s.Name, sameSheetRangePattern, crossSheetRangePattern)
+				if newRange != cell.OptionsRange {
+					cell.OptionsRange = newRange
+					sheet.Data[rowKey][colKey] = cell
+					modified = true
+				}
+			}
+		}
+		sheet.mu.Unlock()
+
+		if modified {
+			sheet.refreshOptionsFromRanges()
+			globalSheetManager.SaveSheet(sheet)
+			globalSheetManager.QueueRowColUpdate(sheet.ProjectName, sheet.Name)
+		}
+	}
+}
+
+func (s *Sheet) adjustCrossSheetOptionsRangeOnMoveRowBlock(blockStart, blockSize, insertStart int) {
+	sameSheetRangePattern := regexp.MustCompile(`^([A-Z]+)(\d+):([A-Z]+)(\d+)$`)
+	crossSheetRangePattern := regexp.MustCompile(`^([^/]+)/([^/]+)/([A-Z]+)(\d+):([A-Z]+)(\d+)$`)
+
+	sheetKey := s.ProjectName + "/" + s.Name
+	globalSheetManager.OptionsRangeDepsMu.RLock()
+	deps, hasDeps := globalSheetManager.OptionsRangeDeps[sheetKey]
+	globalSheetManager.OptionsRangeDepsMu.RUnlock()
+	if !hasDeps {
+		return
+	}
+
+	seenSheets := make(map[string]bool)
+	sheetsToUpdate := make([]*Sheet, 0)
+	for _, dep := range deps {
+		sk := dep.ProjectName + "::" + dep.sheetName
+		if dep.ProjectName == s.ProjectName && dep.sheetName == s.Name {
+			continue
+		}
+		if !seenSheets[sk] {
+			sheet := globalSheetManager.GetSheetBy(dep.sheetName, dep.ProjectName)
+			if sheet != nil {
+				sheetsToUpdate = append(sheetsToUpdate, sheet)
+				seenSheets[sk] = true
+			}
+		}
+	}
+
+	for _, sheet := range sheetsToUpdate {
+		sheet.mu.Lock()
+		modified := false
+		for rowKey, rowMap := range sheet.Data {
+			for colKey, cell := range rowMap {
+				if strings.TrimSpace(cell.OptionsRange) == "" {
+					continue
+				}
+				newRange := adjustRangeRefOnMoveRowBlock(cell.OptionsRange, blockStart, blockSize, insertStart, s.ProjectName, s.Name, s.ProjectName, s.Name, sameSheetRangePattern, crossSheetRangePattern)
+				if newRange != cell.OptionsRange {
+					cell.OptionsRange = newRange
+					sheet.Data[rowKey][colKey] = cell
+					modified = true
+				}
+			}
+		}
+		sheet.mu.Unlock()
+
+		if modified {
+			sheet.refreshOptionsFromRanges()
+			globalSheetManager.SaveSheet(sheet)
+			globalSheetManager.QueueRowColUpdate(sheet.ProjectName, sheet.Name)
+		}
+	}
+}
+
+func (s *Sheet) adjustCrossSheetOptionsRangeOnDeleteRowBlock(blockStart, blockSize int) {
+	sameSheetRangePattern := regexp.MustCompile(`^([A-Z]+)(\d+):([A-Z]+)(\d+)$`)
+	crossSheetRangePattern := regexp.MustCompile(`^([^/]+)/([^/]+)/([A-Z]+)(\d+):([A-Z]+)(\d+)$`)
+
+	sheetKey := s.ProjectName + "/" + s.Name
+	globalSheetManager.OptionsRangeDepsMu.RLock()
+	deps, hasDeps := globalSheetManager.OptionsRangeDeps[sheetKey]
+	globalSheetManager.OptionsRangeDepsMu.RUnlock()
+	if !hasDeps {
+		return
+	}
+
+	seenSheets := make(map[string]bool)
+	sheetsToUpdate := make([]*Sheet, 0)
+	for _, dep := range deps {
+		sk := dep.ProjectName + "::" + dep.sheetName
+		if dep.ProjectName == s.ProjectName && dep.sheetName == s.Name {
+			continue
+		}
+		if !seenSheets[sk] {
+			sheet := globalSheetManager.GetSheetBy(dep.sheetName, dep.ProjectName)
+			if sheet != nil {
+				sheetsToUpdate = append(sheetsToUpdate, sheet)
+				seenSheets[sk] = true
+			}
+		}
+	}
+
+	for _, sheet := range sheetsToUpdate {
+		sheet.mu.Lock()
+		modified := false
+		for rowKey, rowMap := range sheet.Data {
+			for colKey, cell := range rowMap {
+				if strings.TrimSpace(cell.OptionsRange) == "" {
+					continue
+				}
+				newRange := adjustRangeRefOnDeleteRowBlock(cell.OptionsRange, blockStart, blockSize, s.ProjectName, s.Name, s.ProjectName, s.Name, sameSheetRangePattern, crossSheetRangePattern)
 				if newRange != cell.OptionsRange {
 					cell.OptionsRange = newRange
 					sheet.Data[rowKey][colKey] = cell

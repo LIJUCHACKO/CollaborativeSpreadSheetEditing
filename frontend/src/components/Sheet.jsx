@@ -36,6 +36,9 @@ export default function Sheet() {
     const [projectName, setProjectName] = useState(new URLSearchParams(location.search).get('project') || '');
     const [owner, setOwner] = useState('');
     const [editors, setEditors] = useState([]);
+    // Tree structure: row -> parent row number (0 means root)
+    const [rowParents, setRowParents] = useState({});
+    const [isTreeViewOpen, setIsTreeViewOpen] = useState(false);
 
     // UI and editing state
     const [connected, setConnected] = useState(false);
@@ -1097,6 +1100,12 @@ export default function Sheet() {
         if (sheet.row_heights) {
             setRowHeights(prev => ({ ...prev, ...sheet.row_heights }));
         }
+        // Tree structure: row_parents maps row (string) -> parent row (int)
+        if (sheet.row_parents) {
+            setRowParents(sheet.row_parents);
+        } else {
+            setRowParents({});
+        }
     };
 
     const updateCellState = (row, col, value, user) => {
@@ -1296,6 +1305,14 @@ export default function Sheet() {
             }
             setRedoStack(prev => [...prev, last]);
             setUndoStack(prev => prev.slice(0, -1));
+        } else if (last.type === 'move_row_as_child') {
+            const { fromRow, targetRow, destIndex } = last;
+            const inverseTarget = (fromRow < destIndex) ? (fromRow - 1) : fromRow;
+            if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+                ws.current.send(JSON.stringify({ type: 'MOVE_ROW', sheet_name: id, payload: { fromRow: String(destIndex), targetRow: String(inverseTarget), user: username } }));
+            }
+            setRedoStack(prev => [...prev, last]);
+            setUndoStack(prev => prev.slice(0, -1));
         } else if (last.type === 'insert_col') {
             const { newCol } = last;
             if (ws.current && ws.current.readyState === WebSocket.OPEN) {
@@ -1445,6 +1462,13 @@ export default function Sheet() {
             // Reapply original move
             if (ws.current && ws.current.readyState === WebSocket.OPEN) {
                 ws.current.send(JSON.stringify({ type: 'MOVE_ROW', sheet_name: id, payload: { fromRow: String(fromRow), targetRow: String(targetRow), user: username } }));
+            }
+            setUndoStack(prev => [...prev, last]);
+            setRedoStack(prev => prev.slice(0, -1));
+        } else if (last.type === 'move_row_as_child') {
+            const { fromRow, targetRow, destIndex } = last;
+            if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+                ws.current.send(JSON.stringify({ type: 'MOVE_ROW_AS_CHILD', sheet_name: id, payload: { fromRow: String(fromRow), targetRow: String(targetRow), user: username } }));
             }
             setUndoStack(prev => [...prev, last]);
             setRedoStack(prev => prev.slice(0, -1));
@@ -1763,6 +1787,22 @@ export default function Sheet() {
         setCutRow(null);
     };
 
+    const moveCutRowAsChild = (targetRow) => {
+        if (cutRow == null) return;
+        if (isFilterActive) return;
+
+        if (canEdit && ws.current && ws.current.readyState === WebSocket.OPEN) {
+            const payload = { fromRow: String(cutRow), targetRow: String(targetRow), user: username };
+            let destIndex = Number(targetRow) + 1;
+            if (Number(cutRow) < destIndex) destIndex -= 1;
+            setUndoStack(prev => [...prev, { type: 'move_row_as_child', fromRow: Number(cutRow), targetRow: Number(targetRow), destIndex }]);
+            setRedoStack([]);
+            ws.current.send(JSON.stringify({ type: 'MOVE_ROW_AS_CHILD', sheet_name: id, payload }));
+        }
+
+        setCutRow(null);
+    };
+
     const moveCutColRight = (targetCol) => {
         if (cutCol == null) return;
         if (isFilterActive) return; // keep parity with row behavior
@@ -1806,6 +1846,65 @@ export default function Sheet() {
         }
     };
 
+    // Insert a child row below target row and all its descendants
+    const insertChildRow = (targetRow) => {
+        if (isFilterActive) return;
+        if (canEdit && ws.current && ws.current.readyState === WebSocket.OPEN) {
+            const payload = { targetRow: String(targetRow), user: username };
+            ws.current.send(JSON.stringify({ type: 'INSERT_CHILD_ROW', sheet_name: id, payload }));
+        }
+    };
+
+    // Get depth of a row in tree hierarchy (0 = root)
+    const getRowDepth = (row) => {
+        let depth = 0;
+        let current = Number(row);
+        const visited = new Set();
+        while (rowParents[String(current)] && rowParents[String(current)] > 0) {
+            if (visited.has(current)) break;
+            visited.add(current);
+            depth++;
+            current = rowParents[String(current)];
+        }
+        return depth;
+    };
+
+    // Get all descendants of a row
+    const getDescendants = (row) => {
+        const result = [];
+        const queue = [Number(row)];
+        while (queue.length > 0) {
+            const current = queue.shift();
+            for (const [r, parent] of Object.entries(rowParents)) {
+                if (parent === current) {
+                    const rNum = Number(r);
+                    result.push(rNum);
+                    queue.push(rNum);
+                }
+            }
+        }
+        return result.sort((a, b) => a - b);
+    };
+
+    // Get direct children of a row
+    const getDirectChildren = (row) => {
+        const children = [];
+        for (const [r, parent] of Object.entries(rowParents)) {
+            if (parent === Number(row)) {
+                children.push(Number(r));
+            }
+        }
+        return children.sort((a, b) => a - b);
+    };
+
+    // Check if a row has any children
+    const hasChildren = (row) => {
+        for (const parent of Object.values(rowParents)) {
+            if (parent === Number(row)) return true;
+        }
+        return false;
+    };
+
     const insertColumnRight = (targetCol) => {
         if (isFilterActive) return;
         if (canEdit && ws.current && ws.current.readyState === WebSocket.OPEN) {
@@ -1837,10 +1936,20 @@ export default function Sheet() {
         }
     };
 
-    // Delete row/column only if empty
+    // Delete row/column only if empty (descendants will be deleted too)
     const deleteRow = (rowLabel) => {
         if (isFilterActive) return;
-        if (!isRowEmpty(rowLabel)) { alert('Cannot delete: row is not empty.'); return; }
+        const desc = getDescendants(rowLabel);
+        // Check if row and all descendants are empty
+        const allRows = [Number(rowLabel), ...desc];
+        const nonEmptyRows = allRows.filter(r => !isRowEmpty(r));
+        if (nonEmptyRows.length > 0) {
+            alert(`Cannot delete: row(s) ${nonEmptyRows.join(', ')} are not empty.`);
+            return;
+        }
+        if (desc.length > 0) {
+            if (!confirm(`This will also delete ${desc.length} descendant row(s): ${desc.join(', ')}. Continue?`)) return;
+        }
         if (canEdit && ws.current && ws.current.readyState === WebSocket.OPEN) {
             const payload = { row: String(rowLabel), user: username };
             ws.current.send(JSON.stringify({ type: 'DELETE_ROW', sheet_name: id, payload }));
@@ -2081,6 +2190,13 @@ export default function Sheet() {
                             className={`btn btn-outline-primary btn-sm d-flex align-items-center ${isChatOpen ? 'active' : ''}`}
                         >
                             <MessageSquare className="me-1" />Chat
+                        </button>
+                        <button
+                            onClick={() => setIsTreeViewOpen(prev => !prev)}
+                            className={`btn btn-outline-primary btn-sm d-flex align-items-center ${isTreeViewOpen ? 'active' : ''}`}
+                            title="Toggle tree view panel"
+                        >
+                            🌳 Tree
                         </button>
                     </span>
                     <div className="d-flex align-items-center ms-auto">
@@ -3011,7 +3127,7 @@ export default function Sheet() {
                                             onMouseOver={()=> endSelection()}
                                         >
                                             
-                                            {/* Row actions: Insert / Cut / Paste */}
+                                            {/* Row actions: Insert / Cut / Paste / Insert Child */}
                                             <div style={{ position: 'absolute', top: 0, left: 0, display: 'flex', gap: '4px', zIndex: 25 }}>
                                                 {connected && canEdit && (
                                                     <button
@@ -3025,13 +3141,25 @@ export default function Sheet() {
                                                         <span role="img" aria-label="insert-row">➕</span>
                                                     </button>
                                                 )}
+                                                {connected && canEdit && (
+                                                    <button
+                                                        type="button"
+                                                        className="btn btn-xs btn-light"
+                                                        disabled={isFilterActive}
+                                                        title={isFilterActive ? 'Disabled while filters are active' : `Insert child row under ${rowLabel}`}
+                                                        onClick={() => insertChildRow(rowLabel)}
+                                                        style={{ padding: '0 0px', fontSize: '8px' }}
+                                                    >
+                                                        <span role="img" aria-label="insert-child">🔽</span>
+                                                    </button>
+                                                )}
                                                
                                                 {connected && canEdit && (
                                                     <button
                                                         type="button"
                                                         className="btn btn-xs btn-light"
-                                                        disabled={isFilterActive || !isRowEmpty(rowLabel)}
-                                                        title={isFilterActive ? 'Disabled while filters are active' : (!isRowEmpty(rowLabel) ? `Cannot delete: row ${rowLabel} is not empty` : `Delete empty row ${rowLabel}`)}
+                                                        disabled={isFilterActive}
+                                                        title={isFilterActive ? 'Disabled while filters are active' : `Delete row ${rowLabel}${hasChildren(rowLabel) ? ' and all descendants' : ''}`}
                                                         onClick={() => deleteRow(rowLabel)}
                                                         style={{ padding: '0 0px', fontSize: '8px' }}
                                                     >
@@ -3042,7 +3170,7 @@ export default function Sheet() {
                                                     type="button"
                                                     className="btn btn-xs btn-light"
                                                     disabled={isFilterActive}
-                                                    title={isFilterActive ? 'Disabled while filters are active' : 'Cut this row'}
+                                                    title={isFilterActive ? 'Disabled while filters are active' : `Cut this row${hasChildren(rowLabel) ? ' and all descendants' : ''}`}
                                                     onClick={() => {
                                                         if (hasLockedInRow(rowLabel)) { alert('Cannot cut: row has locked cell(s).'); return; }
                                                         setCutRow(rowLabel); setCutCol(null);
@@ -3052,20 +3180,35 @@ export default function Sheet() {
                                                     <span role="img" aria-label="cut">✂️</span>
                                                 </button>)}
                                                 {cutRow != null && cutRow !== rowLabel && connected && canEdit &&(
+                                                    <>
                                                     <button
                                                         type="button"
                                                         className="btn btn-xs btn-light"
                                                         disabled={isFilterActive}
-                                                        title={isFilterActive ? 'Disabled while filters are active' : `Insert cut row below row ${rowLabel}`}
+                                                        title={isFilterActive ? 'Disabled while filters are active' : `Paste cut row below row ${rowLabel}`}
                                                         onClick={() => { moveCutRowBelow(rowLabel); setCutRow(null); setCutCol(null); }}
                                                         style={{ padding: '0 0px', fontSize: '8px' }}
                                                     >
-                                                        <span role="img" aria-label="paste">📋</span>
+                                                        <span role="img" aria-label="paste-below">📋↓</span>
                                                     </button>
+                                                    <button
+                                                        type="button"
+                                                        className="btn btn-xs btn-light"
+                                                        disabled={isFilterActive}
+                                                        title={isFilterActive ? 'Disabled while filters are active' : `Paste cut row as child of row ${rowLabel}`}
+                                                        onClick={() => { moveCutRowAsChild(rowLabel); setCutRow(null); setCutCol(null); }}
+                                                        style={{ padding: '0 0px', fontSize: '8px' }}
+                                                    >
+                                                        <span role="img" aria-label="paste-as-child">📋→</span>
+                                                    </button>
+                                                    </>
                                                 )}
                                                 
                                             </div>
-                                            <span>{rowLabel}</span>
+                                            <span style={{ paddingLeft: `${getRowDepth(rowLabel) * 8}px` }}>
+                                                {getRowDepth(rowLabel) > 0 && <span style={{ color: '#9ca3af', fontSize: '8px', marginRight: '2px' }}>{'└'}</span>}
+                                                {rowLabel}
+                                            </span>
                                              <div
                                                 onMouseDown={(e) => onRowResizeMouseDown(rowLabel, e)}
                                                 title="Drag to resize row"
@@ -3553,6 +3696,138 @@ export default function Sheet() {
                         </div>
 
                         {/* Chat panel (fixed bottom-right) */}
+
+                        {/* Tree View Panel (fixed right side) */}
+                        {isTreeViewOpen && (
+                        <div style={{ position: 'fixed', right: 16, top: 130, width: 280, maxHeight: 'calc(100vh - 200px)', zIndex: 1050, overflowY: 'auto' }}>
+                            <div className="card shadow-sm">
+                                <div className="card-header py-2 d-flex align-items-center justify-content-between" style={{ backgroundColor: '#f0fdf4' }}>
+                                    <span className="fw-semibold small d-flex align-items-center">🌳 Tree View</span>
+                                    <button
+                                        type="button"
+                                        className="btn-close btn-close-sm"
+                                        onClick={() => setIsTreeViewOpen(false)}
+                                        aria-label="Close"
+                                    ></button>
+                                </div>
+                                <div className="card-body p-2" style={{ maxHeight: 'calc(100vh - 260px)', overflowY: 'auto', fontSize: '12px' }}>
+                                    {(() => {
+                                        // Build tree for visible rows only
+                                        const visibleSet = new Set(displayedRowHeaders.map(Number));
+                                        
+                                        // Build tree structure from rowParents
+                                        const buildTreeNodes = (parentRow, depth) => {
+                                            const children = [];
+                                            for (const [r, parent] of Object.entries(rowParents)) {
+                                                if (parent === parentRow && visibleSet.has(Number(r))) {
+                                                    children.push(Number(r));
+                                                }
+                                            }
+                                            children.sort((a, b) => a - b);
+                                            return children.map((row) => {
+                                                const firstColValue = data[`${row}-A`]?.value || '';
+                                                const secondColValue = data[`${row}-B`]?.value || '';
+                                                const label = firstColValue || secondColValue || `Row ${row}`;
+                                                const grandChildren = buildTreeNodes(row, depth + 1);
+                                                return (
+                                                    <div key={row} style={{ marginLeft: `${depth * 14}px`, marginBottom: '2px' }}>
+                                                        <div
+                                                            style={{
+                                                                display: 'flex',
+                                                                alignItems: 'center',
+                                                                padding: '2px 4px',
+                                                                borderRadius: '3px',
+                                                                cursor: 'pointer',
+                                                                backgroundColor: focusedCell.row === row ? '#dbeafe' : 'transparent',
+                                                                transition: 'background-color 0.15s',
+                                                            }}
+                                                            onClick={() => {
+                                                                setFocusedCell({ row: row, col: 'A' });
+                                                                // Scroll to bring this row into view
+                                                                const rowIdx = filteredRowHeaders.indexOf(row);
+                                                                if (rowIdx !== -1 && rowIdx >= freezeRowsCount) {
+                                                                    setRowStart(Math.max(freezeRowsCount, Math.min(rowIdx, filteredRowHeaders.length - nonFrozenVisibleRowsCount + 1)));
+                                                                }
+                                                            }}
+                                                            onMouseEnter={(e) => e.currentTarget.style.backgroundColor = focusedCell.row === row ? '#dbeafe' : '#f3f4f6'}
+                                                            onMouseLeave={(e) => e.currentTarget.style.backgroundColor = focusedCell.row === row ? '#dbeafe' : 'transparent'}
+                                                            title={`Row ${row}: ${label}`}
+                                                        >
+                                                            {grandChildren.length > 0 ? (
+                                                                <span style={{ marginRight: '4px', fontSize: '10px', color: '#6b7280' }}>▼</span>
+                                                            ) : (
+                                                                <span style={{ marginRight: '4px', fontSize: '10px', color: '#d1d5db' }}>•</span>
+                                                            )}
+                                                            <span style={{ fontWeight: grandChildren.length > 0 ? '600' : '400', color: '#374151' }}>
+                                                                <span style={{ color: '#9ca3af', fontSize: '10px', marginRight: '4px' }}>{row}</span>
+                                                                {label.length > 22 ? label.substring(0, 22) + '…' : label}
+                                                            </span>
+                                                        </div>
+                                                        {grandChildren}
+                                                    </div>
+                                                );
+                                            });
+                                        };
+
+                                        // Root rows: visible rows that have no parent or parent is 0
+                                        const rootRows = displayedRowHeaders.filter(r => {
+                                            const parent = rowParents[String(r)];
+                                            return !parent || parent === 0;
+                                        }).map(Number).sort((a, b) => a - b);
+
+                                        const treeContent = rootRows.map(row => {
+                                            const firstColValue = data[`${row}-A`]?.value || '';
+                                            const secondColValue = data[`${row}-B`]?.value || '';
+                                            const label = firstColValue || secondColValue || `Row ${row}`;
+                                            const children = buildTreeNodes(row, 1);
+                                            return (
+                                                <div key={row} style={{ marginBottom: '2px' }}>
+                                                    <div
+                                                        style={{
+                                                            display: 'flex',
+                                                            alignItems: 'center',
+                                                            padding: '2px 4px',
+                                                            borderRadius: '3px',
+                                                            cursor: 'pointer',
+                                                            backgroundColor: focusedCell.row === row ? '#dbeafe' : 'transparent',
+                                                            transition: 'background-color 0.15s',
+                                                        }}
+                                                        onClick={() => {
+                                                            setFocusedCell({ row: row, col: 'A' });
+                                                            const rowIdx = filteredRowHeaders.indexOf(row);
+                                                            if (rowIdx !== -1 && rowIdx >= freezeRowsCount) {
+                                                                setRowStart(Math.max(freezeRowsCount, Math.min(rowIdx, filteredRowHeaders.length - nonFrozenVisibleRowsCount + 1)));
+                                                            }
+                                                        }}
+                                                        onMouseEnter={(e) => e.currentTarget.style.backgroundColor = focusedCell.row === row ? '#dbeafe' : '#f3f4f6'}
+                                                        onMouseLeave={(e) => e.currentTarget.style.backgroundColor = focusedCell.row === row ? '#dbeafe' : 'transparent'}
+                                                        title={`Row ${row}: ${label}`}
+                                                    >
+                                                        {children.length > 0 ? (
+                                                            <span style={{ marginRight: '4px', fontSize: '10px', color: '#6b7280' }}>▼</span>
+                                                        ) : (
+                                                            <span style={{ marginRight: '4px', fontSize: '10px', color: '#d1d5db' }}>•</span>
+                                                        )}
+                                                        <span style={{ fontWeight: children.length > 0 ? '600' : '400', color: '#1f2937' }}>
+                                                            <span style={{ color: '#9ca3af', fontSize: '10px', marginRight: '4px' }}>{row}</span>
+                                                            {label.length > 22 ? label.substring(0, 22) + '…' : label}
+                                                        </span>
+                                                    </div>
+                                                    {children}
+                                                </div>
+                                            );
+                                        });
+
+                                        if (treeContent.length === 0) {
+                                            return <div className="text-muted text-center py-2">No tree structure defined.<br/>Use 🔽 button on row labels to add child rows.</div>;
+                                        }
+                                        return treeContent;
+                                    })()}
+                                </div>
+                            </div>
+                        </div>
+                        )}
+
                         {isChatOpen && (
                         <div style={{ position: 'fixed', right: 16, bottom: 16, width: 360, zIndex: 1100 }}>
                             <div className="card shadow-sm">

@@ -462,6 +462,7 @@ func (h *Hub) run() {
 					TargetRow string `json:"targetRow"`
 					User      string `json:"user"`
 				}
+				fmt.Println("MOVE_ROW message received")
 				if err := json.Unmarshal(message.Payload, &mv); err == nil {
 					sheet := globalSheetManager.GetSheetBy(message.SheetName, message.Project)
 					if sheet != nil {
@@ -479,6 +480,33 @@ func (h *Hub) run() {
 					}
 				} else {
 					log.Printf("Error unmarshalling MOVE_ROW payload: %v", err)
+				}
+			} else if message.Type == "MOVE_ROW_AS_CHILD" {
+				if denyIfNotEditor() {
+					continue
+				}
+				var mv struct {
+					FromRow   string `json:"fromRow"`
+					TargetRow string `json:"targetRow"`
+					User      string `json:"user"`
+				}
+				fmt.Println("MOVE_ROW_AS_CHILD message received")
+				if err := json.Unmarshal(message.Payload, &mv); err == nil {
+					sheet := globalSheetManager.GetSheetBy(message.SheetName, message.Project)
+					if sheet != nil {
+						moved := sheet.MoveRowAsChild(mv.FromRow, mv.TargetRow, message.User)
+						if moved {
+							payload, _ := json.Marshal(sheet.SnapshotForClient())
+							toSend = &Message{
+								Type:      "ROW_MOVED",
+								SheetName: message.SheetName,
+								Payload:   payload,
+								User:      message.User,
+							}
+						}
+					}
+				} else {
+					log.Printf("Error unmarshalling MOVE_ROW_AS_CHILD payload: %v", err)
 				}
 			} else if message.Type == "MOVE_COL" {
 				if denyIfNotEditor() {
@@ -555,6 +583,55 @@ func (h *Hub) run() {
 					}
 				} else {
 					log.Printf("Error unmarshalling INSERT_COL payload: %v", err)
+				}
+			} else if message.Type == "INSERT_CHILD_ROW" {
+				if denyIfNotEditor() {
+					continue
+				}
+				var ins struct {
+					TargetRow string `json:"targetRow"`
+					User      string `json:"user"`
+				}
+				if err := json.Unmarshal(message.Payload, &ins); err == nil {
+					sheet := globalSheetManager.GetSheetBy(message.SheetName, message.Project)
+					if sheet != nil {
+						insertedRow := sheet.InsertChildRow(ins.TargetRow, message.User)
+						if insertedRow > 0 {
+							payload, _ := json.Marshal(sheet.SnapshotForClient())
+							toSend = &Message{
+								Type:      "ROW_COL_UPDATED",
+								SheetName: message.SheetName,
+								Payload:   payload,
+								User:      message.User,
+							}
+						}
+					}
+				} else {
+					log.Printf("Error unmarshalling INSERT_CHILD_ROW payload: %v", err)
+				}
+			} else if message.Type == "SET_ROW_PARENT" {
+				if denyIfNotEditor() {
+					continue
+				}
+				var req struct {
+					Row       string `json:"row"`
+					ParentRow int    `json:"parentRow"`
+					User      string `json:"user"`
+				}
+				if err := json.Unmarshal(message.Payload, &req); err == nil {
+					sheet := globalSheetManager.GetSheetBy(message.SheetName, message.Project)
+					if sheet != nil {
+						sheet.SetRowParent(req.Row, req.ParentRow, message.User)
+						payload, _ := json.Marshal(sheet.SnapshotForClient())
+						toSend = &Message{
+							Type:      "ROW_COL_UPDATED",
+							SheetName: message.SheetName,
+							Payload:   payload,
+							User:      message.User,
+						}
+					}
+				} else {
+					log.Printf("Error unmarshalling SET_ROW_PARENT payload: %v", err)
 				}
 			} else if message.Type == "DELETE_ROW" {
 				if denyIfNotEditor() {

@@ -106,6 +106,7 @@ type Sheet struct {
 	Permissions Permissions                `json:"permissions"`
 	ColWidths   map[string]int             `json:"col_widths,omitempty"`
 	RowHeights  map[string]int             `json:"row_heights,omitempty"`
+	RowParents  map[string]int             `json:"row_parents,omitempty"` // row (string) -> parent row number (int). 0 means root.
 	mu          sync.RWMutex
 }
 
@@ -285,6 +286,7 @@ func (sm *SheetManager) CreateSheet(name, owner, projectName string) *Sheet {
 		Data:        make(map[string]map[string]Cell),
 		ColWidths:   make(map[string]int),
 		RowHeights:  make(map[string]int),
+		RowParents:  make(map[string]int),
 		Permissions: Permissions{
 			Editors: []string{owner},
 		},
@@ -341,6 +343,7 @@ func (sm *SheetManager) CopySheetToProject(sourceID, sourceProject, targetProjec
 		Data:        make(map[string]map[string]Cell),
 		ColWidths:   make(map[string]int),
 		RowHeights:  make(map[string]int),
+		RowParents:  make(map[string]int),
 		Permissions: Permissions{Editors: []string{owner}},
 		AuditLog:    append([]AuditEntry{}, src.AuditLog...),
 	}
@@ -357,6 +360,9 @@ func (sm *SheetManager) CopySheetToProject(sourceID, sourceProject, targetProjec
 	}
 	for k, v := range src.RowHeights {
 		copySheet.RowHeights[k] = v
+	}
+	for k, v := range src.RowParents {
+		copySheet.RowParents[k] = v
 	}
 	src.mu.RUnlock()
 	// Register and persist
@@ -667,7 +673,6 @@ func (s *Sheet) UpdatePermissions(editors []string, performedBy string, isAdmin 
 				out = append(out, v)
 			}
 		}
-		s.mu.Unlock()
 		return out
 	}
 	editors = uniq(editors)
@@ -717,23 +722,286 @@ func (s *Sheet) TransferOwnership(newOwner, performedBy string, isAdmin bool) bo
 	if !found {
 		s.Permissions.Editors = append(s.Permissions.Editors, newOwner)
 	}
-	go globalSheetManager.SaveSheet(s)
 	s.mu.Unlock()
+	go globalSheetManager.SaveSheet(s)
 	// Log only in project audit
 	globalProjectAuditManager.Append(s.ProjectName, performedBy, "TRANSFER_SHEET_OWNERSHIP", fmt.Sprintf("For Sheet %s Owner changed from %s to %s", s.Name, old, newOwner))
 	return true
 }
 
-// InsertRowBelow inserts a new empty row directly below `targetRowStr`, shifting subsequent rows (data and heights) down by one.
+// ---- Tree structure helpers ----
+
+// getDescendants returns all descendant row numbers of a given row (children, grandchildren, etc.)
+// sorted in ascending order. Must be called with s.mu held (at least RLock).
+func (s *Sheet) getDescendants(parentRow int) []int {
+	if s.RowParents == nil {
+		return nil
+	}
+	var descendants []int
+	// BFS to find all descendants
+	queue := []int{parentRow}
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		for rowKey, parent := range s.RowParents {
+			if parent == atoiSafe(rowKey) {
+				//error condition causes infinite loop
+				log.Printf("[ERROR] Sheet %s (Project: %s) has a row %s that is its own parent", s.Name, s.ProjectName, rowKey)
+				continue
+			}
+			if parent == current {
+				r := atoiSafe(rowKey)
+				if r > 0 {
+					descendants = append(descendants, r)
+					queue = append(queue, r)
+				}
+			}
+		}
+	}
+	// Sort ascending
+	slices.Sort(descendants)
+	return descendants
+}
+
+// getLastDescendantRow returns the last (highest row number) descendant of parentRow,
+// or parentRow itself if it has no descendants. Must be called with s.mu held.
+func (s *Sheet) getLastDescendantRow(parentRow int) int {
+	descendants := s.getDescendants(parentRow)
+	if len(descendants) == 0 {
+		return parentRow
+	}
+	return descendants[len(descendants)-1]
+}
+
+// getRowDepth returns the depth (indentation level) of a row. Root rows have depth 0.
+// Must be called with s.mu held.
+func (s *Sheet) getRowDepth(row int) int {
+	if s.RowParents == nil {
+		return 0
+	}
+	depth := 0
+	current := row
+	visited := make(map[int]bool)
+	for {
+		parentVal, ok := s.RowParents[itoa(current)]
+		if !ok || parentVal == 0 {
+			break
+		}
+		if visited[current] {
+			break // cycle guard
+		}
+		visited[current] = true
+		depth++
+		current = parentVal
+	}
+	return depth
+}
+
+// adjustRowParentsOnInsert adjusts RowParents when a new row is inserted at insertRow.
+// All parent references >= insertRow are shifted up by 1. Must be called with s.mu held.
+func (s *Sheet) adjustRowParentsOnInsert(insertRow int) {
+	if s.RowParents == nil {
+		s.RowParents = make(map[string]int)
+		return
+	}
+	newParents := make(map[string]int, len(s.RowParents))
+	for rowKey, parent := range s.RowParents {
+		r := atoiSafe(rowKey)
+		newRow := r
+		newParent := parent
+		if r >= insertRow {
+			newRow = r + 1
+		}
+		if parent >= insertRow && parent > 0 {
+			newParent = parent + 1
+		}
+		newParents[itoa(newRow)] = newParent
+	}
+	s.RowParents = newParents
+}
+
+// adjustRowParentsOnDelete adjusts RowParents when a row is deleted.
+// All parent references > deleteRow are shifted down by 1. Must be called with s.mu held.
+func (s *Sheet) adjustRowParentsOnDelete(deleteRow int) {
+	if s.RowParents == nil {
+		return
+	}
+	delete(s.RowParents, itoa(deleteRow))
+	newParents := make(map[string]int, len(s.RowParents))
+	for rowKey, parent := range s.RowParents {
+		r := atoiSafe(rowKey)
+		newRow := r
+		newParent := parent
+		if r > deleteRow {
+			newRow = r - 1
+		}
+		if parent > deleteRow {
+			newParent = parent - 1
+		}
+		newParents[itoa(newRow)] = newParent
+	}
+	s.RowParents = newParents
+}
+
+// adjustRowParentsOnMove adjusts RowParents when a row block moves from fromRow to destIndex.
+// Must be called with s.mu held.
+func (s *Sheet) adjustRowParentsOnMove(fromRow, destIndex int) {
+	if s.RowParents == nil {
+		return
+	}
+	// Build mapping: old row -> new row (same as used by data move)
+	mapping := make(map[int]int)
+	if fromRow < destIndex {
+		mapping[fromRow] = destIndex
+		for k := fromRow + 1; k <= destIndex; k++ {
+			mapping[k] = k - 1
+		}
+	} else if fromRow > destIndex {
+		mapping[fromRow] = destIndex
+		for k := destIndex; k < fromRow; k++ {
+			mapping[k] = k + 1
+		}
+	}
+	newParents := make(map[string]int, len(s.RowParents))
+	for rowKey, parent := range s.RowParents {
+		r := atoiSafe(rowKey)
+		newRow := r
+		if mapped, ok := mapping[r]; ok {
+			newRow = mapped
+		}
+		newParent := parent
+		if parent > 0 {
+			if mapped, ok := mapping[parent]; ok {
+				newParent = mapped
+			}
+		}
+		newParents[itoa(newRow)] = newParent
+	}
+	s.RowParents = newParents
+}
+
+// SetRowParent sets the parent of a row. parentRow=0 means root (no parent).
+func (s *Sheet) SetRowParent(rowStr string, parentRow int, user string) {
+	s.mu.Lock()
+	if s.RowParents == nil {
+		s.RowParents = make(map[string]int)
+	}
+	if parentRow == 0 {
+		delete(s.RowParents, rowStr)
+	} else {
+		s.RowParents[rowStr] = parentRow
+	}
+	s.mu.Unlock()
+	globalSheetManager.SaveSheet(s)
+}
+
+// InsertChildRow inserts a new child row below all descendants of targetRowStr.
+// The new row's parent is set to targetRow. Returns the inserted row number, or 0 on failure.
+func (s *Sheet) InsertChildRow(targetRowStr, user string) int {
+	var targetRow int
+	if _, err := fmt.Sscanf(targetRowStr, "%d", &targetRow); err != nil {
+		return 0
+	}
+
+	s.mu.Lock()
+	lastDesc := s.getLastDescendantRow(targetRow)
+	insertRow := lastDesc + 1
+
+	// Shift existing rows [insertRow..] down by 1
+	maxRow := 0
+	for rowKey := range s.Data {
+		var r int
+		if _, err := fmt.Sscanf(rowKey, "%d", &r); err == nil {
+			if r > maxRow {
+				maxRow = r
+			}
+		}
+	}
+	for r := maxRow; r >= insertRow; r-- {
+		fromKey := itoa(r)
+		toKey := itoa(r + 1)
+		if rowData, ok := s.Data[fromKey]; ok {
+			delete(s.Data, fromKey)
+			s.Data[toKey] = rowData
+		} else {
+			delete(s.Data, toKey)
+		}
+	}
+
+	// Ensure the new row exists but empty
+	newKey := itoa(insertRow)
+	if s.Data == nil {
+		s.Data = make(map[string]map[string]Cell)
+	}
+	if _, ok := s.Data[newKey]; !ok {
+		s.Data[newKey] = make(map[string]Cell)
+	}
+
+	// Shift RowHeights
+	if s.RowHeights == nil {
+		s.RowHeights = make(map[string]int)
+	}
+	maxHeightRow := 0
+	for rowKey := range s.RowHeights {
+		var r int
+		if _, err := fmt.Sscanf(rowKey, "%d", &r); err == nil {
+			if r > maxHeightRow {
+				maxHeightRow = r
+			}
+		}
+	}
+	for r := maxHeightRow; r >= insertRow; r-- {
+		fromKey := itoa(r)
+		toKey := itoa(r + 1)
+		if h, ok := s.RowHeights[fromKey]; ok {
+			delete(s.RowHeights, fromKey)
+			s.RowHeights[toKey] = h
+		} else {
+			delete(s.RowHeights, toKey)
+		}
+	}
+
+	// Adjust RowParents before setting the new parent
+	s.adjustRowParentsOnInsert(insertRow)
+	// Set parent for the new row
+	if s.RowParents == nil {
+		s.RowParents = make(map[string]int)
+	}
+	s.RowParents[newKey] = targetRow
+
+	// Adjust audit log row references
+	s.adjustAuditRowsOnInsert(insertRow)
+
+	s.AuditLog = append(s.AuditLog, AuditEntry{
+		Timestamp: time.Now(),
+		User:      user,
+		Action:    "INSERT_CHILD_ROW",
+		Row1:      insertRow,
+		Row2:      targetRow,
+	})
+	s.mu.Unlock()
+
+	// Adjust script tags
+	s.adjustScriptTagsOnInsertRow(insertRow)
+	s.adjustOptionsRangeOnInsertRow(insertRow)
+
+	globalSheetManager.SaveSheet(s)
+	return insertRow
+}
+
+// InsertRowBelow inserts a new empty row directly below `targetRowStr` and all its descendants,
+// at the same tree level. Shifts subsequent rows (data and heights) down by one.
 // Returns true if an insertion occurred.
 func (s *Sheet) InsertRowBelow(targetRowStr, user string) bool {
 	var targetRow int
 	if _, err := fmt.Sscanf(targetRowStr, "%d", &targetRow); err != nil {
 		return false
 	}
-	insertRow := targetRow + 1
 
 	s.mu.Lock()
+	// Insert after all descendants of target row so siblings stay together
+	lastDesc := s.getLastDescendantRow(targetRow)
+	insertRow := lastDesc + 1
 
 	// Shift existing rows [insertRow..] down by 1
 	maxRow := 0
@@ -792,6 +1060,15 @@ func (s *Sheet) InsertRowBelow(targetRowStr, user string) bool {
 	if h, ok := s.RowHeights[targetRowStr]; ok {
 		s.RowHeights[newKey] = h
 	}
+	// Adjust RowParents references for the inserted row
+	s.adjustRowParentsOnInsert(insertRow)
+	// The new row inherits the same parent as the target row (same level)
+	if s.RowParents == nil {
+		s.RowParents = make(map[string]int)
+	}
+	if parentVal, ok := s.RowParents[itoa(targetRow)]; ok && parentVal > 0 {
+		s.RowParents[newKey] = parentVal
+	}
 	// Adjust audit log row references for rows at or below the inserted position
 	s.adjustAuditRowsOnInsert(insertRow)
 
@@ -808,6 +1085,9 @@ func (s *Sheet) InsertRowBelow(targetRowStr, user string) bool {
 	s.adjustOptionsRangeOnInsertRow(insertRow)
 
 	// If the target row contains cells locked by a script span, re-run those scripts
+	type scriptLoc struct{ row, col string }
+	var scriptLocs []scriptLoc
+	s.mu.RLock()
 	if rowMap, ok := s.Data[targetRowStr]; ok {
 		lockedIDs := []string{}
 		for _, cell := range rowMap {
@@ -836,71 +1116,92 @@ func (s *Sheet) InsertRowBelow(targetRowStr, user string) bool {
 				}
 			}
 			if startRow != "" && startCol != "" {
-				ExecuteCellScriptonChange(s.ProjectName, s.Name, startRow, startCol)
+				scriptLocs = append(scriptLocs, scriptLoc{startRow, startCol})
 			}
 		}
+	}
+	s.mu.RUnlock()
+
+	for _, loc := range scriptLocs {
+		ExecuteCellScriptonChange(s.ProjectName, s.Name, loc.row, loc.col)
 	}
 
 	globalSheetManager.SaveSheet(s)
 	return true
 }
 
-// DeleteRowAt removes the row at rowStr and shifts subsequent rows up by one
+// DeleteRowAt removes the row at rowStr and all its descendants, shifting subsequent rows up.
 func (s *Sheet) DeleteRowAt(rowStr, user string) bool {
 	var row int
 	if _, err := fmt.Sscanf(rowStr, "%d", &row); err != nil || row <= 0 {
 		return false
 	}
 	s.mu.Lock()
-	// Determine max row
-	maxRow := 0
-	for rowKey := range s.Data {
-		var r int
-		if _, err := fmt.Sscanf(rowKey, "%d", &r); err == nil {
-			if r > maxRow {
-				maxRow = r
+
+	// Find all descendants of this row
+	descendants := s.getDescendants(row)
+	// Rows to delete: the target row + all descendants, sorted descending so we delete from bottom up
+	rowsToDelete := append([]int{row}, descendants...)
+	slices.Sort(rowsToDelete)
+	blockSize := len(rowsToDelete)
+	// Delete from highest row number to lowest to avoid index shifting issues
+	slices.Reverse(rowsToDelete)
+
+	for _, delRow := range rowsToDelete {
+		delRowStr := itoa(delRow)
+		// Determine max row
+		maxRow := 0
+		for rowKey := range s.Data {
+			var r int
+			if _, err := fmt.Sscanf(rowKey, "%d", &r); err == nil {
+				if r > maxRow {
+					maxRow = r
+				}
 			}
 		}
-	}
-	// Remove the target row
-	delete(s.Data, rowStr)
-	// Shift rows [row+1..maxRow] up by 1
-	for r := row + 1; r <= maxRow; r++ {
-		fromKey := itoa(r)
-		toKey := itoa(r - 1)
-		if rowData, ok := s.Data[fromKey]; ok {
-			delete(s.Data, fromKey)
-			s.Data[toKey] = rowData
-		} else {
-			delete(s.Data, toKey)
-		}
-	}
-	// RowHeights shift
-	if s.RowHeights == nil {
-		s.RowHeights = make(map[string]int)
-	}
-	maxHeightRow := 0
-	for rowKey := range s.RowHeights {
-		var r int
-		if _, err := fmt.Sscanf(rowKey, "%d", &r); err == nil {
-			if r > maxHeightRow {
-				maxHeightRow = r
+		// Remove the target row
+		delete(s.Data, delRowStr)
+		// Shift rows [delRow+1..maxRow] up by 1
+		for r := delRow + 1; r <= maxRow; r++ {
+			fromKey := itoa(r)
+			toKey := itoa(r - 1)
+			if rowData, ok := s.Data[fromKey]; ok {
+				delete(s.Data, fromKey)
+				s.Data[toKey] = rowData
+			} else {
+				delete(s.Data, toKey)
 			}
 		}
-	}
-	delete(s.RowHeights, rowStr)
-	for r := row + 1; r <= maxHeightRow; r++ {
-		fromKey := itoa(r)
-		toKey := itoa(r - 1)
-		if h, ok := s.RowHeights[fromKey]; ok {
-			delete(s.RowHeights, fromKey)
-			s.RowHeights[toKey] = h
-		} else {
-			delete(s.RowHeights, toKey)
+		// RowHeights shift
+		if s.RowHeights == nil {
+			s.RowHeights = make(map[string]int)
 		}
+		maxHeightRow := 0
+		for rowKey := range s.RowHeights {
+			var r int
+			if _, err := fmt.Sscanf(rowKey, "%d", &r); err == nil {
+				if r > maxHeightRow {
+					maxHeightRow = r
+				}
+			}
+		}
+		delete(s.RowHeights, delRowStr)
+		for r := delRow + 1; r <= maxHeightRow; r++ {
+			fromKey := itoa(r)
+			toKey := itoa(r - 1)
+			if h, ok := s.RowHeights[fromKey]; ok {
+				delete(s.RowHeights, fromKey)
+				s.RowHeights[toKey] = h
+			} else {
+				delete(s.RowHeights, toKey)
+			}
+		}
+		// Adjust RowParents
+		s.adjustRowParentsOnDelete(delRow)
 	}
-	// Adjust audit logs for deletion
-	s.adjustAuditRowsOnDelete(row)
+
+	// Adjust audit logs for the block deletion (all rows deleted at once)
+	s.adjustAuditRowsOnDeleteBlock(row, blockSize, user)
 
 	s.AuditLog = append(s.AuditLog, AuditEntry{
 		Timestamp: time.Now(),
@@ -910,18 +1211,19 @@ func (s *Sheet) DeleteRowAt(rowStr, user string) bool {
 	})
 
 	s.mu.Unlock()
-	// Adjust script tags in cells for row deletion
-	s.adjustScriptTagsOnDeleteRow(row)
-	// Adjust OptionsRange references in cells for row deletion
-	s.adjustOptionsRangeOnDeleteRow(row)
+	// Adjust script tags in cells for block row deletion
+	s.adjustScriptTagsOnDeleteRowBlock(row, blockSize)
+	// Adjust OptionsRange references in cells for block row deletion
+	s.adjustOptionsRangeOnDeleteRowBlock(row, blockSize)
 	globalSheetManager.SaveSheet(s)
 	return true
 }
 
-// MoveRowBelow moves the row `fromRowStr` to be directly below `targetRowStr`.
-// It shifts the intervening rows accordingly and preserves cell contents and row heights.
+// MoveRowBelow moves the row `fromRowStr` and all its descendants to be directly below `targetRowStr`.
+// It shifts the intervening rows accordingly and preserves cell contents, row heights, and tree structure.
 // Returns true if a move occurred.
 func (s *Sheet) MoveRowBelow(fromRowStr, targetRowStr, user string) bool {
+	fmt.Println("MoveRowBelow")
 	// Parse integers
 	var fromRow, targetRow int
 	if _, err := fmt.Sscanf(fromRowStr, "%d", &fromRow); err != nil {
@@ -931,135 +1233,514 @@ func (s *Sheet) MoveRowBelow(fromRowStr, targetRowStr, user string) bool {
 		return false
 	}
 
-	destIndex := targetRow + 1
-	if destIndex == fromRow { // no-op
-		return false
-	}
-	if fromRow < destIndex {
-		destIndex-- // Adjust for removal before insertion
-	}
 	s.mu.Lock()
+	fmt.Println("MoveRowBelow2")
+	// Get all descendants of fromRow
+	descendants := s.getDescendants(fromRow)
+	// The block of rows to move: fromRow + descendants (should be contiguous)
+	blockRows := append([]int{fromRow}, descendants...)
+	slices.Sort(blockRows)
+	blockSize := len(blockRows)
+
+	// Determine the contiguous range of the block
+	blockStart := blockRows[0]
+	fmt.Println("MoveRowBelow3")
+	// Prevent moving if target is within the block
+	for _, br := range blockRows {
+		if targetRow == br {
+			s.mu.Unlock()
+			return false
+		}
+	}
+	fmt.Println("started")
+	// Determine destination: below target and all its descendants
+	targetLastDesc := s.getLastDescendantRow(targetRow)
+	destAfter := targetLastDesc
+
+	// Adjust destAfter if block is above target (row indices will shrink after removal)
+	if blockStart <= destAfter {
+		destAfter -= blockSize
+	}
+
 	// Prevent cutting a row containing locked cells
-	if rowMap, ok := s.Data[fromRowStr]; ok {
-		for _, cell := range rowMap {
-			if cell.Locked {
-				s.mu.Unlock()
-				return false
+	for _, br := range blockRows {
+		if rowMap, ok := s.Data[itoa(br)]; ok {
+			for _, cell := range rowMap {
+				if cell.Locked {
+					s.mu.Unlock()
+					return false
+				}
 			}
 		}
 	}
-	// Snapshot cells for affected range
-	start := fromRow
-	end := destIndex
-	if start > end {
-		start, end = end, start
+
+	// Snapshot the block's data, heights, and parent info
+	type rowSnapshot struct {
+		data     map[string]Cell
+		height   int
+		hasH     bool
+		parentOf int // relative parent within block (-1 if external or none)
+	}
+	snapshots := make([]rowSnapshot, blockSize)
+	blockSet := make(map[int]int) // row -> index in blockRows
+	for i, r := range blockRows {
+		blockSet[r] = i
 	}
 
-	cellsByRowBefore := make(map[int]map[string]Cell)
-	for r := start; r <= end; r++ {
-		rowKey := itoa(r)
-		if m, ok := s.Data[rowKey]; ok {
-			clone := make(map[string]Cell, len(m))
+	for i, r := range blockRows {
+		rKey := itoa(r)
+		snap := rowSnapshot{}
+		if m, ok := s.Data[rKey]; ok {
+			snap.data = make(map[string]Cell, len(m))
 			for c, cell := range m {
-				clone[c] = cell
+				snap.data[c] = cell
 			}
-			cellsByRowBefore[r] = clone
 		} else {
-			cellsByRowBefore[r] = make(map[string]Cell)
+			snap.data = make(map[string]Cell)
 		}
+		if h, ok := s.RowHeights[rKey]; ok {
+			snap.height = h
+			snap.hasH = true
+		}
+		// Store parent info relative to block
+		if parentVal, ok := s.RowParents[rKey]; ok && parentVal > 0 {
+			if _, inBlock := blockSet[parentVal]; inBlock {
+				snap.parentOf = parentVal // will be remapped later
+			} else {
+				snap.parentOf = -1 // external parent, will be re-set
+			}
+		} else {
+			snap.parentOf = 0 // root
+		}
+		snapshots[i] = snap
 	}
+	fmt.Println("prepared snap")
+	// Remove block rows from data, heights, parents (from highest to lowest)
+	for i := blockSize - 1; i >= 0; i-- {
+		r := blockRows[i]
+		rKey := itoa(r)
+		delete(s.Data, rKey)
+		delete(s.RowHeights, rKey)
+		delete(s.RowParents, rKey)
 
-	savedRowCells := cellsByRowBefore[fromRow]
-
-	// Helper to clear a row
-	clearRow := func(row int) {
-		rowKey := itoa(row)
-		delete(s.Data, rowKey)
-	}
-
-	// Perform shifts
-	if fromRow < destIndex {
-		// Move down: shift [fromRow+1..destIndex] up by 1
-		for k := fromRow + 1; k <= destIndex; k++ {
-			target := k - 1
-			clearRow(target)
-			fromMap := cellsByRowBefore[k]
-			if len(fromMap) > 0 {
-				s.Data[itoa(target)] = make(map[string]Cell, len(fromMap))
-				for col, cell := range fromMap {
-					s.Data[itoa(target)][col] = cell
+		// Shift rows above this one down
+		maxRow := 0
+		for rowKey := range s.Data {
+			var rv int
+			if _, err := fmt.Sscanf(rowKey, "%d", &rv); err == nil {
+				if rv > maxRow {
+					maxRow = rv
 				}
 			}
 		}
-		// Place saved row at destIndex
-		clearRow(destIndex)
-		if len(savedRowCells) > 0 {
-			s.Data[itoa(destIndex)] = make(map[string]Cell, len(savedRowCells))
-			for col, cell := range savedRowCells {
-				s.Data[itoa(destIndex)][col] = cell
+		for rv := r + 1; rv <= maxRow+1; rv++ {
+			fromKey := itoa(rv)
+			toKey := itoa(rv - 1)
+			if rowData, ok := s.Data[fromKey]; ok {
+				delete(s.Data, fromKey)
+				s.Data[toKey] = rowData
+			} else {
+				delete(s.Data, toKey)
 			}
 		}
-	} else {
-		// Move up: shift [destIndex..fromRow-1] down by 1
-		for k := fromRow - 1; k >= destIndex; k-- {
-			target := k + 1
-			clearRow(target)
-			fromMap := cellsByRowBefore[k]
-			if len(fromMap) > 0 {
-				s.Data[itoa(target)] = make(map[string]Cell, len(fromMap))
-				for col, cell := range fromMap {
-					s.Data[itoa(target)][col] = cell
+		// Shift heights
+		maxHeightRow := 0
+		for rowKey := range s.RowHeights {
+			var rv int
+			if _, err := fmt.Sscanf(rowKey, "%d", &rv); err == nil {
+				if rv > maxHeightRow {
+					maxHeightRow = rv
 				}
 			}
 		}
-		// Place saved row at destIndex
-		clearRow(destIndex)
-		if len(savedRowCells) > 0 {
-			s.Data[itoa(destIndex)] = make(map[string]Cell, len(savedRowCells))
-			for col, cell := range savedRowCells {
-				s.Data[itoa(destIndex)][col] = cell
+		for rv := r + 1; rv <= maxHeightRow+1; rv++ {
+			fromKey := itoa(rv)
+			toKey := itoa(rv - 1)
+			if h, ok := s.RowHeights[fromKey]; ok {
+				delete(s.RowHeights, fromKey)
+				s.RowHeights[toKey] = h
+			} else {
+				delete(s.RowHeights, toKey)
 			}
+		}
+		// Shift parents
+		s.adjustRowParentsOnDelete(r)
+	}
+	fmt.Println("adjusted blocks after delete")
+	// Now insert the block after destAfter
+	insertStart := destAfter + 1
+	// Make room by shifting rows down
+	for i := 0; i < blockSize; i++ {
+		insertAt := insertStart + i
+		// Shift all rows >= insertAt down by 1
+		maxRow := 0
+		for rowKey := range s.Data {
+			var rv int
+			if _, err := fmt.Sscanf(rowKey, "%d", &rv); err == nil {
+				if rv > maxRow {
+					maxRow = rv
+				}
+			}
+		}
+		for rv := maxRow; rv >= insertAt; rv-- {
+			fromKey := itoa(rv)
+			toKey := itoa(rv + 1)
+			if rowData, ok := s.Data[fromKey]; ok {
+				delete(s.Data, fromKey)
+				s.Data[toKey] = rowData
+			} else {
+				delete(s.Data, toKey)
+			}
+		}
+		maxHeightRow := 0
+		for rowKey := range s.RowHeights {
+			var rv int
+			if _, err := fmt.Sscanf(rowKey, "%d", &rv); err == nil {
+				if rv > maxHeightRow {
+					maxHeightRow = rv
+				}
+			}
+		}
+		for rv := maxHeightRow; rv >= insertAt; rv-- {
+			fromKey := itoa(rv)
+			toKey := itoa(rv + 1)
+			if h, ok := s.RowHeights[fromKey]; ok {
+				delete(s.RowHeights, fromKey)
+				s.RowHeights[toKey] = h
+			} else {
+				delete(s.RowHeights, toKey)
+			}
+		}
+		s.adjustRowParentsOnInsert(insertAt)
+	}
+	fmt.Println("adjusted blocks after insert")
+	// Place block data at new positions
+	for i, snap := range snapshots {
+		newRow := insertStart + i
+		newKey := itoa(newRow)
+		if len(snap.data) > 0 {
+			s.Data[newKey] = snap.data
+		}
+		if snap.hasH {
+			s.RowHeights[newKey] = snap.height
 		}
 	}
 
-	// Update RowHeights
-	if s.RowHeights == nil {
-		s.RowHeights = make(map[string]int)
+	// Compute the adjusted target row position after block removal.
+	// After removing blockSize rows, if the block was above the target, the target shifts down.
+	adjustedTargetRow := targetRow
+	if blockStart <= targetRow {
+		adjustedTargetRow = targetRow - blockSize
 	}
-	newHeights := make(map[string]int, len(s.RowHeights))
-	for k, v := range s.RowHeights {
-		newHeights[k] = v
+	////////////////
+	if adjustedTargetRow >= insertStart {
+		adjustedTargetRow += blockSize
 	}
-	if fromRow < destIndex {
-		for k := fromRow + 1; k <= destIndex; k++ {
-			newHeights[itoa(k-1)] = s.RowHeights[itoa(k)]
+
+	// Rebuild parent references for the moved block
+	if s.RowParents == nil {
+		s.RowParents = make(map[string]int)
+	}
+	for i, snap := range snapshots {
+		newRow := insertStart + i
+		newKey := itoa(newRow)
+		if snap.parentOf == 0 {
+			// Was root - stays root (no parent entry)
+			delete(s.RowParents, newKey)
+		} else if snap.parentOf == -1 {
+			// Had external parent - becomes sibling of target
+			if parentVal, ok := s.RowParents[itoa(adjustedTargetRow)]; ok && parentVal > 0 {
+				s.RowParents[newKey] = parentVal
+			} else {
+				delete(s.RowParents, newKey)
+			}
+		} else {
+			// Had parent within the block - remap to new position
+			oldParent := snap.parentOf
+			// Find the index of oldParent in original blockRows
+			if idx, ok := blockSet[oldParent]; ok {
+				s.RowParents[newKey] = insertStart + idx
+			}
 		}
-		newHeights[itoa(destIndex)] = s.RowHeights[itoa(fromRow)]
+	}
+	// The first row of the block (fromRow) inherits target's parent (same level as target)
+	firstNewKey := itoa(insertStart)
+	if parentVal, ok := s.RowParents[itoa(adjustedTargetRow)]; ok && parentVal > 0 {
+		s.RowParents[firstNewKey] = parentVal
 	} else {
-		for k := fromRow - 1; k >= destIndex; k-- {
-			newHeights[itoa(k+1)] = s.RowHeights[itoa(k)]
-		}
-		newHeights[itoa(destIndex)] = s.RowHeights[itoa(fromRow)]
+		delete(s.RowParents, firstNewKey)
 	}
-	s.RowHeights = newHeights
-	// Adjust audit log rows according to move mapping
-	s.adjustAuditRowsOnMove(fromRow, destIndex)
+	fmt.Println("rebuild parent references")
+	// Adjust audit row references for the block move
+	s.adjustAuditRowsOnMoveBlock(fromRow, blockSize, insertStart, user)
 	// Audit entry
 	s.AuditLog = append(s.AuditLog, AuditEntry{
 		Timestamp: time.Now(),
 		User:      user,
 		Action:    "MOVE_ROW",
 		Row1:      fromRow,
-		Row2:      destIndex,
+		Row2:      insertStart,
+	})
+	// Release struct lock before adjusting script tags & options, which take their own locks
+	s.mu.Unlock()
+
+	// Adjust script tags and OptionsRange references to reflect block row move
+	s.adjustScriptTagsOnMoveRowBlock(fromRow, blockSize, insertStart)
+	s.adjustOptionsRangeOnMoveRowBlock(fromRow, blockSize, insertStart)
+
+	// Save after external adjustments
+	globalSheetManager.SaveSheet(s)
+	return true
+}
+
+// MoveRowAsChild moves the row `fromRowStr` and all its descendants to be inserted as a child
+// of `targetRowStr` (placed after target's last descendant). The moved row becomes a direct child
+// of the target row. Returns true if a move occurred.
+func (s *Sheet) MoveRowAsChild(fromRowStr, targetRowStr, user string) bool {
+	fmt.Println("MoveRowAsChild")
+	var fromRow, targetRow int
+	if _, err := fmt.Sscanf(fromRowStr, "%d", &fromRow); err != nil {
+		return false
+	}
+	if _, err := fmt.Sscanf(targetRowStr, "%d", &targetRow); err != nil {
+		return false
+	}
+
+	s.mu.Lock()
+
+	// Get all descendants of fromRow
+	descendants := s.getDescendants(fromRow)
+	blockRows := append([]int{fromRow}, descendants...)
+	slices.Sort(blockRows)
+	blockSize := len(blockRows)
+
+	blockStart := blockRows[0]
+
+	// Prevent moving if target is within the block
+	for _, br := range blockRows {
+		if targetRow == br {
+			s.mu.Unlock()
+			return false
+		}
+	}
+
+	// Determine destination: after target's last descendant
+	targetLastDesc := s.getLastDescendantRow(targetRow)
+	destAfter := targetLastDesc
+
+	if blockStart <= destAfter {
+		destAfter -= blockSize
+	}
+
+	// Prevent cutting a row containing locked cells
+	for _, br := range blockRows {
+		if rowMap, ok := s.Data[itoa(br)]; ok {
+			for _, cell := range rowMap {
+				if cell.Locked {
+					s.mu.Unlock()
+					return false
+				}
+			}
+		}
+	}
+
+	// Snapshot the block's data, heights, and parent info
+	type rowSnapshot struct {
+		data     map[string]Cell
+		height   int
+		hasH     bool
+		parentOf int
+	}
+	snapshots := make([]rowSnapshot, blockSize)
+	blockSet := make(map[int]int)
+	for i, r := range blockRows {
+		blockSet[r] = i
+	}
+
+	for i, r := range blockRows {
+		rKey := itoa(r)
+		snap := rowSnapshot{}
+		if m, ok := s.Data[rKey]; ok {
+			snap.data = make(map[string]Cell, len(m))
+			for c, cell := range m {
+				snap.data[c] = cell
+			}
+		} else {
+			snap.data = make(map[string]Cell)
+		}
+		if h, ok := s.RowHeights[rKey]; ok {
+			snap.height = h
+			snap.hasH = true
+		}
+		if parentVal, ok := s.RowParents[rKey]; ok && parentVal > 0 {
+			if _, inBlock := blockSet[parentVal]; inBlock {
+				snap.parentOf = parentVal
+			} else {
+				snap.parentOf = -1
+			}
+		} else {
+			snap.parentOf = 0
+		}
+		snapshots[i] = snap
+	}
+
+	// Remove block rows from data, heights, parents (from highest to lowest)
+	for i := blockSize - 1; i >= 0; i-- {
+		r := blockRows[i]
+		rKey := itoa(r)
+		delete(s.Data, rKey)
+		delete(s.RowHeights, rKey)
+		delete(s.RowParents, rKey)
+
+		maxRow := 0
+		for rowKey := range s.Data {
+			var rv int
+			if _, err := fmt.Sscanf(rowKey, "%d", &rv); err == nil {
+				if rv > maxRow {
+					maxRow = rv
+				}
+			}
+		}
+		for rv := r + 1; rv <= maxRow+1; rv++ {
+			fromKey := itoa(rv)
+			toKey := itoa(rv - 1)
+			if rowData, ok := s.Data[fromKey]; ok {
+				delete(s.Data, fromKey)
+				s.Data[toKey] = rowData
+			} else {
+				delete(s.Data, toKey)
+			}
+		}
+		maxHeightRow := 0
+		for rowKey := range s.RowHeights {
+			var rv int
+			if _, err := fmt.Sscanf(rowKey, "%d", &rv); err == nil {
+				if rv > maxHeightRow {
+					maxHeightRow = rv
+				}
+			}
+		}
+		for rv := r + 1; rv <= maxHeightRow+1; rv++ {
+			fromKey := itoa(rv)
+			toKey := itoa(rv - 1)
+			if h, ok := s.RowHeights[fromKey]; ok {
+				delete(s.RowHeights, fromKey)
+				s.RowHeights[toKey] = h
+			} else {
+				delete(s.RowHeights, toKey)
+			}
+		}
+		s.adjustRowParentsOnDelete(r)
+	}
+
+	// Insert the block after destAfter
+	insertStart := destAfter + 1
+	for i := 0; i < blockSize; i++ {
+		insertAt := insertStart + i
+		maxRow := 0
+		for rowKey := range s.Data {
+			var rv int
+			if _, err := fmt.Sscanf(rowKey, "%d", &rv); err == nil {
+				if rv > maxRow {
+					maxRow = rv
+				}
+			}
+		}
+		for rv := maxRow; rv >= insertAt; rv-- {
+			fromKey := itoa(rv)
+			toKey := itoa(rv + 1)
+			if rowData, ok := s.Data[fromKey]; ok {
+				delete(s.Data, fromKey)
+				s.Data[toKey] = rowData
+			} else {
+				delete(s.Data, toKey)
+			}
+		}
+		maxHeightRow := 0
+		for rowKey := range s.RowHeights {
+			var rv int
+			if _, err := fmt.Sscanf(rowKey, "%d", &rv); err == nil {
+				if rv > maxHeightRow {
+					maxHeightRow = rv
+				}
+			}
+		}
+		for rv := maxHeightRow; rv >= insertAt; rv-- {
+			fromKey := itoa(rv)
+			toKey := itoa(rv + 1)
+			if h, ok := s.RowHeights[fromKey]; ok {
+				delete(s.RowHeights, fromKey)
+				s.RowHeights[toKey] = h
+			} else {
+				delete(s.RowHeights, toKey)
+			}
+		}
+		s.adjustRowParentsOnInsert(insertAt)
+	}
+
+	// Place block data at new positions
+	for i, snap := range snapshots {
+		newRow := insertStart + i
+		newKey := itoa(newRow)
+		if len(snap.data) > 0 {
+			s.Data[newKey] = snap.data
+		}
+		if snap.hasH {
+			s.RowHeights[newKey] = snap.height
+		}
+	}
+
+	// Compute adjusted target row position
+	adjustedTargetRow := targetRow
+	if blockStart <= targetRow {
+		adjustedTargetRow = targetRow - blockSize
+	}
+	///////////////
+	if adjustedTargetRow >= insertStart {
+		adjustedTargetRow += blockSize
+	}
+
+	// Rebuild parent references for the moved block
+	if s.RowParents == nil {
+		s.RowParents = make(map[string]int)
+	}
+	for i, snap := range snapshots {
+		newRow := insertStart + i
+		newKey := itoa(newRow)
+		if snap.parentOf == 0 || snap.parentOf == -1 {
+			// External or root parent - becomes child of target
+			// (will be overridden for first row below)
+			delete(s.RowParents, newKey)
+		} else {
+			// Had parent within the block - remap to new position
+			oldParent := snap.parentOf
+			if idx, ok := blockSet[oldParent]; ok {
+				s.RowParents[newKey] = insertStart + idx
+			}
+		}
+	}
+	// The first row of the block becomes a child of the target row
+	firstNewKey := itoa(insertStart)
+	s.RowParents[firstNewKey] = adjustedTargetRow
+
+	// Audit entry
+	// Adjust audit row references for the block move
+	s.adjustAuditRowsOnMoveBlock(fromRow, blockSize, insertStart, user)
+	// Audit entry
+	s.AuditLog = append(s.AuditLog, AuditEntry{
+		Timestamp: time.Now(),
+		User:      user,
+		Action:    "MOVE_ROW_AS_CHILD",
+		Row1:      fromRow,
+		Row2:      insertStart,
 	})
 	s.mu.Unlock()
 
-	// Adjust script tags in cells for row move
-	s.adjustScriptTagsOnMoveRow(fromRow, destIndex)
-	// Adjust OptionsRange references in cells for row move
-	s.adjustOptionsRangeOnMoveRow(fromRow, destIndex)
+	// Adjust script tags and OptionsRange references to reflect block row move
+	s.adjustScriptTagsOnMoveRowBlock(fromRow, blockSize, insertStart)
+	s.adjustOptionsRangeOnMoveRowBlock(fromRow, blockSize, insertStart)
 
-	// Save after unlock
+	// Save after external adjustments
 	globalSheetManager.SaveSheet(s)
 	return true
 }
@@ -1343,6 +2024,9 @@ func (s *Sheet) InsertColumnRight(targetColStr, user string) bool {
 	s.adjustOptionsRangeOnInsertCol(insertIdx)
 	// If the target column contains cells locked by a script span, re-run those scripts
 
+	type scriptLoc struct{ row, col string }
+	var scriptLocs []scriptLoc
+	s.mu.RLock()
 	lockedIDs := []string{}
 	for _, rowMap := range s.Data {
 		if cell, ok := rowMap[targetColStr]; ok {
@@ -1351,7 +2035,6 @@ func (s *Sheet) InsertColumnRight(targetColStr, user string) bool {
 				if id != "" {
 					index := slices.Index(lockedIDs, id)
 					if index == -1 {
-
 						lockedIDs = append(lockedIDs, id)
 					}
 				}
@@ -1361,7 +2044,6 @@ func (s *Sheet) InsertColumnRight(targetColStr, user string) bool {
 
 	for _, id := range lockedIDs {
 		startRow, startCol := "", ""
-		//fmt.Printf("Locked ID: %s\n", id)
 		for rKey, cols := range s.Data {
 			for cKey, c := range cols {
 				if strings.TrimSpace(c.CellID) == id {
@@ -1375,8 +2057,13 @@ func (s *Sheet) InsertColumnRight(targetColStr, user string) bool {
 			}
 		}
 		if startRow != "" && startCol != "" {
-			ExecuteCellScriptonChange(s.ProjectName, s.Name, startRow, startCol)
+			scriptLocs = append(scriptLocs, scriptLoc{startRow, startCol})
 		}
+	}
+	s.mu.RUnlock()
+
+	for _, loc := range scriptLocs {
+		ExecuteCellScriptonChange(s.ProjectName, s.Name, loc.row, loc.col)
 	}
 	globalSheetManager.SaveSheet(s)
 	return true
@@ -1598,6 +2285,8 @@ func computeAuditDetails(s *Sheet, e AuditEntry) string {
 		return fmt.Sprintf("Unlocked cell %d,%s", e.Row1, e.Col1)
 	case "INSERT_ROW":
 		return fmt.Sprintf("Inserted row %d", e.Row1)
+	case "INSERT_CHILD_ROW":
+		return fmt.Sprintf("Inserted child row %d under row %d", e.Row1, e.Row2)
 	case "DELETE_ROW":
 		return fmt.Sprintf("Deleted row %d", e.Row1)
 	case "MOVE_ROW":
@@ -1646,6 +2335,10 @@ func (s *Sheet) SnapshotForClient() *Sheet {
 	for k, v := range s.RowHeights {
 		rowHeightsCopy[k] = v
 	}
+	rowParentsCopy := make(map[string]int, len(s.RowParents))
+	for k, v := range s.RowParents {
+		rowParentsCopy[k] = v
+	}
 	auditCopy := make([]AuditEntry, 0, len(s.AuditLog))
 	for _, e := range s.AuditLog {
 		e2 := e
@@ -1662,6 +2355,7 @@ func (s *Sheet) SnapshotForClient() *Sheet {
 		Permissions: Permissions{Editors: append([]string(nil), s.Permissions.Editors...)},
 		ColWidths:   colWidthsCopy,
 		RowHeights:  rowHeightsCopy,
+		RowParents:  rowParentsCopy,
 	}
 	return snap
 }
@@ -1760,6 +2454,69 @@ func (s *Sheet) adjustAuditRowsOnDelete(deleteRow int) {
 		}
 		_ = oldRow // details left empty; no string rewrite
 	}
+}
+
+// adjustAuditRowsOnMoveBlock adjusts row references in audit entries for a block move.
+// blockStart is the original first row of the block, blockSize is the number of rows,
+// and insertStart is the first row position where the block was inserted.
+// A new audit entry is appended to record the block move.
+func (s *Sheet) adjustAuditRowsOnMoveBlock(blockStart, blockSize, insertStart int, user string) {
+	blockEnd := blockStart + blockSize - 1
+	for i := range s.AuditLog {
+		e := &s.AuditLog[i]
+		ensureEntryCoords(e)
+		if e.Row1 == 0 {
+			continue
+		}
+		if e.Row1 >= blockStart && e.Row1 <= blockEnd {
+			e.Row1 = insertStart + (e.Row1 - blockStart)
+		} else if blockStart < insertStart {
+			if e.Row1 > blockEnd && e.Row1 < insertStart+blockSize {
+				e.Row1 -= blockSize
+			}
+		} else if blockStart > insertStart {
+			if e.Row1 >= insertStart && e.Row1 < blockStart {
+				e.Row1 += blockSize
+			}
+		}
+	}
+	s.AuditLog = append(s.AuditLog, AuditEntry{
+		Timestamp: time.Now(),
+		User:      user,
+		Action:    "AUDIT_ADJUST_MOVE_BLOCK",
+		Details:   fmt.Sprintf("Adjusted audit rows for block move: rows %d-%d moved to %d-%d", blockStart, blockEnd, insertStart, insertStart+blockSize-1),
+		Row1:      blockStart,
+		Row2:      insertStart,
+	})
+}
+
+// adjustAuditRowsOnDeleteBlock adjusts row references in audit entries for a block delete.
+// blockStart is the first row deleted and blockSize is the number of contiguous rows deleted.
+// Entries referencing deleted rows are left with their row unchanged; entries above the block shift down by blockSize.
+// A new audit entry is appended to record the block deletion adjustment.
+func (s *Sheet) adjustAuditRowsOnDeleteBlock(blockStart, blockSize int, user string) {
+	blockEnd := blockStart + blockSize - 1
+	for i := range s.AuditLog {
+		e := &s.AuditLog[i]
+		ensureEntryCoords(e)
+		if e.Row1 == 0 {
+			continue
+		}
+		if e.Row1 >= blockStart && e.Row1 <= blockEnd {
+			// Row was deleted - leave as is (references a now-deleted row)
+			continue
+		}
+		if e.Row1 > blockEnd {
+			e.Row1 -= blockSize
+		}
+	}
+	s.AuditLog = append(s.AuditLog, AuditEntry{
+		Timestamp: time.Now(),
+		User:      user,
+		Action:    "AUDIT_ADJUST_DELETE_BLOCK",
+		Details:   fmt.Sprintf("Adjusted audit rows for block delete: rows %d-%d deleted", blockStart, blockEnd),
+		Row1:      blockStart,
+	})
 }
 
 // adjustAuditColsOnDelete decrements column references for entries strictly right of deleted column
