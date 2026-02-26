@@ -38,7 +38,6 @@ export default function Sheet() {
     const [editors, setEditors] = useState([]);
     // Tree structure: row -> parent row number (0 means root)
     const [rowParents, setRowParents] = useState({});
-    const [isTreeViewOpen, setIsTreeViewOpen] = useState(false);
 
     // UI and editing state
     const [connected, setConnected] = useState(false);
@@ -1940,15 +1939,13 @@ export default function Sheet() {
     const deleteRow = (rowLabel) => {
         if (isFilterActive) return;
         const desc = getDescendants(rowLabel);
-        // Check if row and all descendants are empty
         const allRows = [Number(rowLabel), ...desc];
         const nonEmptyRows = allRows.filter(r => !isRowEmpty(r));
         if (nonEmptyRows.length > 0) {
-            alert(`Cannot delete: row(s) ${nonEmptyRows.join(', ')} are not empty.`);
-            return;
-        }
-        if (desc.length > 0) {
-            if (!confirm(`This will also delete ${desc.length} descendant row(s): ${desc.join(', ')}. Continue?`)) return;
+            const descendantMsg = desc.length > 0 ? ` and ${desc.length} descendant row(s) (${desc.join(', ')})` : '';
+            if (!window.confirm(`Row ${rowLabel}${descendantMsg} contains data. All content will be permanently deleted. Continue?`)) return;
+        } else if (desc.length > 0) {
+            if (!window.confirm(`This will also delete ${desc.length} descendant row(s): ${desc.join(', ')}. Continue?`)) return;
         }
         if (canEdit && ws.current && ws.current.readyState === WebSocket.OPEN) {
             const payload = { row: String(rowLabel), user: username };
@@ -1961,7 +1958,9 @@ export default function Sheet() {
 
     const deleteColumn = (colLabel) => {
         if (isFilterActive) return;
-        if (!isColEmpty(colLabel)) { alert('Cannot delete: column is not empty.'); return; }
+        if (!isColEmpty(colLabel)) {
+            if (!window.confirm(`Column ${colLabel} contains data. All content will be permanently deleted. Continue?`)) return;
+        }
         if (canEdit && ws.current && ws.current.readyState === WebSocket.OPEN) {
             const payload = { col: String(colLabel), user: username };
             ws.current.send(JSON.stringify({ type: 'DELETE_COL', sheet_name: id, payload }));
@@ -2191,13 +2190,7 @@ export default function Sheet() {
                         >
                             <MessageSquare className="me-1" />Chat
                         </button>
-                        <button
-                            onClick={() => setIsTreeViewOpen(prev => !prev)}
-                            className={`btn btn-outline-primary btn-sm d-flex align-items-center ${isTreeViewOpen ? 'active' : ''}`}
-                            title="Toggle tree view panel"
-                        >
-                            🌳 Tree
-                        </button>
+
                     </span>
                     <div className="d-flex align-items-center ms-auto">
                         <span className="navbar-text me-4 d-flex align-items-center">
@@ -2995,8 +2988,8 @@ export default function Sheet() {
                                                         <button
                                                             type="button"
                                                             className="btn btn-xs btn-light"
-                                                            disabled={isFilterActive || !isColEmpty(h)}
-                                                            title={isFilterActive ? 'Disabled while filters are active' : (!isColEmpty(h) ? `Cannot delete: column ${h} is not empty` : `Delete empty column ${h}`)}
+                                                            disabled={isFilterActive}
+                                                            title={isFilterActive ? 'Disabled while filters are active' : `Delete column ${h}`}
                                                             onClick={() => deleteColumn(h)}
                                                             style={{ padding: '0 4px', fontSize: '10px' }}
                                                         >
@@ -3696,137 +3689,6 @@ export default function Sheet() {
                         </div>
 
                         {/* Chat panel (fixed bottom-right) */}
-
-                        {/* Tree View Panel (fixed right side) */}
-                        {isTreeViewOpen && (
-                        <div style={{ position: 'fixed', right: 16, top: 130, width: 280, maxHeight: 'calc(100vh - 200px)', zIndex: 1050, overflowY: 'auto' }}>
-                            <div className="card shadow-sm">
-                                <div className="card-header py-2 d-flex align-items-center justify-content-between" style={{ backgroundColor: '#f0fdf4' }}>
-                                    <span className="fw-semibold small d-flex align-items-center">🌳 Tree View</span>
-                                    <button
-                                        type="button"
-                                        className="btn-close btn-close-sm"
-                                        onClick={() => setIsTreeViewOpen(false)}
-                                        aria-label="Close"
-                                    ></button>
-                                </div>
-                                <div className="card-body p-2" style={{ maxHeight: 'calc(100vh - 260px)', overflowY: 'auto', fontSize: '12px' }}>
-                                    {(() => {
-                                        // Build tree for visible rows only
-                                        const visibleSet = new Set(displayedRowHeaders.map(Number));
-                                        
-                                        // Build tree structure from rowParents
-                                        const buildTreeNodes = (parentRow, depth) => {
-                                            const children = [];
-                                            for (const [r, parent] of Object.entries(rowParents)) {
-                                                if (parent === parentRow && visibleSet.has(Number(r))) {
-                                                    children.push(Number(r));
-                                                }
-                                            }
-                                            children.sort((a, b) => a - b);
-                                            return children.map((row) => {
-                                                const firstColValue = data[`${row}-A`]?.value || '';
-                                                const secondColValue = data[`${row}-B`]?.value || '';
-                                                const label = firstColValue || secondColValue || `Row ${row}`;
-                                                const grandChildren = buildTreeNodes(row, depth + 1);
-                                                return (
-                                                    <div key={row} style={{ marginLeft: `${depth * 14}px`, marginBottom: '2px' }}>
-                                                        <div
-                                                            style={{
-                                                                display: 'flex',
-                                                                alignItems: 'center',
-                                                                padding: '2px 4px',
-                                                                borderRadius: '3px',
-                                                                cursor: 'pointer',
-                                                                backgroundColor: focusedCell.row === row ? '#dbeafe' : 'transparent',
-                                                                transition: 'background-color 0.15s',
-                                                            }}
-                                                            onClick={() => {
-                                                                setFocusedCell({ row: row, col: 'A' });
-                                                                // Scroll to bring this row into view
-                                                                const rowIdx = filteredRowHeaders.indexOf(row);
-                                                                if (rowIdx !== -1 && rowIdx >= freezeRowsCount) {
-                                                                    setRowStart(Math.max(freezeRowsCount, Math.min(rowIdx, filteredRowHeaders.length - nonFrozenVisibleRowsCount + 1)));
-                                                                }
-                                                            }}
-                                                            onMouseEnter={(e) => e.currentTarget.style.backgroundColor = focusedCell.row === row ? '#dbeafe' : '#f3f4f6'}
-                                                            onMouseLeave={(e) => e.currentTarget.style.backgroundColor = focusedCell.row === row ? '#dbeafe' : 'transparent'}
-                                                            title={`Row ${row}: ${label}`}
-                                                        >
-                                                            {grandChildren.length > 0 ? (
-                                                                <span style={{ marginRight: '4px', fontSize: '10px', color: '#6b7280' }}>▼</span>
-                                                            ) : (
-                                                                <span style={{ marginRight: '4px', fontSize: '10px', color: '#d1d5db' }}>•</span>
-                                                            )}
-                                                            <span style={{ fontWeight: grandChildren.length > 0 ? '600' : '400', color: '#374151' }}>
-                                                                <span style={{ color: '#9ca3af', fontSize: '10px', marginRight: '4px' }}>{row}</span>
-                                                                {label.length > 22 ? label.substring(0, 22) + '…' : label}
-                                                            </span>
-                                                        </div>
-                                                        {grandChildren}
-                                                    </div>
-                                                );
-                                            });
-                                        };
-
-                                        // Root rows: visible rows that have no parent or parent is 0
-                                        const rootRows = displayedRowHeaders.filter(r => {
-                                            const parent = rowParents[String(r)];
-                                            return !parent || parent === 0;
-                                        }).map(Number).sort((a, b) => a - b);
-
-                                        const treeContent = rootRows.map(row => {
-                                            const firstColValue = data[`${row}-A`]?.value || '';
-                                            const secondColValue = data[`${row}-B`]?.value || '';
-                                            const label = firstColValue || secondColValue || `Row ${row}`;
-                                            const children = buildTreeNodes(row, 1);
-                                            return (
-                                                <div key={row} style={{ marginBottom: '2px' }}>
-                                                    <div
-                                                        style={{
-                                                            display: 'flex',
-                                                            alignItems: 'center',
-                                                            padding: '2px 4px',
-                                                            borderRadius: '3px',
-                                                            cursor: 'pointer',
-                                                            backgroundColor: focusedCell.row === row ? '#dbeafe' : 'transparent',
-                                                            transition: 'background-color 0.15s',
-                                                        }}
-                                                        onClick={() => {
-                                                            setFocusedCell({ row: row, col: 'A' });
-                                                            const rowIdx = filteredRowHeaders.indexOf(row);
-                                                            if (rowIdx !== -1 && rowIdx >= freezeRowsCount) {
-                                                                setRowStart(Math.max(freezeRowsCount, Math.min(rowIdx, filteredRowHeaders.length - nonFrozenVisibleRowsCount + 1)));
-                                                            }
-                                                        }}
-                                                        onMouseEnter={(e) => e.currentTarget.style.backgroundColor = focusedCell.row === row ? '#dbeafe' : '#f3f4f6'}
-                                                        onMouseLeave={(e) => e.currentTarget.style.backgroundColor = focusedCell.row === row ? '#dbeafe' : 'transparent'}
-                                                        title={`Row ${row}: ${label}`}
-                                                    >
-                                                        {children.length > 0 ? (
-                                                            <span style={{ marginRight: '4px', fontSize: '10px', color: '#6b7280' }}>▼</span>
-                                                        ) : (
-                                                            <span style={{ marginRight: '4px', fontSize: '10px', color: '#d1d5db' }}>•</span>
-                                                        )}
-                                                        <span style={{ fontWeight: children.length > 0 ? '600' : '400', color: '#1f2937' }}>
-                                                            <span style={{ color: '#9ca3af', fontSize: '10px', marginRight: '4px' }}>{row}</span>
-                                                            {label.length > 22 ? label.substring(0, 22) + '…' : label}
-                                                        </span>
-                                                    </div>
-                                                    {children}
-                                                </div>
-                                            );
-                                        });
-
-                                        if (treeContent.length === 0) {
-                                            return <div className="text-muted text-center py-2">No tree structure defined.<br/>Use 🔽 button on row labels to add child rows.</div>;
-                                        }
-                                        return treeContent;
-                                    })()}
-                                </div>
-                            </div>
-                        </div>
-                        )}
 
                         {isChatOpen && (
                         <div style={{ position: 'fixed', right: 16, bottom: 16, width: 360, zIndex: 1100 }}>
