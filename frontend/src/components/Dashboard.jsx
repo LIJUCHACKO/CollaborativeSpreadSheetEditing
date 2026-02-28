@@ -37,6 +37,7 @@ export default function Dashboard() {
     // Sheets and UI state
     const [sheets, setSheets] = useState([]);
     const [newSheetName, setNewSheetName] = useState('');
+    const [newSheetType, setNewSheetType] = useState('datasheet'); // 'datasheet' or 'document'
     const [isCreating, setIsCreating] = useState(true);
     const [searchQuery, setSearchQuery] = useState('');
     const [editingSheetId, setEditingSheetId] = useState(null);
@@ -186,7 +187,9 @@ export default function Dashboard() {
         if (!newSheetName.trim()) return;
         try {
             const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
-            const body = currentPath ? { name: newSheetName, user: username, project_name: currentPath } : { name: newSheetName, user: username };
+            const body = currentPath
+                ? { name: newSheetName, user: username, project_name: currentPath, sheet_type: newSheetType }
+                : { name: newSheetName, user: username, sheet_type: newSheetType };
             const res = await authenticatedFetch(`http://${host}:8082/api/sheets`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -195,10 +198,12 @@ export default function Dashboard() {
             if (res.ok) {
                 const sheet = await res.json();
                 setNewSheetName('');
+                setNewSheetType('datasheet');
                 setIsCreating(false);
                 fetchSheets();
                 const path = currentPath;
-                navigate(path ? `/sheet/${sheet.name}?project=${encodeURIComponent(path)}` : `/sheet/${sheet.name}`);
+                const route = newSheetType === 'document' ? 'document' : 'sheet';
+                navigate(path ? `/${route}/${sheet.name}?project=${encodeURIComponent(path)}` : `/${route}/${sheet.name}`);
             } else if (res.status === 401) {
                 clearAuth();
                 alert('Your session has expired. Please log in again.');
@@ -753,13 +758,39 @@ export default function Dashboard() {
                                     className="w-full px-4 py-2 bg-gray-50 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 transition-all"
                                     autoFocus
                                 />
-                            
+                            <div className="d-flex align-items-center gap-2 mt-2">
+                                <label className="form-label mb-0 text-sm">Type:</label>
+                                <div className="d-flex gap-3">
+                                    <label className="d-flex align-items-center gap-1 small" style={{ cursor: 'pointer' }}>
+                                        <input
+                                            type="radio"
+                                            name="sheetType"
+                                            value="datasheet"
+                                            checked={newSheetType === 'datasheet'}
+                                            onChange={() => setNewSheetType('datasheet')}
+                                        />
+                                        <span>📊 DataSheet</span>
+                                        <span className="text-muted ms-1" style={{ fontSize: '0.75rem' }}>(flat, no hierarchy)</span>
+                                    </label>
+                                    <label className="d-flex align-items-center gap-1 small" style={{ cursor: 'pointer' }}>
+                                        <input
+                                            type="radio"
+                                            name="sheetType"
+                                            value="document"
+                                            checked={newSheetType === 'document'}
+                                            onChange={() => setNewSheetType('document')}
+                                        />
+                                        <span>📄 Document</span>
+                                        <span className="text-muted ms-1" style={{ fontSize: '0.75rem' }}>(with row hierarchy)</span>
+                                    </label>
+                                </div>
+                            </div>
                             <button
                                 type="submit"
-                                className="px-6 py-2 text-black font-medium rounded-full shadow-md transition-all hover:opacity-90 border-0 focus:outline-none"
+                                className="px-6 py-2 text-black font-medium rounded-full shadow-md transition-all hover:opacity-90 border-0 focus:outline-none mt-2"
                                 style={{ backgroundColor: 'skyblue' }}
                             >
-                                Create
+                                Create {newSheetType === 'document' ? 'Document' : 'DataSheet'}
                             </button>
                             </div>
                         </form>
@@ -791,15 +822,19 @@ export default function Dashboard() {
                             {/* give grey background to header */}
                             <tr style={{background: 'lightgray'}}>
                                 <th scope="col">Sheet Name</th>
+                                <th scope="col">Type</th>
                                 <th scope="col">Owner Name</th>
                                 <th scope="col" className="text-end">Actions</th>
                             </tr>
                         </thead>
                         <tbody>
-                            {displayedSheets.map((sheet) => (
+                            {displayedSheets.map((sheet) => {
+                                const sheetRoute = sheet.sheet_type === 'document' ? 'document' : 'sheet';
+                                const sheetUrl = project ? `/${sheetRoute}/${sheet.name}?project=${encodeURIComponent(project)}` : `/${sheetRoute}/${sheet.name}`;
+                                return (
                                 <React.Fragment key={sheet.name}>
                                 <tr style={{ cursor: 'pointer' }}>
-                                    <td onClick={() => !editingSheetId &&  window.open(project ? `/sheet/${sheet.name}?project=${encodeURIComponent(project)}` : `/sheet/${sheet.name}`)}>
+                                    <td onClick={() => !editingSheetId && window.open(sheetUrl)}>
                                         {editingSheetId === sheet.name ? (
                                             <input
                                                 type="text"
@@ -820,7 +855,13 @@ export default function Dashboard() {
                                             sheet.name
                                         )}
                                     </td>
-                                    <td onClick={() => !editingSheetId &&  window.open(project ? `/sheet/${sheet.name}?project=${encodeURIComponent(project)}` : `/sheet/${sheet.name}`)}>{sheet.owner}</td>
+                                    <td onClick={() => !editingSheetId && window.open(sheetUrl)}>
+                                        {sheet.sheet_type === 'document'
+                                            ? <span className="badge" style={{ backgroundColor: '#d4edda', color: '#155724' }}>📄 Document</span>
+                                            : <span className="badge" style={{ backgroundColor: '#cce5ff', color: '#004085' }}>📊 DataSheet</span>
+                                        }
+                                    </td>
+                                    <td onClick={() => !editingSheetId && window.open(sheetUrl)}>{sheet.owner}</td>
                                     <td className="text-end">
                                         {editingSheetId === sheet.name ? (
                                             <>
@@ -866,10 +907,11 @@ export default function Dashboard() {
                                     </td>
                                 </tr>
                                 </React.Fragment>
-                            ))}
+                                );
+                            })}
                             {displayedSheets.length === 0 && (
                                 <tr>
-                                    <td colSpan="3" className="text-center text-muted py-4">No sheets found.</td>
+                                    <td colSpan="4" className="text-center text-muted py-4">No sheets found.</td>
                                 </tr>
                             )}
                         </tbody>

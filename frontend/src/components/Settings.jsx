@@ -143,7 +143,7 @@ export default function Settings() {
     <div className="min-h-screen bg-gray-50 flex flex-col font-sans text-gray-900">
       <nav className="navbar navbar-expand-lg navbar-light" style={{ backgroundColor: 'skyblue' }}>
         <div className="container-fluid">
-          <button onClick={() => navigate(project ? `/sheet/${id}?project=${encodeURIComponent(project)}` : `/sheet/${id}`)} className="btn btn-outline-primary btn-sm d-flex align-items-center">
+          <button onClick={() => navigate(project ? `/${sheet?.sheet_type === 'document' ? 'document' : 'sheet'}/${id}?project=${encodeURIComponent(project)}` : `/${sheet?.sheet_type === 'document' ? 'document' : 'sheet'}/${id}`)} className="btn btn-outline-primary btn-sm d-flex align-items-center">
             <ArrowLeft className="me-1" />
           </button>
           <span className="navbar-text ms-2 d-flex align-items-center fw-bold">

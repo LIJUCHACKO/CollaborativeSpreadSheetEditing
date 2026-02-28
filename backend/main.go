@@ -338,7 +338,7 @@ func main() {
 				continue
 			}
 			// Create a new sheet in project with same name
-			newSheet := globalSheetManager.CreateSheet(wbSheetName, username, project)
+			newSheet := globalSheetManager.CreateSheet(wbSheetName, username, project, "datasheet")
 			// Populate data
 			newSheet.mu.Lock()
 			if newSheet.Data == nil {
@@ -865,6 +865,7 @@ func main() {
 				Name        string `json:"name"`
 				User        string `json:"user"`
 				ProjectName string `json:"project_name"`
+				SheetType   string `json:"sheet_type"` // "datasheet" or "document"
 			}
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
@@ -897,7 +898,7 @@ func main() {
 				}
 			}
 			// Use authenticated username instead of client-provided user
-			sheet := globalSheetManager.CreateSheet(req.Name, username, req.ProjectName)
+			sheet := globalSheetManager.CreateSheet(req.Name, username, req.ProjectName, req.SheetType)
 			// Project-level audit: sheet creation
 			globalProjectAuditManager.Append(req.ProjectName, username, "CREATE_SHEET", "Created sheet '"+sheet.Name+"'")
 			json.NewEncoder(w).Encode(sheet)

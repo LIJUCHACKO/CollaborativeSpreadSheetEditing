@@ -1745,57 +1745,122 @@ func updateOptionsForDependentCells(projectName, sheetName, row, col string) {
 			extractedOptions := sheet.extractOptionsFromRange(optionsRange)
 
 			if len(extractedOptions) > 0 {
-				sheet.mu.Lock()
-				cell = sheet.Data[dep.row][dep.col]
-				oldOptions := cell.Options
-				cell.Options = extractedOptions
+				depRowInt := -1
+				if dr, err := strconv.Atoi(dep.row); err == nil {
+					depRowInt = dr
+				}
+				if sheet.SheetType == "document" && depRowInt == 2 {
+					// Document sheet: propagate new options to all  the rows in the same column on the basis options in row 2.
 
-				// Update value based on OptionsSelected
-				if cell.CellType == ComboBoxCell {
-					// For combo box, set value from the selected option
-					if len(cell.OptionsSelected) > 0 && cell.OptionsSelected[0] < len(cell.Options) {
-						cell.Value = cell.Options[cell.OptionsSelected[0]]
-					} else {
-						// If OptionsSelected is invalid or empty, clear the value
-						cell.Value = ""
-						cell.OptionsSelected = nil
-					}
-				} else if cell.CellType == MultipleSelectionCell {
-					// For multiple selection, concatenate selected values with semicolon
-					var selectedValues []string
-					validIndices := []int{}
-					for _, idx := range cell.OptionsSelected {
-						if idx < len(cell.Options) {
-							selectedValues = append(selectedValues, cell.Options[idx])
-							validIndices = append(validIndices, idx)
+					for targetRow := range sheet.Data {
+						if targetRow == "1" {
+							continue
+						}
+						sheet.mu.Lock()
+						if sheet.Data[targetRow] == nil {
+							sheet.mu.Unlock()
+							continue
+						}
+						row2Cell := sheet.Data["2"][dep.col]
+						targetCell := sheet.Data[targetRow][dep.col]
+						oldOptions := targetCell.Options
+						targetCell.Options = extractedOptions
+
+						// Update value based on OptionsSelected
+						if row2Cell.CellType == ComboBoxCell {
+							if len(targetCell.OptionsSelected) > 0 && targetCell.OptionsSelected[0] < len(row2Cell.Options) {
+								targetCell.Value = row2Cell.Options[targetCell.OptionsSelected[0]]
+							} else {
+								targetCell.Value = ""
+								targetCell.OptionsSelected = nil
+							}
+						} else if row2Cell.CellType == MultipleSelectionCell {
+							var selectedValues []string
+							validIndices := []int{}
+							for _, idx := range targetCell.OptionsSelected {
+								if idx < len(row2Cell.Options) {
+									selectedValues = append(selectedValues, row2Cell.Options[idx])
+									validIndices = append(validIndices, idx)
+								}
+							}
+							targetCell.Value = strings.Join(selectedValues, "; ")
+							targetCell.OptionsSelected = validIndices
+						}
+
+						sheet.Data[targetRow][dep.col] = targetCell
+						sheet.mu.Unlock()
+
+						modified = true
+
+						optionsChanged := len(oldOptions) != len(extractedOptions)
+						if !optionsChanged {
+							for i := range oldOptions {
+								if oldOptions[i] != extractedOptions[i] {
+									optionsChanged = true
+									break
+								}
+							}
+						}
+						if optionsChanged {
+							globalSheetManager.CellsModifiedByScriptQueueMu.Lock()
+							globalSheetManager.CellsModifiedByScriptQueue = append(globalSheetManager.CellsModifiedByScriptQueue, CellIdentifier{dep.ProjectName, dep.sheetName, targetRow, dep.col})
+							globalSheetManager.CellsModifiedByScriptQueueMu.Unlock()
 						}
 					}
-					cell.Value = strings.Join(selectedValues, "; ")
-					cell.OptionsSelected = validIndices
-				}
+				} else {
+					// Original behaviour for non-document sheets (or document rows other than 2).
+					sheet.mu.Lock()
+					cell = sheet.Data[dep.row][dep.col]
+					oldOptions := cell.Options
+					cell.Options = extractedOptions
 
-				sheet.Data[dep.row][dep.col] = cell
-				sheet.mu.Unlock()
+					// Update value based on OptionsSelected
+					if cell.CellType == ComboBoxCell {
+						// For combo box, set value from the selected option
+						if len(cell.OptionsSelected) > 0 && cell.OptionsSelected[0] < len(cell.Options) {
+							cell.Value = cell.Options[cell.OptionsSelected[0]]
+						} else {
+							// If OptionsSelected is invalid or empty, clear the value
+							cell.Value = ""
+							cell.OptionsSelected = nil
+						}
+					} else if cell.CellType == MultipleSelectionCell {
+						// For multiple selection, concatenate selected values with semicolon
+						var selectedValues []string
+						validIndices := []int{}
+						for _, idx := range cell.OptionsSelected {
+							if idx < len(cell.Options) {
+								selectedValues = append(selectedValues, cell.Options[idx])
+								validIndices = append(validIndices, idx)
+							}
+						}
+						cell.Value = strings.Join(selectedValues, "; ")
+						cell.OptionsSelected = validIndices
+					}
 
-				modified = true
+					sheet.Data[dep.row][dep.col] = cell
+					sheet.mu.Unlock()
 
-				// Check if options actually changed
-				optionsChanged := len(oldOptions) != len(extractedOptions)
-				if !optionsChanged {
-					for i := range oldOptions {
-						if oldOptions[i] != extractedOptions[i] {
-							optionsChanged = true
-							break
+					modified = true
+
+					// Check if options actually changed
+					optionsChanged := len(oldOptions) != len(extractedOptions)
+					if !optionsChanged {
+						for i := range oldOptions {
+							if oldOptions[i] != extractedOptions[i] {
+								optionsChanged = true
+								break
+							}
 						}
 					}
-				}
 
-				// If options changed, we may need to re-execute dependent scripts
-				if optionsChanged {
-					// Queue this cell for script execution if it has dependent scripts
-					globalSheetManager.CellsModifiedByScriptQueueMu.Lock()
-					globalSheetManager.CellsModifiedByScriptQueue = append(globalSheetManager.CellsModifiedByScriptQueue, CellIdentifier{dep.ProjectName, dep.sheetName, dep.row, dep.col})
-					globalSheetManager.CellsModifiedByScriptQueueMu.Unlock()
+					// If options changed, we may need to re-execute dependent scripts
+					if optionsChanged {
+						// Queue this cell for script execution if it has dependent scripts
+						globalSheetManager.CellsModifiedByScriptQueueMu.Lock()
+						globalSheetManager.CellsModifiedByScriptQueue = append(globalSheetManager.CellsModifiedByScriptQueue, CellIdentifier{dep.ProjectName, dep.sheetName, dep.row, dep.col})
+						globalSheetManager.CellsModifiedByScriptQueueMu.Unlock()
+					}
 				}
 			}
 		}

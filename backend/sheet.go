@@ -101,7 +101,8 @@ type Sheet struct {
 	Name        string                     `json:"name"`
 	Owner       string                     `json:"owner"`
 	ProjectName string                     `json:"project_name,omitempty"`
-	Data        map[string]map[string]Cell `json:"data"` // Row -> Col -> Cell
+	SheetType   string                     `json:"sheet_type,omitempty"` // "datasheet" or "document". Default is "datasheet".
+	Data        map[string]map[string]Cell `json:"data"`                 // Row -> Col -> Cell
 	AuditLog    []AuditEntry               `json:"audit_log"`
 	Permissions Permissions                `json:"permissions"`
 	ColWidths   map[string]int             `json:"col_widths,omitempty"`
@@ -275,14 +276,19 @@ func sheetKey(project, id string) string {
 	return project + "::" + id
 }
 
-func (sm *SheetManager) CreateSheet(name, owner, projectName string) *Sheet {
+func (sm *SheetManager) CreateSheet(name, owner, projectName, sheetType string) *Sheet {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+
+	if sheetType == "" {
+		sheetType = "datasheet"
+	}
 
 	sheet := &Sheet{
 		Name:        name,
 		Owner:       owner,
 		ProjectName: projectName,
+		SheetType:   sheetType,
 		Data:        make(map[string]map[string]Cell),
 		ColWidths:   make(map[string]int),
 		RowHeights:  make(map[string]int),
