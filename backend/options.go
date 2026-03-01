@@ -142,7 +142,7 @@ func (s *Sheet) SetCellType(row, col string, cellType int, options []string, opt
 
 	current := s.Data[row][col]
 	oldOptions := append([]string(nil), current.Options...)
-	oldSelected := append([]int(nil), current.OptionsSelected...)
+
 	s.mu.Unlock()
 	// If optionsRange is provided, extract options from the specified range
 	if optionsRange != "" {
@@ -175,35 +175,77 @@ func (s *Sheet) SetCellType(row, col string, cellType int, options []string, opt
 	}
 
 	if optionsChanged && (cellType == ComboBoxCell || cellType == MultipleSelectionCell) {
-		if cellType == ComboBoxCell {
-			if len(oldSelected) > 0 {
-				idx := oldSelected[0]
-				if idx >= 0 && idx < len(options) {
-					current.Value = options[idx]
-					current.OptionsSelected = []int{idx}
+		if s.SheetType == "document" {
+			for targetRow := range s.Data {
+				if targetRow == "1" {
+					continue
+				}
+				if s.Data[targetRow] == nil {
+					s.mu.Unlock()
+					continue
+				}
+				cell := s.Data[targetRow][col]
+				oldSelected := append([]int(nil), cell.OptionsSelected...)
+				if cellType == ComboBoxCell {
+					if len(oldSelected) > 0 {
+						idx := oldSelected[0]
+						if idx >= 0 && idx < len(options) {
+							cell.Value = options[idx]
+							cell.OptionsSelected = []int{idx}
+						} else {
+							cell.Value = ""
+							cell.OptionsSelected = nil
+						}
+					} else {
+						cell.Value = ""
+						cell.OptionsSelected = nil
+					}
+				} else if cellType == MultipleSelectionCell {
+					var selectedValues []string
+					var validIdx []int
+					for _, idx := range oldSelected {
+						if idx >= 0 && idx < len(options) {
+							selectedValues = append(selectedValues, options[idx])
+							validIdx = append(validIdx, idx)
+						}
+					}
+					cell.Value = strings.Join(selectedValues, "; ")
+					cell.OptionsSelected = validIdx
+				}
+				s.Data[targetRow][col] = cell
+
+			}
+		} else {
+			oldSelected := append([]int(nil), current.OptionsSelected...)
+			if cellType == ComboBoxCell {
+				if len(oldSelected) > 0 {
+					idx := oldSelected[0]
+					if idx >= 0 && idx < len(options) {
+						current.Value = options[idx]
+						current.OptionsSelected = []int{idx}
+					} else {
+						current.Value = ""
+						current.OptionsSelected = nil
+					}
 				} else {
 					current.Value = ""
 					current.OptionsSelected = nil
 				}
-			} else {
-				current.Value = ""
-				current.OptionsSelected = nil
-			}
-		} else if cellType == MultipleSelectionCell {
-			var selectedValues []string
-			var validIdx []int
-			for _, idx := range oldSelected {
-				if idx >= 0 && idx < len(options) {
-					selectedValues = append(selectedValues, options[idx])
-					validIdx = append(validIdx, idx)
+			} else if cellType == MultipleSelectionCell {
+				var selectedValues []string
+				var validIdx []int
+				for _, idx := range oldSelected {
+					if idx >= 0 && idx < len(options) {
+						selectedValues = append(selectedValues, options[idx])
+						validIdx = append(validIdx, idx)
+					}
 				}
+				current.Value = strings.Join(selectedValues, "; ")
+				current.OptionsSelected = validIdx
 			}
-			current.Value = strings.Join(selectedValues, "; ")
-			current.OptionsSelected = validIdx
+			s.Data[row][col] = current
 		}
 	}
-
-	s.Data[row][col] = current
 
 	s.AuditLog = append(s.AuditLog, AuditEntry{
 		Timestamp:      time.Now(),
