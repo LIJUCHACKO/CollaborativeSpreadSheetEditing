@@ -16,12 +16,14 @@ import (
 )
 
 var addr = flag.String("addr", ":8082", "http service address")
+var pythonExecPath = flag.String("python", "python3", "path to Python executable")
 
 // Global hub instance for WebSocket connections
 var globalHub *Hub
 
 func main() {
 	flag.Parse()
+	initPython(*pythonExecPath)
 
 	// Initialize Hub
 	globalHub = newHub()
@@ -820,6 +822,85 @@ func main() {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"message": "sheet owner updated"})
+	})
+
+	// Returns JSON files in the given project directory that are empty or cannot be unmarshalled as a Sheet.
+	http.HandleFunc("/api/sheets/corrupted", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		token := r.Header.Get("Authorization")
+		if _, err := globalUserManager.ValidateToken(token); err != nil {
+			http.Error(w, "Unauthorized: "+err.Error(), http.StatusUnauthorized)
+			return
+		}
+		project := r.URL.Query().Get("project")
+		if project == "" {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode([]struct{}{})
+			return
+		}
+
+		type CorruptedFile struct {
+			Name    string `json:"name"`
+			Project string `json:"project"`
+			Reason  string `json:"reason"`
+		}
+		result := make([]CorruptedFile, 0)
+
+		skipFiles := map[string]bool{
+			"chat.json": true, "projects.json": true,
+			"users.json": true, "project_audit.log": true,
+		}
+
+		baseDir := filepath.Join(dataDir, project)
+		filepath.WalkDir(baseDir, func(path string, d os.DirEntry, walkErr error) error {
+			if walkErr != nil || d.IsDir() {
+				return nil
+			}
+			if filepath.Ext(path) != ".json" {
+				return nil
+			}
+			if skipFiles[filepath.Base(path)] {
+				return nil
+			}
+			// Only files directly in the target project dir (not sub-folders)
+			if filepath.Dir(path) != baseDir {
+				return nil
+			}
+			name := strings.TrimSuffix(d.Name(), ".json")
+			// Skip files that loaded successfully as a sheet
+			if globalSheetManager.GetSheetBy(name, project) != nil {
+				return nil
+			}
+			// Determine reason: empty or bad JSON
+			info, statErr := d.Info()
+			var reason string
+			if statErr == nil && info.Size() == 0 {
+				reason = "empty file"
+			} else {
+				data, readErr := os.ReadFile(path)
+				if readErr != nil {
+					reason = "unreadable"
+				} else {
+					var s Sheet
+					if jsonErr := json.Unmarshal(data, &s); jsonErr != nil {
+						reason = "invalid JSON: " + jsonErr.Error()
+					} else {
+						reason = "unknown"
+					}
+				}
+			}
+			result = append(result, CorruptedFile{Name: name, Project: project, Reason: reason})
+			return nil
+		})
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(result)
 	})
 
 	http.HandleFunc("/api/sheets", func(w http.ResponseWriter, r *http.Request) {

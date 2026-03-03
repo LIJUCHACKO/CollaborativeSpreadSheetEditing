@@ -4,58 +4,30 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os/exec"
 	"regexp"
 	"strings"
-	"sync"
 	"time"
-
-	"python-libs/data"
-
-	"github.com/kluctl/go-embed-python/embed_util"
-	"github.com/kluctl/go-embed-python/python"
 )
-
-func init() {
-	// Initialize embedded Python once at startup
-	if _, err := getEmbeddedPython(); err != nil {
-		log.Printf("Embedded Python init failed: %v", err)
-	}
-}
 
 var (
-	embeddedPy        *python.EmbeddedPython
-	embeddedPyOnce    sync.Once
-	embeddedPyInitErr error
+	pythonPath    string
+	pythonPathSet bool
 )
 
-// getEmbeddedPython initializes and returns a shared embedded Python interpreter.
-// It extracts the embedded Python distribution to a temp dir on first use.
-func getEmbeddedPython() (*python.EmbeddedPython, error) {
-	var initErr error
-	embeddedPyOnce.Do(func() {
-		ep, err := python.NewEmbeddedPython("shared-spreadsheet")
-		if err != nil {
-			initErr = err
-			embeddedPyInitErr = err
-			return
-		}
+// initPython sets the Python executable path to use for script execution.
+func initPython(path string) {
+	pythonPath = path
+	pythonPathSet = true
+	log.Printf("Python executable: %s", pythonPath)
+}
 
-		libFiles, err := embed_util.NewEmbeddedFiles(data.Data, "python-lib")
-
-		if err != nil {
-			initErr = err
-			embeddedPyInitErr = err
-			return
-		}
-		fmt.Println("Extracting embedded Python libraries to:", libFiles.GetExtractedPath())
-		ep.AddPythonPath(libFiles.GetExtractedPath())
-		embeddedPy = ep
-	})
-	if initErr != nil {
-		embeddedPyInitErr = initErr
-		return nil, initErr
+// pythonCmd returns an *exec.Cmd ready to run the given Python arguments.
+func pythonCmd(args ...string) (*exec.Cmd, error) {
+	if !pythonPathSet || pythonPath == "" {
+		return nil, fmt.Errorf("Python executable not configured (use -python flag)")
 	}
-	return embeddedPy, nil
+	return exec.Command(pythonPath, args...), nil
 }
 
 func (sm *SheetManager) initAsyncSaver() {

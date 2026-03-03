@@ -2915,33 +2915,7 @@ export default function Document() {
                                         className="bg-gray-50 border-b border-r border-gray-200 p-2 relative select-none"
                                         style={{ width: `${rowLabelWidth}px`, height: `${colHeaderHeight}px` }}
                                     >
-                                        <div className="inline-flex items-center gap-1">
-                                            <span>➕</span>
-                                            {connected && canEdit && (
-                                                <button
-                                                    type="button"
-                                                    className="btn btn-xs btn-light"
-                                                    disabled={isFilterActive}
-                                                    title={isFilterActive ? 'Disabled while filters are active' : 'Insert column to the left of A'}
-                                                    onClick={() => insertColumnLeftOfFirst()}
-                                                    style={{ padding: '0 4px', fontSize: '10px' }}
-                                                >
-                                                    <span role="img" aria-label="insert-col-right">➡️</span>
-                                                </button>
-                                            )}
-                                            {connected && canEdit && (
-                                                <button
-                                                    type="button"
-                                                    className="btn btn-xs btn-light"
-                                                    disabled={isFilterActive}
-                                                    title={isFilterActive ? 'Disabled while filters are active' : 'Insert row above first row'}
-                                                    onClick={() => insertRowAboveFirst()}
-                                                    style={{ padding: '0 4px', fontSize: '10px' }}
-                                                >
-                                                    <span role="img" aria-label="insert-row-below" >⬇️</span>
-                                                </button>
-                                            )}
-                                        </div>
+                                        
                                     </th>
                                     {displayedColHeaders.map(h => (
                                         <th
@@ -2954,8 +2928,8 @@ export default function Document() {
                                             <div className="flex items-center justify-center gap-1">
                                                 <span>{h}</span>
                                                 <div style={{ position: 'absolute', top: 2, left: 2, display: 'flex', gap: '4px', zIndex: 25 }}>
-                                                  
-                                                    {connected && canEdit && (
+                                                      
+                                                    {connected && canEdit && (colIndexMap[h] ?? -1) > 2 && (
                                                         <button
                                                             type="button"
                                                             className="btn btn-xs btn-light"
@@ -2967,7 +2941,7 @@ export default function Document() {
                                                             <span role="img" aria-label="insert-col">➕</span>
                                                         </button>
                                                     )}
-                                                    {connected && canEdit && (
+                                                    {connected && canEdit && (colIndexMap[h] ?? -1) > 3 && (
                                                         <button
                                                             type="button"
                                                             className="btn btn-xs btn-light"
@@ -2979,7 +2953,7 @@ export default function Document() {
                                                             <span role="img" aria-label="delete-col">🗑️</span>
                                                         </button>
                                                     )}
-                                                    { cutCol == null && connected && canEdit && (
+                                                    { cutCol == null && connected && canEdit && (colIndexMap[h] ?? -1) > 3 && (
                                                         <button
                                                             type="button"
                                                             className="btn btn-xs btn-light"
@@ -3117,7 +3091,7 @@ export default function Document() {
                                                         <span role="img" aria-label="insert-row">➕</span>
                                                     </button>
                                                 )}
-                                                {connected && canEdit && (
+                                                {connected && canEdit && rowLabel > 1 &&(
                                                     <button
                                                         type="button"
                                                         className="btn btn-xs btn-light"
@@ -3130,7 +3104,7 @@ export default function Document() {
                                                     </button>
                                                 )}
                                                
-                                                {connected && canEdit && (
+                                                {connected && canEdit && rowLabel > 1 && (
                                                     <button
                                                         type="button"
                                                         className="btn btn-xs btn-light"
@@ -3142,7 +3116,7 @@ export default function Document() {
                                                         <span role="img" aria-label="delete-row">🗑️</span>
                                                     </button>
                                                 )}
-                                                {cutRow === null && connected && canEdit &&(<button
+                                                {cutRow === null && connected && canEdit && rowLabel > 1 &&(<button
                                                     type="button"
                                                     className="btn btn-xs btn-light"
                                                     disabled={isFilterActive}

@@ -689,23 +689,6 @@ func ExecuteCellScript(projectName, sheetName, row, col string) {
 		return
 	}
 	// Execute the script and update the cell value
-	ep := embeddedPy
-	if ep == nil {
-		// Store init error in the cell value
-		cur := s.Data[row][col]
-		if embeddedPyInitErr != nil {
-			cur.Value = "Error: " + embeddedPyInitErr.Error()
-		} else {
-			cur.Value = "Error: Embedded Python not initialized"
-		}
-		cur.ScriptOutput_RowSpan = 1
-		cur.ScriptOutput_ColSpan = 1
-		s.mu.Lock()
-		s.Data[row][col] = cur
-		s.mu.Unlock()
-		globalSheetManager.SaveSheet(s)
-		return
-	}
 
 	// executing replaces the tags with values of the cells
 	//example
@@ -902,7 +885,7 @@ func ExecuteCellScript(projectName, sheetName, row, col string) {
 		return "[" + strings.Join(rows, ",") + "]"
 	})
 
-	cmd, err := ep.PythonCmd("-c", script)
+	cmd, err := pythonCmd("-c", script)
 	//fmt.Println("Executing script ", script)
 	if err != nil {
 		s.mu.Lock()

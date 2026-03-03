@@ -36,6 +36,7 @@ export default function Dashboard() {
 
     // Sheets and UI state
     const [sheets, setSheets] = useState([]);
+    const [corruptedSheets, setCorruptedSheets] = useState([]);
     const [newSheetName, setNewSheetName] = useState('');
     const [newSheetType, setNewSheetType] = useState('datasheet'); // 'datasheet' or 'document'
     const [isCreating, setIsCreating] = useState(true);
@@ -75,6 +76,7 @@ export default function Dashboard() {
         }
         setCurrentPath(project || '');
         fetchSheets(project || '');
+        if (project) fetchCorruptedSheets(project);
         if (project) fetchFolders(project);
         if (project) fetchProjectOwner(project);
 
@@ -115,6 +117,8 @@ export default function Dashboard() {
             if (res.ok) {
                 const data = await res.json();
                 setSheets(data || []);
+                // Refresh corrupted list whenever sheets are refreshed
+                if (path) fetchCorruptedSheets(path);
             } else if (res.status === 401) {
                 clearAuth();
                 alert('Your session has expired. Please log in again.');
@@ -122,6 +126,24 @@ export default function Dashboard() {
             }
         } catch (error) {
             console.error('Failed to fetch sheets', error);
+        }
+    };
+
+    const fetchCorruptedSheets = async (pathOverride) => {
+        try {
+            const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
+            const path = typeof pathOverride === 'string' ? pathOverride : currentPath;
+            if (!path) { setCorruptedSheets([]); return; }
+            const res = await authenticatedFetch(`http://${host}:8082/api/sheets/corrupted?project=${encodeURIComponent(path)}`);
+            if (res.ok) {
+                const data = await res.json();
+                setCorruptedSheets(Array.isArray(data) ? data : []);
+            } else {
+                setCorruptedSheets([]);
+            }
+        } catch (error) {
+            console.error('Failed to fetch corrupted sheets', error);
+            setCorruptedSheets([]);
         }
     };
 
@@ -909,11 +931,30 @@ export default function Dashboard() {
                                 </React.Fragment>
                                 );
                             })}
-                            {displayedSheets.length === 0 && (
+                            {displayedSheets.length === 0 && corruptedSheets.length === 0 && (
                                 <tr>
                                     <td colSpan="4" className="text-center text-muted py-4">No sheets found.</td>
                                 </tr>
                             )}
+                            {corruptedSheets
+                                .filter(cf => !searchQuery.trim() || cf.name.toLowerCase().includes(searchQuery.trim().toLowerCase()))
+                                .map((cf) => (
+                                <tr key={`corrupted-${cf.name}`} style={{ opacity: 0.85 }}>
+                                    <td>
+                                        <span style={{ color: 'red', fontWeight: 500 }} title={`Corrupted: ${cf.reason}`}>
+                                            ⚠ {cf.name}
+                                        </span>
+                                        <span className="ms-2 badge" style={{ backgroundColor: '#f8d7da', color: '#842029', fontSize: '0.7rem' }}>
+                                            corrupted
+                                        </span>
+                                    </td>
+                                    <td><span className="text-muted small">—</span></td>
+                                    <td><span className="text-muted small">—</span></td>
+                                    <td className="text-end">
+                                        <span className="text-danger small" title={cf.reason}>Cannot open</span>
+                                    </td>
+                                </tr>
+                            ))}
                         </tbody>
                     </table>
                 </div>
