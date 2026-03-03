@@ -299,6 +299,15 @@ func (sm *SheetManager) CreateSheet(name, owner, projectName, sheetType string) 
 		AuditLog: []AuditEntry{},
 	}
 
+	// For documents, pre-fill row 1 with default column headings
+	if sheetType == "document" {
+		sheet.Data["1"] = map[string]Cell{
+			"A": {Value: "Sr No.", User: owner, Bold: true},
+			"B": {Value: "Title", User: owner, Bold: true},
+			"C": {Value: "Content", User: owner, Bold: true},
+		}
+	}
+
 	// Initial Audit (details left empty for persistence)
 	sheet.AuditLog = append(sheet.AuditLog, AuditEntry{
 		Timestamp: time.Now(),

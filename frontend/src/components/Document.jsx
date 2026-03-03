@@ -663,6 +663,274 @@ export default function Document() {
         }
     };
 
+    // ── Markdown export ──────────────────────────────────────────────────────
+    const handleExportMarkdown = () => {
+        // Collect non-header data rows (skip frozen row 1)
+        // Build ordered list of rows from filteredRowHeaders (skip row 1 header)
+        const dataRows = ROW_HEADERS.filter(r => r > 1);
+
+        // Helper: get depth of a row (0 = root/top-level)
+        const getDepth = (row) => {
+            let depth = 0;
+            let current = Number(row);
+            const visited = new Set();
+            while (rowParents[String(current)] && rowParents[String(current)] > 0) {
+                if (visited.has(current)) break;
+                visited.add(current);
+                depth++;
+                current = rowParents[String(current)];
+            }
+            return depth;
+        };
+
+        const lines = [];
+        for (const r of dataRows) {
+            const titleCell = data[`${r}-B`];
+            const contentCell = data[`${r}-C`];
+            const title = (titleCell?.value ?? '').trim();
+            const content = (contentCell?.value ?? '').trim();
+            if (!title && !content) continue; // skip fully empty rows
+
+            const depth = getDepth(r);
+            const hashes = '#'.repeat(depth + 1); // depth 0 -> #, depth 1 -> ##, etc.
+
+            if (title) {
+                lines.push(`${hashes} ${title}`);
+            }
+            if (content) {
+                lines.push('');
+                lines.push(content);
+                lines.push('');
+            }
+        }
+
+        const mdText = lines.join('\n').replace(/\n{3,}/g, '\n\n').trim() + '\n';
+        const blob = new Blob([mdText], { type: 'text/markdown' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = (sheetName || 'document') + '.md';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+    };
+
+    // ── Markdown import ──────────────────────────────────────────────────────
+    const mdImportRef = useRef(null);
+
+    const handleImportMarkdown = (e) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+        // Reset so same file can be re-selected
+        e.target.value = '';
+
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+            const text = ev.target.result;
+            if (!text) return;
+
+            // Parse markdown into a flat list of sections
+            // Each section: { depth: 0-based, title: string, content: string }
+            const lines = text.split(/\r?\n/);
+            const sections = [];
+            let currentSection = null;
+            let contentLines = [];
+
+            const flushSection = () => {
+                if (currentSection !== null) {
+                    currentSection.content = contentLines.join('\n').trim();
+                    sections.push(currentSection);
+                    contentLines = [];
+                }
+            };
+
+            for (const line of lines) {
+                const headingMatch = line.match(/^(#{1,6})\s+(.+)/);
+                if (headingMatch) {
+                    flushSection();
+                    currentSection = {
+                        depth: headingMatch[1].length - 1, // # -> 0, ## -> 1, ...
+                        title: headingMatch[2].trim(),
+                        content: '',
+                    };
+                } else {
+                    if (currentSection !== null) {
+                        contentLines.push(line);
+                    }
+                }
+            }
+            flushSection();
+
+            if (sections.length === 0) {
+                alert('No headings found in the markdown file.');
+                return;
+            }
+
+            if (!window.confirm(
+                `Import ${sections.length} section(s) from "${file.name}"?\n` +
+                'This will append rows below the last used row.'
+            )) return;
+
+            if (!ws.current || ws.current.readyState !== WebSocket.OPEN) {
+                alert('Not connected. Please wait for connection and try again.');
+                return;
+            }
+
+            // Determine first free row (after all currently non-empty rows)
+            let lastUsedRow = 1; // row 1 is the header
+            for (const r of ROW_HEADERS) {
+                if (!isRowEmpty(r)) lastUsedRow = r;
+            }
+
+            // depthParentRow[d] = row number of the most recent heading at depth d
+            //   → used to resolve parent for child headings and as the
+            //     INSERT_ROW target when returning to a shallower depth.
+            const depthParentRow = {}; // depth -> row number
+
+            // previousDepth tracks the depth of the last inserted section so
+            // we can detect when the heading level goes shallower.
+            let previousDepth = -1;
+
+            // Global cursor: the very last inserted row
+            let cursor = lastUsedRow;
+
+            const sendOperations = async () => {
+                for (const section of sections) {
+                    // ── Choose insertion point ──────────────────────────
+                    // • Going DEEPER or SAME depth as previous heading:
+                    //   insert after the global cursor (the very last row
+                    //   created).  The backend's InsertRowBelow already
+                    //   places the new row after all descendants of the
+                    //   target, so this naturally appends.
+                    //
+                    // • Going SHALLOWER (fewer #'s than previous heading):
+                    //   we must insert after the last row at the SAME
+                    //   depth as the current section.  That row's
+                    //   descendants have all been created already, and
+                    //   InsertRowBelow will skip past them so the new
+                    //   sibling lands in the correct position.
+                    //   If no prior row exists at this depth, fall back
+                    //   to the cursor.
+                    let targetRow;
+                    if (previousDepth >= 0 && section.depth < previousDepth && depthParentRow[section.depth] !== undefined) {
+                        targetRow = depthParentRow[section.depth];
+                    } else {
+                        targetRow = cursor;
+                    }
+
+                    // 1. Insert a new row after targetRow
+                    //    Backend InsertRowBelow(targetRow) inserts after
+                    //    all descendants of targetRow and shifts rows.
+                    await new Promise(resolve => {
+                        ws.current.send(JSON.stringify({
+                            type: 'INSERT_ROW',
+                            sheet_name: id,
+                            payload: { targetRow: String(targetRow), user: username }
+                        }));
+                        setTimeout(resolve, 50);
+                    });
+
+                    // The backend inserted a row after all descendants of
+                    // targetRow.  We don't know the exact insertRow
+                    // (it depends on how many descendants targetRow has),
+                    // but we DO know every row >= insertRow got shifted +1.
+                    //
+                    // For rows stored in depthParentRow that are >=
+                    // (targetRow+1) we must bump them by 1 so our future
+                    // SET_ROW_PARENT calls reference the correct
+                    // (now-shifted) row numbers.
+                    //
+                    // The actual inserted row number: the backend computes
+                    // lastDescendant(targetRow)+1.  From our perspective,
+                    // if we targeted a row at the SAME depth whose
+                    // descendants were the deeper rows we already created,
+                    // then insertRow = (max row we've seen so far) + 1
+                    // = cursor + 1.  If we targeted the cursor itself
+                    // (going deeper or first insert), insertRow is also
+                    // cursor + 1 (cursor has no descendants yet).
+                    //
+                    // In both cases the new row lands at cursor+1.
+                    const insertRow = cursor + 1;
+                    const newRow = insertRow;
+
+                    // Shift all stored row references that are >= insertRow
+                    Object.keys(depthParentRow).forEach(d => {
+                        if (depthParentRow[d] >= insertRow) {
+                            depthParentRow[d] += 1;
+                        }
+                    });
+
+                    // Advance global cursor
+                    cursor = newRow;
+
+                    // 2. Set parent based on depth
+                    //    The backend's InsertRowBelow inherits the target
+                    //    row's parent automatically.  That is only correct
+                    //    when the new row is a sibling of the target.  In
+                    //    all other cases we must explicitly set the parent.
+                    //    For depth 0 (root) headings we send parentRow=0
+                    //    to clear any inherited parent.
+                    const parentRow = section.depth > 0
+                        ? (depthParentRow[section.depth - 1] ?? 0)
+                        : 0;
+
+                    // Always send SET_ROW_PARENT to ensure the correct
+                    // hierarchy, even for root rows (parentRow === 0)
+                    // which clears any inherited parent.
+                    await new Promise(resolve => {
+                        ws.current.send(JSON.stringify({
+                            type: 'SET_ROW_PARENT',
+                            sheet_name: id,
+                            payload: { row: String(newRow), parentRow, user: username }
+                        }));
+                        setTimeout(resolve, 30);
+                    });
+
+                    // 3. Set Title cell (column B)
+                    if (section.title) {
+                        await new Promise(resolve => {
+                            ws.current.send(JSON.stringify({
+                                type: 'UPDATE_CELL',
+                                sheet_name: id,
+                                payload: { row: String(newRow), col: 'B', value: section.title, user: username }
+                            }));
+                            setTimeout(resolve, 30);
+                        });
+                    }
+
+                    // 4. Set Content cell (column C)
+                    if (section.content) {
+                        await new Promise(resolve => {
+                            ws.current.send(JSON.stringify({
+                                type: 'UPDATE_CELL',
+                                sheet_name: id,
+                                payload: { row: String(newRow), col: 'C', value: section.content, user: username }
+                            }));
+                            setTimeout(resolve, 30);
+                        });
+                    }
+
+                    // Track this heading's row at its depth
+                    depthParentRow[section.depth] = newRow;
+                    // Invalidate deeper depths (belonged to a prior
+                    // sibling's subtree; no longer valid targets)
+                    Object.keys(depthParentRow).forEach(d => {
+                        if (Number(d) > section.depth) delete depthParentRow[d];
+                    });
+
+                    previousDepth = section.depth;
+                }
+            };
+
+            sendOperations().catch(err => {
+                console.error('Markdown import error:', err);
+                alert('An error occurred during import.');
+            });
+        };
+        reader.readAsText(file);
+    };
+
     // Handler to open cell type dialog
     const openCellTypeDialog = (row, col) => {
         // Close other popups first
@@ -2175,13 +2443,37 @@ export default function Document() {
                     <span className="navbar-text d-flex align-items-center fw-bold ">
                         <FileSpreadsheet className="me-2" />{sheetName}
                         <span className="mx-3">|</span>
-                        <button
-                            className="btn btn-outline-primary btn-sm d-flex align-items-center"
-                            onClick={handleDownloadXlsx}
-                            title="Download as XLSX"
-                        >
-                            <Download className="me-1" />Export
-                        </button>
+                        <div className="d-flex align-items-center gap-1">
+                            <button
+                                className="btn btn-outline-primary btn-sm d-flex align-items-center"
+                                onClick={handleDownloadXlsx}
+                                title="Export as XLSX"
+                            >
+                                <Download className="me-1" size={14} />XLSX
+                            </button>
+                            <button
+                                className="btn btn-outline-success btn-sm d-flex align-items-center"
+                                onClick={handleExportMarkdown}
+                                title="Export as Markdown"
+                            >
+                                <Download className="me-1" size={14} />MD
+                            </button>
+                            <button
+                                className="btn btn-outline-warning btn-sm d-flex align-items-center"
+                                onClick={() => canEdit && mdImportRef.current?.click()}
+                                title={canEdit ? 'Import from Markdown' : 'You must be an editor to import'}
+                                disabled={!canEdit}
+                            >
+                                <ArrowUp className="me-1" size={14} />Import MD
+                            </button>
+                            <input
+                                ref={mdImportRef}
+                                type="file"
+                                accept=".md,.markdown,text/markdown"
+                                style={{ display: 'none' }}
+                                onChange={handleImportMarkdown}
+                            />
+                        </div>
                         <button
                             onClick={() => navigate(projectName ? `/settings/${id}?project=${encodeURIComponent(projectName)}` : `/settings/${id}`)}
                             className="btn btn-outline-primary btn-sm d-flex align-items-center ms-2"
@@ -2941,7 +3233,7 @@ export default function Document() {
                                                             <span role="img" aria-label="insert-col">➕</span>
                                                         </button>
                                                     )}
-                                                    {connected && canEdit && (colIndexMap[h] ?? -1) > 3 && (
+                                                    {connected && canEdit && (colIndexMap[h] ?? -1) > 2 && (
                                                         <button
                                                             type="button"
                                                             className="btn btn-xs btn-light"
@@ -2953,7 +3245,7 @@ export default function Document() {
                                                             <span role="img" aria-label="delete-col">🗑️</span>
                                                         </button>
                                                     )}
-                                                    { cutCol == null && connected && canEdit && (colIndexMap[h] ?? -1) > 3 && (
+                                                    { cutCol == null && connected && canEdit && (colIndexMap[h] ?? -1) > 2 && (
                                                         <button
                                                             type="button"
                                                             className="btn btn-xs btn-light"
