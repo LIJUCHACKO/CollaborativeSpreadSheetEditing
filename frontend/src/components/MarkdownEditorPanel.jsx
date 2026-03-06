@@ -42,9 +42,24 @@ export default function MarkdownEditorPanel({ cellRow, cellCol, value, onSave, o
     const [isDragging, setIsDragging] = useState(false);
     const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
     const [position, setPosition] = useState({ x: null, y: null });
+    // Always holds the latest content so effects/cleanup can access it without stale closures
+    const contentRef = useRef(content);
+    useEffect(() => { contentRef.current = content; }, [content]);
 
     // Ensure MathJax CDN is loaded
     useEffect(() => { ensureMathJax(); }, []);
+
+    // Auto-save previous cell's content when the target cell changes
+    useEffect(() => {
+        // On every cell change (after the first mount), save the content that was
+        // being edited for the *previous* cell before switching to the new one.
+        return () => {
+            if (!readOnly) {
+                onSave(contentRef.current);
+            }
+        };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [cellRow, cellCol]);
 
     // Sync incoming value when cell changes
     useEffect(() => {
@@ -55,7 +70,7 @@ export default function MarkdownEditorPanel({ cellRow, cellCol, value, onSave, o
     useEffect(() => {
         if (position.x === null) {
             const vw = window.innerWidth;
-            const panelWidth = isMaximized ? vw * 0.8 : 520;
+            const panelWidth = isMaximized ? vw * 0.8 : 720;
             setPosition({
                 x: Math.max(16, vw - panelWidth - 32),
                 y: 80,
@@ -178,8 +193,8 @@ export default function MarkdownEditorPanel({ cellRow, cellCol, value, onSave, o
         }
     };
 
-    const panelWidth = isMaximized ? '80vw' : '520px';
-    const panelHeight = isMaximized ? '80vh' : '480px';
+    const panelWidth = isMaximized ? '80vw' : '620px';
+    const panelHeight = isMaximized ? '80vh' : '780px';
 
     return (
         <div
@@ -200,7 +215,7 @@ export default function MarkdownEditorPanel({ cellRow, cellCol, value, onSave, o
                 overflow: 'hidden',
                 resize: isMaximized ? 'none' : 'both',
                 minWidth: '380px',
-                minHeight: '320px',
+                minHeight: '480px',
             }}
             onMouseDown={(e) => e.stopPropagation()}
             onClick={(e) => e.stopPropagation()}
@@ -235,7 +250,7 @@ export default function MarkdownEditorPanel({ cellRow, cellCol, value, onSave, o
                     <button
                         className="btn btn-sm p-1"
                         style={{ color: 'white', background: 'transparent', border: 'none' }}
-                        onClick={onClose}
+                        onClick={() => { if (!readOnly) onSave(contentRef.current); onClose(); }}
                         title="Close"
                     >
                         <X size={16} />
@@ -360,6 +375,7 @@ export default function MarkdownEditorPanel({ cellRow, cellCol, value, onSave, o
             </div>
 
             {/* Footer */}
+            {/* discards changes on pressing cancel */}
             <div
                 className="d-flex align-items-center justify-content-between px-3 py-2 border-top"
                 style={{ background: '#f9fafb', flexShrink: 0 }}
@@ -370,7 +386,7 @@ export default function MarkdownEditorPanel({ cellRow, cellCol, value, onSave, o
                 <div className="d-flex gap-2">
                     <button
                         className="btn btn-sm btn-outline-secondary"
-                        onClick={onClose}
+                        onClick={() => { onClose(); }}
                     >
                         Cancel
                     </button>

@@ -19,7 +19,7 @@ import {
     Undo2,
     Redo2
 } from 'lucide-react';
-import { Lock, Code, ChevronDown } from 'lucide-react';
+import { Lock, Code, ChevronDown, ListOrdered } from 'lucide-react';
 import { isSessionValid, clearAuth, getUsername, authenticatedFetch, apiUrl } from '../utils/auth';
 import MarkdownEditorPanel from './MarkdownEditorPanel';
 import 'bootstrap/dist/css/bootstrap.min.css';
@@ -140,6 +140,12 @@ export default function Document() {
     const [mdPanelOpen, setMdPanelOpen] = useState(false);
     const [mdPanelCell, setMdPanelCell] = useState({ row: null, col: null });
     const [mdPanelReadOnly, setMdPanelReadOnly] = useState(false);
+
+    // Section numbering scheme for column A (starting from row 2)
+    // 'none' | '1.1.1' | 'I.A.1' | 'A.1.a'
+    const [sectionScheme, setSectionScheme] = useState('none');
+    // Ref to prevent infinite loops when auto-writing section numbers
+    const sectionApplyingRef = useRef(false);
 
     const colIndexMap = useMemo(() => {
         const map = {};
@@ -2183,6 +2189,146 @@ export default function Document() {
         return false;
     };
 
+    // ── Section Numbering Helpers ─────────────────────────────────────────
+    const toRoman = (num) => {
+        const vals = [1000,900,500,400,100,90,50,40,10,9,5,4,1];
+        const syms = ['M','CM','D','CD','C','XC','L','XL','X','IX','V','IV','I'];
+        let result = '';
+        for (let i = 0; i < vals.length; i++) {
+            while (num >= vals[i]) { result += syms[i]; num -= vals[i]; }
+        }
+        return result;
+    };
+
+    const toLowerAlpha = (num) => {
+        let result = '';
+        while (num > 0) { num--; result = String.fromCharCode(97 + (num % 26)) + result; num = Math.floor(num / 26); }
+        return result;
+    };
+
+    const toUpperAlpha = (num) => {
+        let result = '';
+        while (num > 0) { num--; result = String.fromCharCode(65 + (num % 26)) + result; num = Math.floor(num / 26); }
+        return result;
+    };
+
+    // Parse a scheme pattern like "1.1.1", "I.A.1", "A.1.a" into per-depth format tokens
+    // Tokens: '1'=numeric, 'I'=ROMAN, 'i'=roman, 'A'=UPPER-ALPHA, 'a'=lower-alpha
+    const parseSchemeParts = (scheme) => {
+        if (!scheme || scheme.trim() === '' || scheme.trim().toLowerCase() === 'none') return null;
+        return scheme.trim().split('.');
+    };
+
+    const formatSectionPart = (schemeParts, depth, counter) => {
+        const token = schemeParts ? (schemeParts[depth] ?? schemeParts[schemeParts.length - 1]) : '1';
+        if (token === 'I') return toRoman(counter);
+        if (token === 'i') return toRoman(counter).toLowerCase();
+        if (token === 'A') return toUpperAlpha(counter);
+        if (token === 'a') return toLowerAlpha(counter);
+        return String(counter); // '1' or anything else → numeric
+    };
+
+    // Compute section numbers based on tree hierarchy
+    const sectionNumbers = useMemo(() => {
+        const schemeParts = parseSchemeParts(sectionScheme);
+        if (!schemeParts) return {};
+
+        // Find the last row (>=2) that has content in any column other than A
+        let lastContentRow = 1;
+        for (const key of Object.keys(data)) {
+            const [rStr, col] = key.split('-');
+            const r = Number(rStr);
+            if (r < 2 || col === 'A' || col === COL_HEADERS[0]) continue;
+            const val = (data[key]?.value ?? '').toString().trim();
+            if (val.length > 0 && r > lastContentRow) lastContentRow = r;
+        }
+        if (lastContentRow < 2) return {};
+
+        // Build children map from rowParents
+        const childrenMap = {}; // parentRow -> [childRows] sorted
+        const allRows = ROW_HEADERS.filter(r => r >= 2 && r <= lastContentRow);
+        const rootRows = [];
+        for (const r of allRows) {
+            const parent = rowParents[String(r)];
+            if (!parent || parent === 0) {
+                rootRows.push(r);
+            } else {
+                if (!childrenMap[parent]) childrenMap[parent] = [];
+                childrenMap[parent].push(r);
+            }
+        }
+
+        const result = {};
+
+        // Recursive numbering
+        const assignNumbers = (rows, parentNumber, depth) => {
+            let counter = 0;
+            for (const r of rows) {
+                // Check if row has content in any column other than A
+                let hasContent = false;
+                for (let ci = 1; ci < COL_HEADERS.length; ci++) {
+                    const v = (data[`${r}-${COL_HEADERS[ci]}`]?.value ?? '').toString().trim();
+                    if (v.length > 0) { hasContent = true; break; }
+                }
+                if (!hasContent) continue;
+
+                counter++;
+                const part = formatSectionPart(schemeParts, depth, counter);
+                const sectionNo = parentNumber ? `${parentNumber}.${part}` : part;
+                result[r] = sectionNo;
+
+                // Process children
+                const children = (childrenMap[r] || []).sort((a, b) => a - b);
+                if (children.length > 0) {
+                    assignNumbers(children, sectionNo, depth + 1);
+                }
+            }
+        };
+
+        assignNumbers(rootRows, '', 0);
+        return result;
+    }, [sectionScheme, data, rowParents, ROW_HEADERS, COL_HEADERS]);
+
+    // Auto-apply section numbers to column A via WebSocket whenever they change
+    useEffect(() => {
+        if (!parseSchemeParts(sectionScheme)) return;
+        if (sectionApplyingRef.current) return;
+        if (!canEdit || !ws.current || ws.current.readyState !== WebSocket.OPEN) return;
+
+        // Find rows that need updating
+        const updates = [];
+        for (const [rowStr, sectionNo] of Object.entries(sectionNumbers)) {
+            const currentVal = (data[`${rowStr}-${COL_HEADERS[0]}`]?.value ?? '').toString();
+            if (currentVal !== sectionNo) {
+                updates.push({ row: rowStr, value: sectionNo });
+            }
+        }
+
+        if (updates.length === 0) return;
+
+        sectionApplyingRef.current = true;
+        // Batch-apply updates
+        for (const upd of updates) {
+            const msg = {
+                type: 'UPDATE_CELL',
+                sheet_name: id,
+                payload: { row: upd.row, col: COL_HEADERS[0], value: upd.value, user: username }
+            };
+            ws.current.send(JSON.stringify(msg));
+            // Also update local state
+            setData(prev => ({
+                ...prev,
+                [`${upd.row}-${COL_HEADERS[0]}`]: {
+                    ...(prev[`${upd.row}-${COL_HEADERS[0]}`] || {}),
+                    value: upd.value,
+                    user: username,
+                }
+            }));
+        }
+        // Reset flag after a short delay to allow state to settle
+        setTimeout(() => { sectionApplyingRef.current = false; }, 300);
+    }, [sectionNumbers, sectionScheme]);
+
     const insertColumnRight = (targetCol) => {
         if (isFilterActive) return;
         if (canEdit && ws.current && ws.current.readyState === WebSocket.OPEN) {
@@ -2636,6 +2782,18 @@ export default function Document() {
                                 />
                                 Show Scripts (read-only)
                             </label>
+                        </div>
+                        {/* Section Numbering scheme */}
+                        <div className="flex items-center gap-2 ml-4">
+                            <ListOrdered size={16} className="text-gray-500" />
+                            <input
+                                type="text"
+                                className="text-sm border border-gray-300 rounded px-2 py-1 bg-white w-24"
+                                value={sectionScheme}
+                                onChange={(e) => setSectionScheme(e.target.value)}
+                                placeholder="e.g. 1.1.1"
+                                title={`Section numbering scheme for column A (rows 2+).\nTokens per depth separated by dots:\n  1 = numeric (1,2,3)\n  I = ROMAN (I,II,III)\n  i = roman (i,ii,iii)\n  A = UPPER-ALPHA (A,B,C)\n  a = lower-alpha (a,b,c)\nExamples: 1.1.1  I.A.1  A.1.a  I.i.1\nLeave empty to disable.`}
+                            />
                         </div>
                         
                     </div>
@@ -3539,7 +3697,7 @@ export default function Document() {
 
                                                         data-row={rowLabel}
                                                         data-col={colLabel}
-                                                        readOnly={showScripts || !!cell.locked || !!cell.script || !canEdit}
+                                                        readOnly={showScripts || !!cell.locked || !!cell.script || !canEdit || (!!parseSchemeParts(sectionScheme) && colLabel === COL_HEADERS[0] && rowLabel >= 2)}
                                                         onFocus={() => {
                                                             setFocusedCell({ row: rowLabel, col: colLabel });
                                                             setIsEditing(false);
@@ -3987,7 +4145,7 @@ export default function Document() {
                                         };
                                         ws.current.send(JSON.stringify(msg));
                                     }
-                                    setMdPanelOpen(false);
+                                    
                                 }}
                                 onClose={() => setMdPanelOpen(false)}
                             />
