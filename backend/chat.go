@@ -16,7 +16,8 @@ type ChatMessage struct {
 	To          string          `json:"to,omitempty"` // "all" or specific username
 	SheetName   string          `json:"sheet_name,omitempty"`
 	ProjectName string          `json:"project_name,omitempty"`
-	ReadBy      map[string]bool `json:"read_by,omitempty"` // username -> true
+	SheetType   string          `json:"sheet_type,omitempty"` // "datasheet" or "document"
+	ReadBy      map[string]bool `json:"read_by,omitempty"`    // username -> true
 }
 
 type ChatManager struct {
@@ -77,7 +78,7 @@ func (cm *ChatManager) Save() {
 	}
 }
 
-func (cm *ChatManager) Append(user, text, to, sheetName, projectName string) ChatMessage {
+func (cm *ChatManager) Append(user, text, to, sheetName, projectName, sheetType string) ChatMessage {
 	cm.mu.Lock()
 	if to == "" {
 		to = "all"
@@ -89,6 +90,7 @@ func (cm *ChatManager) Append(user, text, to, sheetName, projectName string) Cha
 		To:          to,
 		SheetName:   sheetName,
 		ProjectName: projectName,
+		SheetType:   sheetType,
 		ReadBy:      make(map[string]bool),
 	}
 	// Mark as read by sender
@@ -138,4 +140,19 @@ func (cm *ChatManager) MarkAsRead(timestamp time.Time, user string) {
 			return
 		}
 	}
+}
+
+// DeleteMessagesForUser removes all messages that were sent by OR sent to the given user.
+func (cm *ChatManager) DeleteMessagesForUser(user string) {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	filtered := cm.messages[:0]
+	for _, m := range cm.messages {
+		// Keep the message only if the user is neither the sender nor the recipient
+		if m.User != user && m.To != user {
+			filtered = append(filtered, m)
+		}
+	}
+	cm.messages = filtered
+	go cm.Save()
 }
