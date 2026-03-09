@@ -41,9 +41,10 @@ const (
 type Cell struct {
 	Value string `json:"value,omitempty"`
 
-	User   string `json:"user,omitempty"` // Last edited by
-	CellID string `json:"cell_id,omitempty"`
-	Locked bool   `json:"locked,omitempty"`
+	User     string `json:"user,omitempty"`    // Last edited by
+	CellID   string `json:"cell_id,omitempty"` //is a unique id used internally by program to keep track of script dependencies
+	Locked   bool   `json:"locked,omitempty"`
+	CellName string `json:"cell_name,omitempty"` //user can use this name to refer to the cell instead of using ColumnNo and rowNo (C1, C2, etc.)
 
 	Background string `json:"background,omitempty"`
 	Bold       bool   `json:"bold,omitempty"`
@@ -98,17 +99,18 @@ type Permissions struct {
 }
 
 type Sheet struct {
-	Name        string                     `json:"name"`
-	Owner       string                     `json:"owner"`
-	ProjectName string                     `json:"project_name,omitempty"`
-	SheetType   string                     `json:"sheet_type,omitempty"` // "datasheet" or "document". Default is "datasheet".
-	Data        map[string]map[string]Cell `json:"data"`                 // Row -> Col -> Cell
-	AuditLog    []AuditEntry               `json:"audit_log"`
-	Permissions Permissions                `json:"permissions"`
-	ColWidths   map[string]int             `json:"col_widths,omitempty"`
-	RowHeights  map[string]int             `json:"row_heights,omitempty"`
-	RowParents  map[string]int             `json:"row_parents,omitempty"` // row (string) -> parent row number (int). 0 means root.
-	mu          sync.RWMutex
+	Name          string                     `json:"name"`
+	Owner         string                     `json:"owner"`
+	ProjectName   string                     `json:"project_name,omitempty"`
+	SheetType     string                     `json:"sheet_type,omitempty"` // "datasheet" or "document". Default is "datasheet".
+	Data          map[string]map[string]Cell `json:"data"`                 // Row -> Col -> Cell
+	AuditLog      []AuditEntry               `json:"audit_log"`
+	Permissions   Permissions                `json:"permissions"`
+	ColWidths     map[string]int             `json:"col_widths,omitempty"`
+	RowHeights    map[string]int             `json:"row_heights,omitempty"`
+	RowParents    map[string]int             `json:"row_parents,omitempty"`    // row (string) -> parent row number (int). 0 means root.
+	SectionScheme string                     `json:"section_scheme,omitempty"` // e.g. "1.1.1", "I.A.1", "A.1.a" or empty for none
+	mu            sync.RWMutex
 }
 
 // TransferOwnership updates the owner of the sheet and ensures
@@ -379,6 +381,7 @@ func (sm *SheetManager) CopySheetToProject(sourceID, sourceProject, targetProjec
 	for k, v := range src.RowParents {
 		copySheet.RowParents[k] = v
 	}
+	copySheet.SectionScheme = src.SectionScheme
 	src.mu.RUnlock()
 	// Register and persist
 	sm.sheets[sheetKey(targetProject, newName)] = copySheet
@@ -663,6 +666,13 @@ func (s *Sheet) SetRowHeight(row string, height int, user string) {
 
 	s.mu.Unlock()
 
+	globalSheetManager.SaveSheet(s)
+}
+
+func (s *Sheet) SetSectionScheme(scheme string) {
+	s.mu.Lock()
+	s.SectionScheme = scheme
+	s.mu.Unlock()
 	globalSheetManager.SaveSheet(s)
 }
 
@@ -2362,15 +2372,16 @@ func (s *Sheet) SnapshotForClient() *Sheet {
 	}
 
 	snap := &Sheet{
-		Name:        s.Name,
-		Owner:       s.Owner,
-		ProjectName: s.ProjectName,
-		Data:        dataCopy,
-		AuditLog:    auditCopy,
-		Permissions: Permissions{Editors: append([]string(nil), s.Permissions.Editors...)},
-		ColWidths:   colWidthsCopy,
-		RowHeights:  rowHeightsCopy,
-		RowParents:  rowParentsCopy,
+		Name:          s.Name,
+		Owner:         s.Owner,
+		ProjectName:   s.ProjectName,
+		Data:          dataCopy,
+		AuditLog:      auditCopy,
+		Permissions:   Permissions{Editors: append([]string(nil), s.Permissions.Editors...)},
+		ColWidths:     colWidthsCopy,
+		RowHeights:    rowHeightsCopy,
+		RowParents:    rowParentsCopy,
+		SectionScheme: s.SectionScheme,
 	}
 	return snap
 }

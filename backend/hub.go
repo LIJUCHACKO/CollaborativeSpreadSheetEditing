@@ -720,7 +720,16 @@ func (h *Hub) run() {
 					// Get sheet information
 					sheetName := message.SheetName
 					projectName := message.Project
-					appended := globalChatManager.Append(message.User, chat.Text, chat.To, sheetName, projectName)
+					// Look up sheet type ("datasheet" or "document")
+					sheetType := "datasheet"
+					if s := globalSheetManager.GetSheetBy(sheetName, projectName); s != nil {
+						s.mu.RLock()
+						if s.SheetType != "" {
+							sheetType = s.SheetType
+						}
+						s.mu.RUnlock()
+					}
+					appended := globalChatManager.Append(message.User, chat.Text, chat.To, sheetName, projectName, sheetType)
 					payload, _ := json.Marshal(appended)
 					toSend = &Message{Type: "CHAT_APPENDED", SheetName: "", Payload: payload, User: message.User}
 					// Broadcast
@@ -788,6 +797,49 @@ func (h *Hub) run() {
 					continue
 				} else {
 					log.Printf("Error unmarshalling CHAT_READ payload: %v", err)
+				}
+			} else if message.Type == "CHAT_DELETE_MINE" {
+				// Delete all messages sent by or addressed to the requesting user,
+				// then broadcast the updated history to every connected client.
+				requestingUser := message.User
+				globalChatManager.DeleteMessagesForUser(requestingUser)
+				// Broadcast fresh personalised history to every client
+				for _, clients := range h.rooms {
+					for c := range clients {
+						history := globalChatManager.HistoryFor(c.userID)
+						payload, _ := json.Marshal(history)
+						msg := msgToBytes(&Message{Type: "CHAT_HISTORY", SheetName: "", Payload: payload, User: "system"})
+						select {
+						case c.send <- msg:
+						default:
+							close(c.send)
+							delete(clients, c)
+						}
+					}
+				}
+				continue
+			} else if message.Type == "UPDATE_SECTION_SCHEME" {
+				if denyIfNotEditor() {
+					continue
+				}
+				var update struct {
+					Scheme string `json:"scheme"`
+					User   string `json:"user"`
+				}
+				if err := json.Unmarshal(message.Payload, &update); err == nil {
+					sheet := globalSheetManager.GetSheetBy(message.SheetName, message.Project)
+					if sheet != nil {
+						sheet.SetSectionScheme(update.Scheme)
+						payload, _ := json.Marshal(sheet.SnapshotForClient())
+						toSend = &Message{
+							Type:      "ROW_COL_UPDATED",
+							SheetName: message.SheetName,
+							Payload:   payload,
+							User:      message.User,
+						}
+					}
+				} else {
+					log.Printf("Error unmarshalling UPDATE_SECTION_SCHEME payload: %v", err)
 				}
 			} else if message.Type == "PING" {
 				// Optional: reply with a PONG only to sender to confirm connectivity
