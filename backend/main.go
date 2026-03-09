@@ -28,18 +28,22 @@ func main() {
 	// Initialize Hub
 	globalHub = newHub()
 	go globalHub.run()
-
+	log.Printf("Server starting..1")
 	globalProjectAuditManager.Load()
+	log.Printf("Server starting..2")
 	globalProjectMeta.Load()
+	log.Printf("Server starting..3")
 	// Initialize Sheet Manager (already initialized via global var in sheet.go, but good practice to be explicit if it wasn't)
 	globalSheetManager.Load()
+	log.Printf("Server starting..4")
 	globalUserManager.Load()
+	log.Printf("Server starting..5")
 	globalChatManager.Load()
-
+	log.Printf("Server starting..6")
 	// Start SheetManager async saver & flusher after Hub is ready
 	// Ensures any broadcasts during script processing see a non-nil globalHub
 	globalSheetManager.initAsyncSaver()
-
+	log.Printf("Server starting..7")
 	http.HandleFunc("/api/export", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")

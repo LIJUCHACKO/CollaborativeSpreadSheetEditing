@@ -590,6 +590,24 @@ func (s *Sheet) SetCellName(row, col, cellName, user string) string {
 	return ""
 }
 
+// FindCellByName returns the row and column of the cell with the given CellName.
+// Returns ("", "", false) if no cell has that name.
+func (s *Sheet) FindCellByName(name string) (row, col string, found bool) {
+	if name == "" {
+		return "", "", false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for r, rowMap := range s.Data {
+		for c, cell := range rowMap {
+			if cell.CellName == name {
+				return r, c, true
+			}
+		}
+	}
+	return "", "", false
+}
+
 // IsCellLocked returns whether the given cell is locked.
 func (s *Sheet) IsCellLocked(row, col string) bool {
 	s.mu.RLock()
@@ -2837,7 +2855,7 @@ func (sm *SheetManager) Save() {
 
 func (sm *SheetManager) Load() {
 	sm.mu.Lock()
-	defer sm.mu.Unlock()
+	//defer sm.mu.Unlock()
 
 	// Check if DATA directory exists
 	if _, err := os.Stat(dataDir); os.IsNotExist(err) {
@@ -2932,7 +2950,7 @@ func (sm *SheetManager) Load() {
 			})
 		}
 	}
-
+	sm.mu.Unlock()
 	log.Printf("Loaded %d sheets from disk", loadedCount)
 
 	// Rebuild script dependency map from loaded sheets

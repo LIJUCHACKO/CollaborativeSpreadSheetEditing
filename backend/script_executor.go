@@ -70,19 +70,27 @@ type DependencyInfo struct {
 //   - "{{A2}}" in script -> {Project: currentProject, Sheet: currentSheet, Range: "A2"}
 //   - "{{A2:B3}}" in script -> {Project: currentProject, Sheet: currentSheet, Range: "A2:B3"}
 //   - "{{project/sheet/A2}}" in script -> {Project: "project", Sheet: "sheet", Range: "A2"}
+//   - "{{myCellName}}" in script -> resolved via same-sheet CellName lookup -> coordinate Range
+//   - "{{project/sheet/myCellName}}" in script -> resolved via cross-sheet CellName lookup -> coordinate Range
 func ExtractScriptDependencies(script, currentProject, currentSheet string) []DependencyInfo {
 	var deps []DependencyInfo
 	seenDeps := make(map[string]bool)
 
-	// Pattern to match {{project/.../sheetid/A2}} or {{project/.../sheetid/A2:B3}} (cross-sheet references).
+	// Pattern to match {{project/.../sheetid/A2}} or {{project/.../sheetid/A2:B3}} (cross-sheet coordinate references).
 	// The project path may contain slashes (subfolder), so we allow any characters except {{ and }} before
 	// the last two slash-delimited segments (sheetid and cell range).
 	crossSheetPattern := regexp.MustCompile(`\{\{((?:[^/\{\}]+/)+)([^/\{\}]+)/([A-Z]+\d+(?::[A-Z]+\d+)?)\}\}`)
 
-	// Pattern to match {{A2}} or {{A2:B3}} (same sheet references)
+	// Pattern to match {{project/.../sheetid/CellName}} where CellName is a word identifier (not a coordinate)
+	crossSheetNamePattern := regexp.MustCompile(`\{\{((?:[^/\{\}]+/)+)([^/\{\}]+)/([A-Za-z_]\w*)\}\}`)
+
+	// Pattern to match {{A2}} or {{A2:B3}} (same-sheet coordinate references)
 	tagPattern := regexp.MustCompile(`\{\{([A-Z]+\d+(?::[A-Z]+\d+)?)\}\}`)
 
-	// Find all cross-sheet references
+	// Pattern to match {{CellName}} (same-sheet cell-name references: identifier, not a plain coordinate)
+	cellNamePattern := regexp.MustCompile(`\{\{([A-Za-z_]\w*)\}\}`)
+
+	// Find all cross-sheet coordinate references
 	matches := crossSheetPattern.FindAllStringSubmatch(script, -1)
 	for _, match := range matches {
 		if len(match) >= 4 {
@@ -102,7 +110,39 @@ func ExtractScriptDependencies(script, currentProject, currentSheet string) []De
 		}
 	}
 
-	// Find all same-sheet references
+	// Find all cross-sheet cell-name references and resolve to coordinates
+	nameMatches := crossSheetNamePattern.FindAllStringSubmatch(script, -1)
+	for _, match := range nameMatches {
+		if len(match) >= 4 {
+			refProject := strings.TrimSuffix(match[1], "/")
+			refSheet := match[2]
+			cellName := match[3]
+			// Skip if it looks like a coordinate (already handled above)
+			if regexp.MustCompile(`^[A-Z]+\d+$`).MatchString(cellName) {
+				continue
+			}
+			sheet := globalSheetManager.GetSheetBy(refSheet, refProject)
+			if sheet == nil {
+				continue
+			}
+			row, col, found := sheet.FindCellByName(cellName)
+			if !found {
+				continue
+			}
+			refRange := col + row
+			key := refProject + "/" + refSheet + "/" + refRange
+			if !seenDeps[key] {
+				deps = append(deps, DependencyInfo{
+					Project: refProject,
+					Sheet:   refSheet,
+					Range:   refRange,
+				})
+				seenDeps[key] = true
+			}
+		}
+	}
+
+	// Find all same-sheet coordinate references
 	matches = tagPattern.FindAllStringSubmatch(script, -1)
 	for _, match := range matches {
 		if len(match) >= 2 {
@@ -119,6 +159,35 @@ func ExtractScriptDependencies(script, currentProject, currentSheet string) []De
 		}
 	}
 
+	// Find all same-sheet cell-name references and resolve to coordinates
+	nameMatches = cellNamePattern.FindAllStringSubmatch(script, -1)
+	for _, match := range nameMatches {
+		if len(match) >= 2 {
+			cellName := match[1]
+			// Skip plain coordinate-looking tokens (already handled above)
+			if regexp.MustCompile(`^[A-Z]+\d+$`).MatchString(cellName) {
+				continue
+			}
+			sheet := globalSheetManager.GetSheetBy(currentSheet, currentProject)
+			if sheet == nil {
+				continue
+			}
+			row, col, found := sheet.FindCellByName(cellName)
+			if !found {
+				continue
+			}
+			refRange := col + row
+			key := currentProject + "/" + currentSheet + "/" + refRange
+			if !seenDeps[key] {
+				deps = append(deps, DependencyInfo{
+					Project: currentProject,
+					Sheet:   currentSheet,
+					Range:   refRange,
+				})
+				seenDeps[key] = true
+			}
+		}
+	}
 	return deps
 }
 
@@ -130,45 +199,51 @@ func ExtractScriptDependencies(script, currentProject, currentSheet string) []De
 // Function is used when script is modified
 // eg:- scriptDeps["projectName/sheetName"] = [ScriptIdentifier{ScriptProjectName: projectName, ScriptSheetName: sheetName, ScriptCellID: cellID, ReferencedRange: "A2"})
 func (sm *SheetManager) UpdateScriptDependencies(scriptProjectName, scriptSheetName, scriptCellID, script, rowLabel, colLabel string) {
-	sm.scriptDepsMu.Lock()
-	defer sm.scriptDepsMu.Unlock()
-
-	// Remove old dependencies for this script (check all sheets)
-	for sheetKey, scripts := range sm.scriptDeps {
-		filtered := make([]ScriptIdentifier, 0, len(scripts))
-		for _, s := range scripts {
-			// Compare without ReferencedRange since we're identifying the script itself
-			if s.ScriptProjectName != scriptProjectName || s.ScriptSheetName != scriptSheetName || s.ScriptCellID != scriptCellID {
-				filtered = append(filtered, s)
-			}
-		}
-		if len(filtered) > 0 {
-			sm.scriptDeps[sheetKey] = filtered
-		} else {
-			delete(sm.scriptDeps, sheetKey)
-		}
-	}
-
-	// If script is empty, we're done (dependencies removed)
+	// If script is empty, clear span-locks and remove dependencies.
+	// GetSheetBy acquires sm.mu, so this must be done BEFORE acquiring scriptDepsMu
+	// to avoid a lock-ordering deadlock (scriptDepsMu -> sm.mu vs sm.mu -> scriptDepsMu).
 	if strings.TrimSpace(script) == "" {
 		s := globalSheetManager.GetSheetBy(scriptSheetName, scriptProjectName)
-		lockedbyScriptAt := "script-span " + scriptCellID
-		for rKey, rowMap := range s.Data {
-			for cKey, cell := range rowMap {
-				if cell.Locked && cell.LockedBy == lockedbyScriptAt {
-					cell.Value = ""
-					cell.Value_FromNonSelfScript = ""
-					cell.Locked = false
-					cell.LockedBy = ""
-					s.Data[rKey][cKey] = cell
+		if s != nil {
+			lockedbyScriptAt := "script-span " + scriptCellID
+			s.mu.Lock()
+			for rKey, rowMap := range s.Data {
+				for cKey, cell := range rowMap {
+					if cell.Locked && cell.LockedBy == lockedbyScriptAt {
+						cell.Value = ""
+						cell.Value_FromNonSelfScript = ""
+						cell.Locked = false
+						cell.LockedBy = ""
+						s.Data[rKey][cKey] = cell
+					}
 				}
 			}
+			s.mu.Unlock()
+			globalSheetManager.SaveSheet(s)
 		}
-		globalSheetManager.SaveSheet(s)
+
+		// Now remove the dependencies under the lock
+		sm.scriptDepsMu.Lock()
+		defer sm.scriptDepsMu.Unlock()
+		for sheetKey, scripts := range sm.scriptDeps {
+			filtered := make([]ScriptIdentifier, 0, len(scripts))
+			for _, si := range scripts {
+				if si.ScriptProjectName != scriptProjectName || si.ScriptSheetName != scriptSheetName || si.ScriptCellID != scriptCellID {
+					filtered = append(filtered, si)
+				}
+			}
+			if len(filtered) > 0 {
+				sm.scriptDeps[sheetKey] = filtered
+			} else {
+				delete(sm.scriptDeps, sheetKey)
+			}
+		}
 		return
 	}
 
-	// Add new dependencies
+	// Extract dependencies BEFORE acquiring scriptDepsMu.
+	// ExtractScriptDependencies calls GetSheetBy (sm.mu) internally; holding scriptDepsMu
+	// at the same time would invert lock order and cause a deadlock.
 	deps := ExtractScriptDependencies(script, scriptProjectName, scriptSheetName)
 	if len(deps) == 0 {
 		// No explicit references found; add self cell as dependency
@@ -181,6 +256,27 @@ func (sm *SheetManager) UpdateScriptDependencies(scriptProjectName, scriptSheetN
 			})
 		}
 	}
+
+	sm.scriptDepsMu.Lock()
+	defer sm.scriptDepsMu.Unlock()
+
+	// Remove old dependencies for this script (check all sheets)
+	for sheetKey, scripts := range sm.scriptDeps {
+		filtered := make([]ScriptIdentifier, 0, len(scripts))
+		for _, si := range scripts {
+			// Compare without ReferencedRange since we're identifying the script itself
+			if si.ScriptProjectName != scriptProjectName || si.ScriptSheetName != scriptSheetName || si.ScriptCellID != scriptCellID {
+				filtered = append(filtered, si)
+			}
+		}
+		if len(filtered) > 0 {
+			sm.scriptDeps[sheetKey] = filtered
+		} else {
+			delete(sm.scriptDeps, sheetKey)
+		}
+	}
+
+	// Add new dependencies
 	for _, dep := range deps {
 		sheetKey := dep.Project + "/" + dep.Sheet
 		scriptIdent := ScriptIdentifier{
@@ -695,6 +791,55 @@ func ExecuteCellScript(projectName, sheetName, row, col string) {
 	//1. if value at A2 is '7' then replace {{A2}} with '7' in the script
 	//2. if tag is like {{A2:B3}} then replace with a 2D array string like [[7,8],[9,10]] from the cell values
 	//3. For cell range from another sheet, e.g., {{projectname/sheetid/A2:B3}} , {{projectname/sheetid/B3}} etc
+	//4. {{CellName}} (same-sheet) and {{projectname/sheetid/CellName}} (cross-sheet) are first resolved to coordinates
+
+	// --- Pre-pass: resolve cell-name references to coordinate references ---
+
+	// Cross-sheet cell-name: {{project/.../sheet/CellName}} -> {{project/.../sheet/ColRow}}
+	crossSheetNamePrePattern := regexp.MustCompile(`\{\{((?:[^/\{\}]+/)+)([^/\{\}]+)/([A-Za-z_]\w*)\}\}`)
+	script = crossSheetNamePrePattern.ReplaceAllStringFunc(script, func(match string) string {
+		sub := crossSheetNamePrePattern.FindStringSubmatch(match)
+		if len(sub) < 4 {
+			return match
+		}
+		refProject := strings.TrimSuffix(sub[1], "/")
+		refSheetName := sub[2]
+		token := sub[3]
+		// If token already looks like a coordinate (e.g. "A2"), leave it for the coordinate pass
+		coordRe := regexp.MustCompile(`^[A-Z]+\d+$`)
+		if coordRe.MatchString(token) {
+			return match
+		}
+		refSheet := globalSheetManager.GetSheetBy(refSheetName, refProject)
+		if refSheet == nil {
+			return `""`
+		}
+		r, c, found := refSheet.FindCellByName(token)
+		if !found {
+			return `""`
+		}
+		return "{{" + sub[1] + refSheetName + "/" + c + r + "}}"
+	})
+
+	// Same-sheet cell-name: {{CellName}} -> {{ColRow}}
+	sameSheetNamePrePattern := regexp.MustCompile(`\{\{([A-Za-z_]\w*)\}\}`)
+	script = sameSheetNamePrePattern.ReplaceAllStringFunc(script, func(match string) string {
+		sub := sameSheetNamePrePattern.FindStringSubmatch(match)
+		if len(sub) < 2 {
+			return match
+		}
+		token := sub[1]
+		// If token already looks like a coordinate (e.g. "A2"), leave it for the coordinate pass
+		coordRe := regexp.MustCompile(`^[A-Z]+\d+$`)
+		if coordRe.MatchString(token) {
+			return match
+		}
+		r, c, found := s.FindCellByName(token)
+		if !found {
+			return `""`
+		}
+		return "{{" + c + r + "}}"
+	})
 
 	// Pattern to match {{project/.../sheetid/A2}} or {{project/.../sheetid/A2:B3}} (cross-sheet references).
 	// Project path may contain slashes (subfolder support).
