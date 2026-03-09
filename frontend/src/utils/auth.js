@@ -91,27 +91,30 @@ export async function authenticatedFetch(url, options = {}) {
 
 /**
  * Build full backend URL from env, accepting both host or full URL.
+ * When VITE_BACKEND_HOST is NOT set, returns a relative path (e.g. "/api/login")
+ * so the Vite dev-server proxy forwards the request to the backend, avoiding CORS.
  * Examples:
- * - VITE_BACKEND_HOST="localhost" => http://localhost:8082
- * - VITE_BACKEND_HOST="127.0.0.1:9090" => http://127.0.0.1:9090
- * - VITE_BACKEND_HOST="http://localhost:8082" => http://localhost:8082
- * - VITE_BACKEND_HOST not set => http://localhost:8082
+ * - VITE_BACKEND_HOST not set            => "/api/login"  (relative, goes through proxy → localhost:8082)
+ * - VITE_BACKEND_HOST="192.168.0.102"    => "http://192.168.0.102:8082/api/login"
+ * - VITE_BACKEND_HOST="127.0.0.1:9090"  => "http://127.0.0.1:9090/api/login"
+ * - VITE_BACKEND_HOST="http://host:8082" => "http://host:8082/api/login"
  * @param {string} path like "/api/login"
- * @returns {string} full URL
+ * @returns {string} full or relative URL
  */
 export function apiUrl(path) {
   const raw = import.meta?.env?.VITE_BACKEND_HOST;
-  let base;
+  const p = path.startsWith('/') ? path : `/${path}`;
+  // No env var set → use relative URL so Vite proxy handles the request
   if (!raw || raw.trim() === '') {
-    const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
-    base = `http://${host}:8082`;
-  } else if (raw.startsWith('http://') || raw.startsWith('https://')) {
+    return p;
+  }
+  let base;
+  if (raw.startsWith('http://') || raw.startsWith('https://')) {
     base = raw.replace(/\/$/, '');
   } else {
     // treat as host[:port]
     base = raw.includes(':') ? `http://${raw}` : `http://${raw}:8082`;
   }
-  const p = path.startsWith('/') ? path : `/${path}`;
   return `${base}${p}`;
 }
 

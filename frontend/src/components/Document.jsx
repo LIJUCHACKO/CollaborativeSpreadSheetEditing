@@ -1167,7 +1167,11 @@ export default function Document() {
         function connectWS() {
             const projQS = projectName ? `&project=${encodeURIComponent(projectName)}` : '';
             const httpBase = apiUrl('/').replace(/\/$/, '');
-            const wsBase = httpBase.replace(/^http/, 'ws');
+            // When apiUrl returns a relative path (proxy mode), derive the WebSocket
+            // base from the browser's current location so we get a valid ws:// URL.
+            const wsBase = httpBase
+                ? httpBase.replace(/^http/, 'ws')
+                : `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}`;
             const socket = new WebSocket(`${wsBase}/ws?user=${encodeURIComponent(username)}&id=${id}${projQS}`);
 
             socket.onopen = () => {
@@ -1257,7 +1261,7 @@ export default function Document() {
                         setInitialState(msg.payload);
                     } else if (msg.type === 'CHAT_HISTORY') {
                         const list = Array.isArray(msg.payload) ? msg.payload : [];
-                        console.log("Chat history:", list);
+                        //console.log("Chat history:", list);
                         setChatMessages(list);
                     } else if (msg.type === 'CHAT_APPENDED') {
                         const appended = msg.payload;
@@ -1390,6 +1394,8 @@ export default function Document() {
         } else {
             setRowParents({});
         }
+        // Section numbering scheme
+        setSectionScheme(sheet.section_scheme || '');
     };
 
     const updateCellState = (row, col, value, user) => {
@@ -2189,6 +2195,17 @@ export default function Document() {
         return false;
     };
 
+    // Persist the section scheme to the backend whenever it changes
+    useEffect(() => {
+        if (!connected || !ws.current || ws.current.readyState !== WebSocket.OPEN) return;
+        if (!canEdit) return;
+        ws.current.send(JSON.stringify({
+            type: 'UPDATE_SECTION_SCHEME',
+            sheet_name: id,
+            payload: { scheme: sectionScheme, user: username },
+        }));
+    }, [sectionScheme]);
+
     // ── Section Numbering Helpers ─────────────────────────────────────────
     const toRoman = (num) => {
         const vals = [1000,900,500,400,100,90,50,40,10,9,5,4,1];
@@ -2590,13 +2607,7 @@ export default function Document() {
                         <FileSpreadsheet className="me-2" />{sheetName}
                         <span className="mx-3">|</span>
                         <div className="d-flex align-items-center gap-1">
-                            <button
-                                className="btn btn-outline-primary btn-sm d-flex align-items-center"
-                                onClick={handleDownloadXlsx}
-                                title="Export as XLSX"
-                            >
-                                <Download className="me-1" size={14} />XLSX
-                            </button>
+                          
                             <button
                                 className="btn btn-outline-success btn-sm d-flex align-items-center"
                                 onClick={handleExportMarkdown}
@@ -2899,7 +2910,7 @@ export default function Document() {
                     </div>
                 )}
                 {diffPanel.visible && (
-                    <div style={{ position: 'fixed', right: 392, top: 70, width: 320, zIndex: 1100 }}>
+                    <div style={{ position: 'fixed', right: 392, top: 70, width: 700, zIndex: 1100 }}>
                         <div className="card shadow-sm">
                             <div className="card-header py-2 d-flex align-items-center justify-content-between">
                                 <span className="fw-semibold small">Change Preview</span>
@@ -2909,7 +2920,7 @@ export default function Document() {
                                 {diffPanel.entry && (
                                     <div className="small mb-2 text-muted">Cell {diffPanel.entry.row ?? ''},{diffPanel.entry.col ?? ''}</div>
                                 )}
-                                <div className="small" style={{ lineHeight: 1.6 }}>
+                                <div className="small" style={{ lineHeight: 1.6, whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontFamily: "'JetBrains Mono', 'Fira Code', monospace" }}>
                                     {diffPanel.parts.map((p, idx) => {
                                         if (p.type === 'add') return <span key={idx} style={{ color: '#16a34a' }}>{p.text}</span>;
                                         if (p.type === 'del') return <span key={idx} style={{ color: '#dc2626', textDecoration: 'line-through' }}>{p.text}</span>;
@@ -4158,7 +4169,22 @@ export default function Document() {
                             <div className="card shadow-sm">
                                 <div className="card-header py-2 d-flex align-items-center justify-content-between">
                                     <span className="fw-semibold small d-flex align-items-center"><MessageSquare size={16} className="me-2"/> Chat</span>
-                                    <span className="badge bg-light text-dark">{chatMessages.length}</span>
+                                    <div className="d-flex align-items-center gap-2">
+                                        <span className="badge bg-light text-dark">{chatMessages.length}</span>
+                                        <button
+                                            className="btn btn-sm btn-outline-danger py-0 px-1"
+                                            title="Delete all messages sent by or received by you"
+                                            onClick={() => {
+                                                if (!window.confirm('Delete all messages sent by or to you?')) return;
+                                                if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+                                                    ws.current.send(JSON.stringify({ type: 'CHAT_DELETE_MINE', sheet_name: id, payload: {} }));
+                                                }
+                                            }}
+                                            style={{ fontSize: '11px', lineHeight: 1.2 }}
+                                        >
+                                            🗑️ Clear Mine
+                                        </button>
+                                    </div>
                                 </div>
                                 <div className="card-body p-2" style={{ maxHeight: 240, overflowY: 'auto' }}>
                                     <div ref={chatBodyRef} style={{ maxHeight: 240, overflowY: 'auto' }}>
@@ -4184,26 +4210,16 @@ export default function Document() {
                                                     }}
                                                     onClick={async () => {
                                                         if (hasSheetInfo && m.sheet_name && m.project_name) {
-                                                            // Verify sheet exists before navigation
                                                             try {
-                                                                const projQS = m.project_name ? `?project=${encodeURIComponent(m.project_name)}` : '';
-                                                                const res = await authenticatedFetch(apiUrl(`/api/sheet/${encodeURIComponent(m.sheet_name)}${projQS}`));
-                                                                
-                                                                if (res.status === 404) {
-                                                                    alert(`Sheet "${m.sheet_name}" no longer exists.`);
+                                                                // Verify the sheet exists in the project before navigating
+                                                                const res = await authenticatedFetch(apiUrl(`/api/sheets?project=${encodeURIComponent(m.project_name)}`));
+                                                                if (!res.ok) throw new Error('Failed to fetch sheets');
+                                                                const sheets = await res.json();
+                                                                const exists = Array.isArray(sheets) && sheets.some(s => s.name === m.sheet_name);
+                                                                if (!exists) {
+                                                                    alert(`Sheet "${m.sheet_name}" no longer exists in project "${m.project_name}".`);
                                                                     return;
                                                                 }
-                                                                
-                                                                if (res.status === 401) {
-                                                                    handleUnauthorized();
-                                                                    return;
-                                                                }
-                                                                
-                                                                if (!res.ok) {
-                                                                    alert('Unable to access sheet. Please try again.');
-                                                                    return;
-                                                                }
-                                                                
                                                                 // Mark as read
                                                                 if (ws.current && ws.current.readyState === WebSocket.OPEN && !isRead) {
                                                                     ws.current.send(JSON.stringify({ 
@@ -4212,9 +4228,9 @@ export default function Document() {
                                                                         payload: { timestamp: m.timestamp, user: username } 
                                                                     }));
                                                                 }
-                                                                
-                                                                // Navigate to the sheet
-                                                                navigate(`/sheet/${m.sheet_name}?project=${encodeURIComponent(m.project_name)}`);
+                                                                // Navigate to sheet or document
+                                                                const route = m.sheet_type === 'document' ? '/document/' : '/sheet/';
+                                                                navigate(`${route}${encodeURIComponent(m.sheet_name)}?project=${encodeURIComponent(m.project_name)}`);
                                                             } catch (err) {
                                                                 console.error('Error verifying sheet:', err);
                                                                 alert('Unable to verify sheet existence. Please try again.');

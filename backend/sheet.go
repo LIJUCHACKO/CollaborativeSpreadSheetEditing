@@ -423,24 +423,11 @@ func (s *Sheet) SetCell(row, col, value, user string, reverted bool) {
 	})
 	globalSheetManager.CellsModifiedManuallyQueueMu.Unlock()
 	// Preserve existing metadata on write (including script, cell type, and options)
-	s.Data[row][col] = Cell{
-		Value:                   value,
-		Script:                  currentVal.Script,
-		User:                    user,
-		Locked:                  currentVal.Locked,
-		LockedBy:                currentVal.LockedBy,
-		Background:              currentVal.Background,
-		Bold:                    currentVal.Bold,
-		Italic:                  currentVal.Italic,
-		CellType:                currentVal.CellType,
-		Options:                 currentVal.Options,
-		OptionsRange:            currentVal.OptionsRange,
-		OptionsSelected:         currentVal.OptionsSelected,
-		ScriptOutput:            currentVal.ScriptOutput,
-		ScriptOutput_RowSpan:    currentVal.ScriptOutput_RowSpan,
-		ScriptOutput_ColSpan:    currentVal.ScriptOutput_ColSpan,
-		Value_FromNonSelfScript: currentVal.Value_FromNonSelfScript,
-	}
+	updated := currentVal
+	updated.User = user
+	updated.Value = value
+	s.Data[row][col] = updated
+
 	if reverted {
 		// Mark the original EDIT_CELL entry as reverted instead of appending a new one
 		// Find the latest matching edit for this cell where NewValue equals the current cell value prior to revert
@@ -561,6 +548,46 @@ func (s *Sheet) SetCellStyle(row, col, background string, bold, italic bool, use
 	}
 	s.mu.Unlock()
 	globalSheetManager.SaveSheet(s)
+}
+
+// SetCellName sets the human-friendly name of a cell.
+// Returns an error string if the name is already in use by another cell, or empty string on success.
+func (s *Sheet) SetCellName(row, col, cellName, user string) string {
+	s.mu.Lock()
+
+	// Check for duplicate name (ignore the cell being renamed itself)
+	if cellName != "" {
+		for r, cols := range s.Data {
+			for c, cell := range cols {
+				if cell.CellName == cellName && !(r == row && c == col) {
+					return fmt.Sprintf("name '%s' is already used by cell %s%s", cellName, c, r)
+				}
+			}
+		}
+	}
+
+	if s.Data[row] == nil {
+		s.Data[row] = make(map[string]Cell)
+	}
+	current := s.Data[row][col]
+	prevName := current.CellName
+	current.CellName = cellName
+	current.User = user
+	s.Data[row][col] = current
+
+	s.AuditLog = append(s.AuditLog, AuditEntry{
+		Timestamp: time.Now(),
+		User:      user,
+		Action:    "RENAME_CELL",
+		Details:   fmt.Sprintf("Renamed cell %s%s from '%s' to '%s'", col, row, prevName, cellName),
+		Row1:      atoiSafe(row),
+		Col1:      col,
+		OldValue:  prevName,
+		NewValue:  cellName,
+	})
+	s.mu.Unlock()
+	globalSheetManager.SaveSheet(s)
+	return ""
 }
 
 // IsCellLocked returns whether the given cell is locked.

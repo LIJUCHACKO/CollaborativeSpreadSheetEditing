@@ -84,6 +84,11 @@ export default function DataSheet() {
     const [styleBg, setStyleBg] = useState('');
     const [styleBold, setStyleBold] = useState(false);
     const [styleItalic, setStyleItalic] = useState(false);
+    // Ref to store the previous cell name before optimistic updates, for revert on EDIT_DENIED
+    const pendingCellNameRef = useRef(null); // { key, prevName }
+    // Cell name (Name Box)
+    const [cellNameInput, setCellNameInput] = useState(''); // what the user is typing
+    const [cellNameEditing, setCellNameEditing] = useState(false); // whether the name box is focused
     // Cell script editor (common)
     const [scriptText, setScriptText] = useState('');
 
@@ -204,8 +209,17 @@ export default function DataSheet() {
         const noOfRows = uniqueRows.length;
         const noOfCols = uniqueCols.length;
         const rangeText = getSelectedRange() 
+        // For a single selected cell that has a cell_name, prefer the name over the coordinate
+        // so that scripts can use the human-friendly {{project/sheet/cellName}} reference form.
+        let effectiveRangeText = rangeText;
+        if (selectedRange && selectedRange.length === 1 && rangeText && !rangeText.includes(':')) {
+            const cell = selectedRange[0];
+            const cellKey = `${cell.row}-${cell.col}`;
+            const cellName = data[cellKey]?.cell_name || '';
+            if (cellName) effectiveRangeText = cellName;
+        }
         // Combine projectName, sheet_name, and rangeText in the format {{projectname/sheet_name/rangeText}}
-        const combinedRangeText = rangeText ? `${projectName}/${id}/${rangeText}` : '';
+        const combinedRangeText = effectiveRangeText ? `${projectName}/${id}/${effectiveRangeText}` : '';
         //console.log('Copied selection:',  values);
         // Send selection values to backend so other instances of the same user can paste
         if (ws.current && ws.current.readyState === WebSocket.OPEN) {
@@ -564,10 +578,17 @@ export default function DataSheet() {
         if (copiedBlock && copiedBlock.rangeText) {
             rangeText = copiedBlock.rangeText || '';
             copiedBlock.rangeText = ''; // clear after use
-        }else if (selectedRange && selectedRange.length > 0) {
-            rangeText = getSelectedRange()
-        }else  {
-            return
+        } else if (selectedRange && selectedRange.length > 0) {
+            rangeText = getSelectedRange();
+            // For a single same-sheet cell with a cell_name, use the name directly
+            if (selectedRange.length === 1 && rangeText && !rangeText.includes(':')) {
+                const cell = selectedRange[0];
+                const cellKey = `${cell.row}-${cell.col}`;
+                const cellName = data[cellKey]?.cell_name || '';
+                if (cellName) rangeText = cellName;
+            }
+        } else {
+            return;
         }
         
         
@@ -880,7 +901,11 @@ export default function DataSheet() {
         function connectWS() {
             const projQS = projectName ? `&project=${encodeURIComponent(projectName)}` : '';
             const httpBase = apiUrl('/').replace(/\/$/, '');
-            const wsBase = httpBase.replace(/^http/, 'ws');
+            // When apiUrl returns a relative path (proxy mode), derive the WebSocket
+            // base from the browser's current location so we get a valid ws:// URL.
+            const wsBase = httpBase
+                ? httpBase.replace(/^http/, 'ws')
+                : `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}`;
             const socket = new WebSocket(`${wsBase}/ws?user=${encodeURIComponent(username)}&id=${id}${projQS}`);
 
             socket.onopen = () => {
@@ -968,9 +993,11 @@ export default function DataSheet() {
                         setInitialState(msg.payload);
                     } else if (msg.type === 'ROW_COL_UPDATED') {
                         setInitialState(msg.payload);
+                        // Clear any pending cell name update on successful save
+                        pendingCellNameRef.current = null;
                     } else if (msg.type === 'CHAT_HISTORY') {
                         const list = Array.isArray(msg.payload) ? msg.payload : [];
-                        console.log("Chat history:", list);
+                        //console.log("Chat history:", list);
                         setChatMessages(list);
                     } else if (msg.type === 'CHAT_APPENDED') {
                         const appended = msg.payload;
@@ -1007,6 +1034,22 @@ export default function DataSheet() {
                         // Optional UX: show a brief warning when non-editor attempts edit
                         if (!canEdit) {
                             alert('You are not allowed to edit this sheet.');
+                        } else if (msg.payload?.type === 'UPDATE_CELL_NAME' && msg.payload?.reason) {
+                            // Revert optimistic cell name update and alert user
+                            alert(`Cell name error: ${msg.payload.reason}`);
+                            // Revert to the previous name stored before the optimistic update
+                            const pending = pendingCellNameRef.current;
+                            if (pending) {
+                                const { key, prevName } = pending;
+                                setCellNameInput(prevName);
+                                setData(prev => {
+                                    const next = { ...prev };
+                                    next[key] = { ...(prev[key] || {}), cell_name: prevName };
+                                    if (!prevName) delete next[key].cell_name;
+                                    return next;
+                                });
+                                pendingCellNameRef.current = null;
+                            }
                         }
                     }
                     });
@@ -1553,6 +1596,10 @@ export default function DataSheet() {
         setStyleItalic(!!cell.italic);
         //setScriptText(cell.script || '');
         editingOriginalScriptRef.current = (cell.script ?? '').toString();
+        // Sync cell name input (only when not actively editing the name box)
+        if (!cellNameEditing) {
+            setCellNameInput(cell.cell_name || '');
+        }
     }, [ selectedRange, data]);
 
     const applyStyleToSelectedRange = () => {
@@ -1577,6 +1624,36 @@ export default function DataSheet() {
                 };
                 ws.current.send(JSON.stringify({ type: 'UPDATE_CELL_STYLE', sheet_name: id, payload }));
             }
+        }
+    };
+
+    // Commit the cell name for the currently focused cell
+    const commitCellName = () => {
+        setCellNameEditing(false);
+        if (!selectedRange || selectedRange.length === 0 || !canEdit) return;
+        const first = selectedRange[0];
+        if (!first || !first.row || !first.col) return;
+        const key = `${first.row}-${first.col}`;
+        const currentName = (data[key]?.cell_name || '');
+        const newName = cellNameInput.trim();
+        if (newName === currentName) return; // no change
+        // Validate: only word characters (letters, digits, underscore), must not start with digit
+        if (newName !== '' && !/^[A-Za-z_]\w*$/.test(newName)) {
+            alert('Cell name must start with a letter or underscore and contain only letters, digits, or underscores.');
+            setCellNameInput(currentName);
+            return;
+        }
+        // Optimistic local update
+        pendingCellNameRef.current = { key, prevName: currentName };
+        setData(prev => {
+            const next = { ...prev };
+            next[key] = { ...(prev[key] || {}), cell_name: newName };
+            return next;
+        });
+        // Send to server
+        if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+            const payload = { row: String(first.row), col: String(first.col), cell_name: newName, user: username, _prev_name: currentName };
+            ws.current.send(JSON.stringify({ type: 'UPDATE_CELL_NAME', sheet_name: id, payload }));
         }
     };
 
@@ -2245,6 +2322,34 @@ export default function DataSheet() {
                                 Apply
                             </button>
                         </div>
+                        {/* Cell Name Box */}
+                        <div className="flex items-center gap-1 ml-3" title="Assign a name to the focused cell for use in scripts as {{name}}">
+                            <span className="text-sm text-gray-600 whitespace-nowrap">Cell Name</span>
+                            <input
+                                type="text"
+                                className="border rounded px-2 py-1 text-sm w-28"
+                                style={{ fontFamily: 'monospace' }}
+                                placeholder="e.g. myTotal"
+                                value={cellNameInput}
+                                disabled={!canEdit || !selectedRange || selectedRange.length !== 1}
+                                onChange={(e) => setCellNameInput(e.target.value)}
+                                onFocus={() => setCellNameEditing(true)}
+                                onBlur={commitCellName}
+                                onKeyDown={(e) => {
+                                    if (e.key === 'Enter') { e.preventDefault(); commitCellName(); }
+                                    if (e.key === 'Escape') {
+                                        setCellNameEditing(false);
+                                        // Revert to current saved value
+                                        if (selectedRange && selectedRange.length > 0) {
+                                            const first = selectedRange[0];
+                                            const key = `${first.row}-${first.col}`;
+                                            setCellNameInput(data[key]?.cell_name || '');
+                                        }
+                                    }
+                                }}
+                                title="Assign a name to this cell. Use {{name}} in scripts to reference it."
+                            />
+                        </div>
                         {/* Show Scripts toggle */}
                         <div className="flex items-center gap-2 ml-4">
                             <label className="inline-flex items-center gap-2 text-sm">
@@ -2387,6 +2492,19 @@ export default function DataSheet() {
                     <div style={{ position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', zIndex: 2100 }} className="bg-white border rounded shadow p-3">
                         <div className="flex items-center gap-2">
                             <span className="text-sm text-gray-600">Python Script [Cell : {String(scriptPopup.col)}{String(scriptPopup.row)}]</span>
+                            {(() => {
+                                const key = scriptPopup.row && scriptPopup.col ? `${scriptPopup.row}-${scriptPopup.col}` : null;
+                                const name = key ? (data[key]?.cell_name || '') : '';
+                                return name ? (
+                                    <span
+                                        className="text-xs px-1 rounded"
+                                        style={{ background: '#e0e7ff', color: '#4338ca', fontFamily: 'monospace' }}
+                                        title={`Cell name — use {{${name}}} to reference this cell`}
+                                    >
+                                        {`{{${name}}}`}
+                                    </span>
+                                ) : null;
+                            })()}
                         </div>
                         <div className="flex items-center gap-2">
                             
@@ -3376,6 +3494,32 @@ export default function DataSheet() {
                                                             <Lock size={12} color="#4b5563" />
                                                         </span>
                                                     )}
+                                                    {cell.cell_name && (
+                                                        <span
+                                                            title={`Cell name: ${cell.cell_name}  — use {{${cell.cell_name}}} in scripts`}
+                                                            style={{
+                                                                position: 'absolute',
+                                                                top: 2,
+                                                                left: 2,
+                                                                zIndex: 60,
+                                                                background: 'rgba(224, 231, 255, 0.95)',
+                                                                color: '#4338ca',
+                                                                borderRadius: '3px',
+                                                                padding: '0px 3px',
+                                                                fontSize: '9px',
+                                                                fontFamily: 'monospace',
+                                                                lineHeight: '14px',
+                                                                maxWidth: '90%',
+                                                                overflow: 'hidden',
+                                                                textOverflow: 'ellipsis',
+                                                                whiteSpace: 'nowrap',
+                                                                pointerEvents: 'none',
+                                                                userSelect: 'none',
+                                                            }}
+                                                        >
+                                                            {cell.cell_name}
+                                                        </span>
+                                                    )}
 
                                                         {/* Context Menu */}
                                                         {contextMenu.visible && (
@@ -3568,7 +3712,22 @@ export default function DataSheet() {
                             <div className="card shadow-sm">
                                 <div className="card-header py-2 d-flex align-items-center justify-content-between">
                                     <span className="fw-semibold small d-flex align-items-center"><MessageSquare size={16} className="me-2"/> Chat</span>
-                                    <span className="badge bg-light text-dark">{chatMessages.length}</span>
+                                    <div className="d-flex align-items-center gap-2">
+                                        <span className="badge bg-light text-dark">{chatMessages.length}</span>
+                                        <button
+                                            className="btn btn-sm btn-outline-danger py-0 px-1"
+                                            title="Delete all messages sent by or received by you"
+                                            onClick={() => {
+                                                if (!window.confirm('Delete all messages sent by or to you?')) return;
+                                                if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+                                                    ws.current.send(JSON.stringify({ type: 'CHAT_DELETE_MINE', sheet_name: id, payload: {} }));
+                                                }
+                                            }}
+                                            style={{ fontSize: '11px', lineHeight: 1.2 }}
+                                        >
+                                            🗑️ Clear Mine
+                                        </button>
+                                    </div>
                                 </div>
                                 <div className="card-body p-2" style={{ maxHeight: 240, overflowY: 'auto' }}>
                                     <div ref={chatBodyRef} style={{ maxHeight: 240, overflowY: 'auto' }}>
@@ -3594,26 +3753,16 @@ export default function DataSheet() {
                                                     }}
                                                     onClick={async () => {
                                                         if (hasSheetInfo && m.sheet_name && m.project_name) {
-                                                            // Verify sheet exists before navigation
                                                             try {
-                                                                const projQS = m.project_name ? `?project=${encodeURIComponent(m.project_name)}` : '';
-                                                                const res = await authenticatedFetch(apiUrl(`/api/sheet/${encodeURIComponent(m.sheet_name)}${projQS}`));
-                                                                
-                                                                if (res.status === 404) {
-                                                                    alert(`Sheet "${m.sheet_name}" no longer exists.`);
+                                                                // Verify the sheet exists in the project before navigating
+                                                                const res = await authenticatedFetch(apiUrl(`/api/sheets?project=${encodeURIComponent(m.project_name)}`));
+                                                                if (!res.ok) throw new Error('Failed to fetch sheets');
+                                                                const sheets = await res.json();
+                                                                const exists = Array.isArray(sheets) && sheets.some(s => s.name === m.sheet_name);
+                                                                if (!exists) {
+                                                                    alert(`Sheet "${m.sheet_name}" no longer exists in project "${m.project_name}".`);
                                                                     return;
                                                                 }
-                                                                
-                                                                if (res.status === 401) {
-                                                                    handleUnauthorized();
-                                                                    return;
-                                                                }
-                                                                
-                                                                if (!res.ok) {
-                                                                    alert('Unable to access sheet. Please try again.');
-                                                                    return;
-                                                                }
-                                                                
                                                                 // Mark as read
                                                                 if (ws.current && ws.current.readyState === WebSocket.OPEN && !isRead) {
                                                                     ws.current.send(JSON.stringify({ 
@@ -3622,9 +3771,9 @@ export default function DataSheet() {
                                                                         payload: { timestamp: m.timestamp, user: username } 
                                                                     }));
                                                                 }
-                                                                
                                                                 // Navigate to the sheet
-                                                                navigate(`/sheet/${m.sheet_name}?project=${encodeURIComponent(m.project_name)}`);
+                                                                const route = m.sheet_type === 'document' ? '/document/' : '/sheet/';
+                                                                navigate(`${route}${encodeURIComponent(m.sheet_name)}?project=${encodeURIComponent(m.project_name)}`);
                                                             } catch (err) {
                                                                 console.error('Error verifying sheet:', err);
                                                                 alert('Unable to verify sheet existence. Please try again.');

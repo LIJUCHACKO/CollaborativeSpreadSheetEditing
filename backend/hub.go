@@ -334,6 +334,59 @@ func (h *Hub) run() {
 				} else {
 					log.Printf("Error unmarshalling UPDATE_CELL_SCRIPT payload: %v", err)
 				}
+			} else if message.Type == "UPDATE_CELL_NAME" {
+				if denyIfNotEditor() {
+					continue
+				}
+				var req struct {
+					Row      string `json:"row"`
+					Col      string `json:"col"`
+					CellName string `json:"cell_name"`
+					User     string `json:"user"`
+				}
+				if err := json.Unmarshal(message.Payload, &req); err == nil {
+					sheet := globalSheetManager.GetSheetBy(message.SheetName, message.Project)
+					if sheet != nil {
+						errMsg := sheet.SetCellName(req.Row, req.Col, req.CellName, message.User)
+						if errMsg != "" {
+							// Send EDIT_DENIED back to the requesting client only
+							deniedPayload, _ := json.Marshal(map[string]string{
+								"type":   "UPDATE_CELL_NAME",
+								"reason": errMsg,
+							})
+							toSend = &Message{
+								Type:      "EDIT_DENIED",
+								SheetName: message.SheetName,
+								Payload:   deniedPayload,
+								User:      message.User,
+							}
+							if clients, ok := h.rooms[sheetKey(message.Project, message.SheetName)]; ok {
+								for client := range clients {
+									if client.userID != message.User {
+										continue
+									}
+									select {
+									case client.send <- msgToBytes(toSend):
+									default:
+										close(client.send)
+										delete(clients, client)
+									}
+								}
+							}
+							continue
+						}
+						// Broadcast updated sheet snapshot to all clients in the room
+						payload, _ := json.Marshal(sheet.SnapshotForClient())
+						toSend = &Message{
+							Type:      "ROW_COL_UPDATED",
+							SheetName: message.SheetName,
+							Payload:   payload,
+							User:      message.User,
+						}
+					}
+				} else {
+					log.Printf("Error unmarshalling UPDATE_CELL_NAME payload: %v", err)
+				}
 			} else if message.Type == "LOCK_CELL" {
 				var req struct {
 					Row  string `json:"row"`

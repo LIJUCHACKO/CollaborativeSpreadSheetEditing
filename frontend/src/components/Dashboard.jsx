@@ -113,7 +113,7 @@ export default function Dashboard() {
             const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
             const path = typeof pathOverride === 'string' ? pathOverride : currentPath;
             const query = path ? `?project=${encodeURIComponent(path)}` : '';
-            const res = await authenticatedFetch(`http://${host}:8082/api/sheets${query}`);
+            const res = await authenticatedFetch(`http://${host}/api/sheets${query}`);
             if (res.ok) {
                 const data = await res.json();
                 setSheets(data || []);
@@ -134,7 +134,7 @@ export default function Dashboard() {
             const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
             const path = typeof pathOverride === 'string' ? pathOverride : currentPath;
             if (!path) { setCorruptedSheets([]); return; }
-            const res = await authenticatedFetch(`http://${host}:8082/api/sheets/corrupted?project=${encodeURIComponent(path)}`);
+            const res = await authenticatedFetch(`http://${host}/api/sheets/corrupted?project=${encodeURIComponent(path)}`);
             if (res.ok) {
                 const data = await res.json();
                 setCorruptedSheets(Array.isArray(data) ? data : []);
@@ -152,7 +152,7 @@ export default function Dashboard() {
             const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
             const path = typeof pathOverride === 'string' ? pathOverride : currentPath;
             if (!path) { setFolders([]); return; }
-            const res = await authenticatedFetch(`http://${host}:8082/api/folders?project=${encodeURIComponent(path)}`);
+            const res = await authenticatedFetch(`http://${host}/api/folders?project=${encodeURIComponent(path)}`);
             if (res.ok) {
                 const data = await res.json();
                 const names = Array.isArray(data) ? data.map(f => f.name) : [];
@@ -175,7 +175,7 @@ export default function Dashboard() {
             const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
             const topProject = ((typeof pathOverride === 'string' ? pathOverride : project) || '').split('/')[0];
             if (!topProject) { setProjectOwner(''); return; }
-            const res = await authenticatedFetch(`http://${host}:8082/api/projects`);
+            const res = await authenticatedFetch(`http://${host}/api/projects`);
             if (res.ok) {
                 const list = await res.json();
                 const found = Array.isArray(list) ? list.find(p => p.name === topProject) : null;
@@ -189,7 +189,7 @@ export default function Dashboard() {
             const topProject = (project || '').split('/')[0];
             if (!topProject) { setAuditLog([]); return; }
             const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
-            const res = await authenticatedFetch(`http://${host}:8082/api/projects/audit?project=${encodeURIComponent(topProject)}`);
+            const res = await authenticatedFetch(`http://${host}/api/projects/audit?project=${encodeURIComponent(topProject)}`);
             if (res.ok) {
                 const entries = await res.json();
                 setAuditLog(Array.isArray(entries) ? entries : []);
@@ -212,7 +212,7 @@ export default function Dashboard() {
             const body = currentPath
                 ? { name: newSheetName, user: username, project_name: currentPath, sheet_type: newSheetType }
                 : { name: newSheetName, user: username, sheet_type: newSheetType };
-            const res = await authenticatedFetch(`http://${host}:8082/api/sheets`, {
+            const res = await authenticatedFetch(`http://${host}api/sheets`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body),
@@ -242,7 +242,7 @@ export default function Dashboard() {
     const handleLogout = async () => {
         try {
             const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
-            await authenticatedFetch(`http://${host}:8082/api/logout`, { method: 'POST' });
+            await authenticatedFetch(`http://${host}api/logout`, { method: 'POST' });
         } catch (error) {
             console.error('Logout error', error);
         } finally {
@@ -256,7 +256,7 @@ export default function Dashboard() {
             const path = currentPath || project;
             if (!path) return;
             const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
-            const res = await authenticatedFetch(`http://${host}:8082/api/export_project?project=${encodeURIComponent(path)}`, { method: 'GET' });
+            const res = await authenticatedFetch(`http://${host}api/export_project?project=${encodeURIComponent(path)}`, { method: 'GET' });
             if (!res.ok) {
                 const text = await res.text();
                 alert(`Failed to export project: ${text}`);
@@ -284,7 +284,7 @@ export default function Dashboard() {
             const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
             const form = new FormData();
             form.append('file', file);
-            const res = await authenticatedFetch(`http://${host}:8082/api/import_project_xlsx?project=${encodeURIComponent(path)}`, {
+            const res = await authenticatedFetch(`http://${host}api/import_project_xlsx?project=${encodeURIComponent(path)}`, {
                 method: 'POST',
                 body: form,
             });
@@ -342,7 +342,7 @@ export default function Dashboard() {
         try {
             const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
             const body = { parent: currentPath || project || '', name };
-            const res = await authenticatedFetch(`http://${host}:8082/api/folders`, {
+            const res = await authenticatedFetch(`http://${host}api/folders`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body),
@@ -382,7 +382,7 @@ export default function Dashboard() {
         try {
             const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
             const body = { parent: currentPath || project || '', old_name: oldName, new_name: newName };
-            const res = await authenticatedFetch(`http://${host}:8082/api/folders`, {
+            const res = await authenticatedFetch(`http://${host}api/folders`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body),
@@ -498,7 +498,7 @@ export default function Dashboard() {
                     dest_path: destPath,
                 };
             }
-            const res = await authenticatedFetch(`http://${host}:8082/api/projects/paste`, {
+            const res = await authenticatedFetch(`http://${host}api/projects/paste`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body),
@@ -556,7 +556,7 @@ export default function Dashboard() {
 
         try {
             const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
-            const res = await authenticatedFetch(`http://${host}:8082/api/sheets?id=${sheetId}${project ? `&project=${encodeURIComponent(project)}` : ''}` , {
+            const res = await authenticatedFetch(`http://${host}api/sheets?id=${sheetId}${project ? `&project=${encodeURIComponent(project)}` : ''}` , {
                 method: 'DELETE',
             });
             if (res.status === 403) {
@@ -597,7 +597,7 @@ export default function Dashboard() {
 
         try {
             const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
-            const res = await authenticatedFetch(`http://${host}:8082/api/sheets`, {
+            const res = await authenticatedFetch(`http://${host}api/sheets`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(currentPath ? { id: sheetId, name: editingSheetName, project_name: currentPath } : { id: sheetId, name: editingSheetName }),
