@@ -95,7 +95,7 @@ export async function authenticatedFetch(url, options = {}) {
  * so the Vite dev-server proxy forwards the request to the backend, avoiding CORS.
  * Examples:
  * - VITE_BACKEND_HOST not set            => "/api/login"  (relative, goes through proxy → localhost:8082)
- * - VITE_BACKEND_HOST="192.168.0.102"    => "http://192.168.0.102:8082/api/login"
+ * - VITE_BACKEND_HOST="192.168.0.102:8082"    => "http://192.168.0.102:8082/api/login"
  * - VITE_BACKEND_HOST="127.0.0.1:9090"  => "http://127.0.0.1:9090/api/login"
  * - VITE_BACKEND_HOST="http://host:8082" => "http://host:8082/api/login"
  * @param {string} path like "/api/login"
@@ -115,6 +115,7 @@ export function apiUrl(path) {
     // treat as host[:port]
     base = raw.includes(':') ? `http://${raw}` : `http://${raw}:8082`;
   }
+  console.log(`API URL: ${base}${p}`);
   return `${base}${p}`;
 }
 

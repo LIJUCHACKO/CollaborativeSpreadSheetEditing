@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -1074,9 +1076,34 @@ func ExecuteCellScript(projectName, sheetName, row, col string) {
 	WriteScriptOutputToCells(projectName, sheetName, row, col, true, isSelfReferencing)
 }
 
-// addMergedAuditEntries adds audit entries for cell changes, merging with existing entries from the same user within 24 hours
+// lastTimelineEventTime returns the timestamp of the last event in the project's timeline.json,
+// or the zero time if none exists.
+func lastTimelineEventTime(projectName string) time.Time {
+	type timelineEntry struct {
+		Timestamp time.Time `json:"timestamp"`
+	}
+	path := filepath.Join(dataDir, projectName, "timeline.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return time.Time{}
+	}
+	var entries []timelineEntry
+	if err := json.Unmarshal(data, &entries); err != nil || len(entries) == 0 {
+		return time.Time{}
+	}
+	last := entries[0].Timestamp
+	for _, e := range entries[1:] {
+		if e.Timestamp.After(last) {
+			last = e.Timestamp
+		}
+	}
+	return last
+}
+
+// addMergedAuditEntries adds audit entries for cell changes, merging with existing entries if the previous log is after the last timeline event
 func addMergedAuditEntries(s *Sheet, cellChanges map[string]cellChangesstruct) {
 	now := time.Now()
+	lastTimelineEvent := lastTimelineEventTime(s.ProjectName)
 	for _, change := range cellChanges {
 		// Find the latest matching edit for this cell by user "system"
 		prevIdx := -1
@@ -1092,8 +1119,10 @@ func addMergedAuditEntries(s *Sheet, cellChanges map[string]cellChangesstruct) {
 
 		oldValForNew := change.oldVal
 		if prevIdx >= 0 {
-			// Only merge if previous log is within 24 hours
-			if time.Since(s.AuditLog[prevIdx].Timestamp) < 24*time.Hour {
+			prevTimestamp := s.AuditLog[prevIdx].Timestamp
+			// Merge if previous log is after the last timeline event
+			prevIsAfterLastTimelineEvent := !lastTimelineEvent.IsZero() && prevTimestamp.After(lastTimelineEvent)
+			if prevIsAfterLastTimelineEvent {
 				oldValForNew = s.AuditLog[prevIdx].OldValue
 				s.AuditLog = append(s.AuditLog[:prevIdx], s.AuditLog[prevIdx+1:]...)
 			}

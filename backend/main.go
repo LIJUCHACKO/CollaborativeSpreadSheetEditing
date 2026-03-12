@@ -859,6 +859,7 @@ func main() {
 		skipFiles := map[string]bool{
 			"chat.json": true, "projects.json": true,
 			"users.json": true, "project_audit.log": true,
+			"timeline.json": true,
 		}
 
 		baseDir := filepath.Join(dataDir, project)
@@ -956,6 +957,11 @@ func main() {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
+			// Reject reserved name "timeline" (used for timeline.json)
+			if strings.EqualFold(req.Name, "timeline") {
+				http.Error(w, "The name 'timeline' is reserved and cannot be used for a sheet", http.StatusConflict)
+				return
+			}
 			// Reject if a sheet file or subfolder with the same name already exists
 			{
 				var dir string
@@ -973,12 +979,12 @@ func main() {
 					return
 				}
 			}
-			// Only the project owner may create sheets inside a project/subfolder
+			// Only the project owner/admin may create sheets inside a project/subfolder
 			if req.ProjectName != "" {
 				topProject := strings.SplitN(req.ProjectName, "/", 2)[0]
 				owner := globalProjectMeta.GetOwner(topProject)
-				if owner != "" && owner != username {
-					http.Error(w, "Forbidden: only the project owner can create sheets here", http.StatusForbidden)
+				if owner != "" && !globalProjectMeta.IsProjectAdmin(topProject, username) {
+					http.Error(w, "Forbidden: only the project owner or admin can create sheets here", http.StatusForbidden)
 					return
 				}
 			}
@@ -1006,15 +1012,21 @@ func main() {
 				http.Error(w, "Sheet ID and name required", http.StatusBadRequest)
 				return
 			}
+			// Reject reserved name "timeline" (used for timeline.json)
+			if strings.EqualFold(req.Name, "timeline") {
+				http.Error(w, "The name 'timeline' is reserved and cannot be used for a sheet", http.StatusConflict)
+				return
+			}
 
-			// Enforce owner-only rename
+			// Enforce owner/project-admin rename
 			s := globalSheetManager.GetSheetBy(req.ID, req.ProjectName)
 			if s == nil {
 				http.Error(w, "Sheet not found", http.StatusNotFound)
 				return
 			}
-			if s.Owner != username {
-				http.Error(w, "Forbidden: owner only", http.StatusForbidden)
+			topProject := strings.SplitN(req.ProjectName, "/", 2)[0]
+			if s.Owner != username && !globalProjectMeta.IsProjectAdmin(topProject, username) {
+				http.Error(w, "Forbidden: owner or project admin only", http.StatusForbidden)
 				return
 			}
 			// Reject if a sheet file or subfolder with the new name already exists
@@ -1046,7 +1058,7 @@ func main() {
 		}
 
 		if r.Method == "DELETE" {
-			// Only owner may delete, and must specify sheet ID and optional project in query parameters
+			// Only owner or project admin may delete, and must specify sheet ID and optional project in query parameters
 			// Extract sheet ID from query parameter
 			id := r.URL.Query().Get("id")
 			if id == "" {
@@ -1056,10 +1068,13 @@ func main() {
 			project := r.URL.Query().Get("project")
 			// Fetch for audit details
 			s := globalSheetManager.GetSheetBy(id, project)
-			// Only owner may delete the sheet
+			// Only owner or project admin may delete the sheet
 			if s != nil && s.Owner != username {
-				http.Error(w, "Forbidden: owner only", http.StatusForbidden)
-				return
+				topProject := strings.SplitN(project, "/", 2)[0]
+				if !globalProjectMeta.IsProjectAdmin(topProject, username) {
+					http.Error(w, "Forbidden: owner or project admin only", http.StatusForbidden)
+					return
+				}
 			}
 			// Project-aware delete
 			if !globalSheetManager.DeleteSheetBy(id, project) {
@@ -1106,14 +1121,19 @@ func main() {
 				return
 			}
 			type Project struct {
-				Name  string `json:"name"`
-				Owner string `json:"owner,omitempty"`
+				Name   string   `json:"name"`
+				Owner  string   `json:"owner,omitempty"`
+				Admins []string `json:"admins,omitempty"`
 			}
 			projects := make([]Project, 0)
 			for _, e := range entries {
 				if e.IsDir() {
 					owner := globalProjectMeta.GetOwner(e.Name())
-					projects = append(projects, Project{Name: e.Name(), Owner: owner})
+					admins := globalProjectMeta.GetAdmins(e.Name())
+					if admins == nil {
+						admins = []string{}
+					}
+					projects = append(projects, Project{Name: e.Name(), Owner: owner, Admins: admins})
 				}
 			}
 			w.Header().Set("Content-Type", "application/json")
@@ -1155,9 +1175,9 @@ func main() {
 				http.Error(w, "OldName and NewName required", http.StatusBadRequest)
 				return
 			}
-			// Enforce owner-only rename
-			if globalProjectMeta.GetOwner(req.OldName) != username {
-				http.Error(w, "Forbidden: owner only", http.StatusForbidden)
+			// Enforce owner/admin-only rename
+			if !globalProjectMeta.IsProjectAdmin(req.OldName, username) {
+				http.Error(w, "Forbidden: owner or admin only", http.StatusForbidden)
 				return
 			}
 			// Check if any sheets in the project or its subfolders are currently open
@@ -1209,10 +1229,10 @@ func main() {
 				http.Error(w, "Project name required", http.StatusBadRequest)
 				return
 			}
-			// Only project owner may delete the project
+			// Only project owner/admin may delete the project
 			owner := globalProjectMeta.GetOwner(name)
-			if owner == "" || owner != username {
-				http.Error(w, "Forbidden: owner only", http.StatusForbidden)
+			if owner == "" || !globalProjectMeta.IsProjectAdmin(name, username) {
+				http.Error(w, "Forbidden: owner or admin only", http.StatusForbidden)
 				return
 			}
 			// Delete sheets in memory and files
@@ -1232,6 +1252,97 @@ func main() {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+	})
+
+	// Project Admins API: manage additional admins for a project
+	http.HandleFunc("/api/projects/admins", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		token := r.Header.Get("Authorization")
+		username, err := globalUserManager.ValidateToken(token)
+		if err != nil {
+			http.Error(w, "Unauthorized: "+err.Error(), http.StatusUnauthorized)
+			return
+		}
+
+		if r.Method == http.MethodGet {
+			project := r.URL.Query().Get("project")
+			if project == "" {
+				http.Error(w, "project is required", http.StatusBadRequest)
+				return
+			}
+			admins := globalProjectMeta.GetAdmins(project)
+			if admins == nil {
+				admins = []string{}
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"owner":  globalProjectMeta.GetOwner(project),
+				"admins": admins,
+			})
+			return
+		}
+
+		if r.Method == http.MethodPost {
+			var req struct {
+				Project string `json:"project"`
+				Admin   string `json:"admin"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if req.Project == "" || req.Admin == "" {
+				http.Error(w, "project and admin required", http.StatusBadRequest)
+				return
+			}
+			// Only the project owner (not admins) can add new admins
+			owner := globalProjectMeta.GetOwner(req.Project)
+			if owner != username {
+				http.Error(w, "Forbidden: only the project owner can manage admins", http.StatusForbidden)
+				return
+			}
+			if !globalUserManager.Exists(req.Admin) {
+				http.Error(w, "User does not exist", http.StatusBadRequest)
+				return
+			}
+			if req.Admin == owner {
+				http.Error(w, "Owner is already an admin", http.StatusConflict)
+				return
+			}
+			globalProjectMeta.AddAdmin(req.Project, req.Admin)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{"message": "Admin added"})
+			return
+		}
+
+		if r.Method == http.MethodDelete {
+			project := r.URL.Query().Get("project")
+			admin := r.URL.Query().Get("admin")
+			if project == "" || admin == "" {
+				http.Error(w, "project and admin required", http.StatusBadRequest)
+				return
+			}
+			// Only the project owner can remove admins
+			owner := globalProjectMeta.GetOwner(project)
+			if owner != username {
+				http.Error(w, "Forbidden: only the project owner can manage admins", http.StatusForbidden)
+				return
+			}
+			globalProjectMeta.RemoveAdmin(project, admin)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{"message": "Admin removed"})
+			return
+		}
+
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	})
 
 	// Folders API: list/create subfolders under a project path
@@ -1284,11 +1395,11 @@ func main() {
 				http.Error(w, "parent and name required", http.StatusBadRequest)
 				return
 			}
-			// Only allow creation under an existing top-level project owned by user, if owner metadata exists
+			// Only allow creation under an existing top-level project owned/administered by user
 			top := strings.Split(req.Parent, string(os.PathSeparator))[0]
 			owner := globalProjectMeta.GetOwner(top)
-			if owner != "" && owner != username {
-				http.Error(w, "Forbidden: owner only", http.StatusForbidden)
+			if owner != "" && !globalProjectMeta.IsProjectAdmin(top, username) {
+				http.Error(w, "Forbidden: owner or admin only", http.StatusForbidden)
 				return
 			}
 			abs := filepath.Join(dataDir, req.Parent, req.Name)
@@ -1319,11 +1430,11 @@ func main() {
 				http.Error(w, "parent, old_name, and new_name required", http.StatusBadRequest)
 				return
 			}
-			// Only allow rename under an existing top-level project owned by user
+			// Only allow rename under an existing top-level project owned/administered by user
 			top := strings.Split(req.Parent, string(os.PathSeparator))[0]
 			owner := globalProjectMeta.GetOwner(top)
-			if owner != "" && owner != username {
-				http.Error(w, "Forbidden: owner only", http.StatusForbidden)
+			if owner != "" && !globalProjectMeta.IsProjectAdmin(top, username) {
+				http.Error(w, "Forbidden: owner or admin only", http.StatusForbidden)
 				return
 			}
 			// Check if any sheets in the subfolder are currently open
@@ -1436,10 +1547,10 @@ func main() {
 				http.Error(w, "Destination folder not found", http.StatusNotFound)
 				return
 			}
-			// Only the owner of the destination project may paste sheets there
+			// Only the owner/admin of the destination project may paste sheets there
 			destTopProject := strings.SplitN(req.DestPath, "/", 2)[0]
-			if destOwner := globalProjectMeta.GetOwner(destTopProject); destOwner != "" && destOwner != username {
-				http.Error(w, "Forbidden: only the project owner can paste sheets here", http.StatusForbidden)
+			if destOwner := globalProjectMeta.GetOwner(destTopProject); destOwner != "" && !globalProjectMeta.IsProjectAdmin(destTopProject, username) {
+				http.Error(w, "Forbidden: only the project owner or admin can paste sheets here", http.StatusForbidden)
 				return
 			}
 			newSheet := globalSheetManager.CopySheetToProject(req.SourceSheetID, req.SourcePath, req.DestPath, newName, username)
@@ -1465,12 +1576,12 @@ func main() {
 			http.Error(w, "Cannot paste a folder inside itself", http.StatusBadRequest)
 			return
 		}
-		// Only the owner of the destination top-level project may paste inside it
+		// Only the owner/admin of the destination top-level project may paste inside it
 		destTopParts := strings.SplitN(req.DestPath, "/", 2)
 		if len(destTopParts) > 1 {
-			// Pasting inside an existing project – check owner
-			if destOwner := globalProjectMeta.GetOwner(destTopParts[0]); destOwner != "" && destOwner != username {
-				http.Error(w, "Forbidden: only the project owner can paste here", http.StatusForbidden)
+			// Pasting inside an existing project – check owner/admin
+			if destOwner := globalProjectMeta.GetOwner(destTopParts[0]); destOwner != "" && !globalProjectMeta.IsProjectAdmin(destTopParts[0], username) {
+				http.Error(w, "Forbidden: only the project owner or admin can paste here", http.StatusForbidden)
 				return
 			}
 		} else {
@@ -1797,9 +1908,15 @@ func main() {
 		}
 
 		if r.Method == http.MethodGet {
+			topProject := strings.SplitN(project, "/", 2)[0]
+			admins := globalProjectMeta.GetAdmins(topProject)
+			if admins == nil {
+				admins = []string{}
+			}
 			resp := map[string]interface{}{
-				"owner":       sheet.Owner,
-				"permissions": sheet.Permissions,
+				"owner":          sheet.Owner,
+				"permissions":    sheet.Permissions,
+				"project_admins": admins,
 			}
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(resp)
@@ -1814,7 +1931,8 @@ func main() {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			isAdmin := globalUserManager.IsAdminUser(username)
+			topProject := strings.SplitN(project, "/", 2)[0]
+			isAdmin := globalUserManager.IsAdminUser(username) || globalProjectMeta.IsProjectAdmin(topProject, username)
 			if !sheet.UpdatePermissions(req.Editors, username, isAdmin) {
 				http.Error(w, "Forbidden: owner or admin only", http.StatusForbidden)
 				return
@@ -1867,16 +1985,248 @@ func main() {
 			http.Error(w, "Sheet not found", http.StatusNotFound)
 			return
 		}
+		// Project admins can also transfer ownership
+		topProject := strings.SplitN(req.ProjectName, "/", 2)[0]
+		isProjectAdmin := globalProjectMeta.IsProjectAdmin(topProject, username)
 		if !globalUserManager.Exists(req.NewOwner) {
 			http.Error(w, "new_owner does not exist", http.StatusBadRequest)
 			return
 		}
-		if !sheet.TransferOwnership(req.NewOwner, username, isAdmin) {
+		if !sheet.TransferOwnership(req.NewOwner, username, isAdmin || isProjectAdmin) {
 			http.Error(w, "Forbidden: owner only", http.StatusForbidden)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"message": "Ownership transferred"})
+	})
+
+	// Timeline API: GET/POST/PUT/DELETE for project timeline entries
+	// Stored as timeline.json inside each project folder
+	http.HandleFunc("/api/timeline", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		token := r.Header.Get("Authorization")
+		username, err := globalUserManager.ValidateToken(token)
+		if err != nil {
+			http.Error(w, "Unauthorized: "+err.Error(), http.StatusUnauthorized)
+			return
+		}
+
+		// isProjectOwner returns true if the user is the project owner, a project admin, or a site admin
+		isProjectOwner := func(project string) bool {
+			return globalUserManager.IsAdminUser(username) || globalProjectMeta.IsProjectAdmin(project, username)
+		}
+
+		// TimelineEntry stores the event timestamp as a time.Time (like AuditEntry).
+		// Legacy entries with separate "date"/"time" string fields are migrated on load.
+		type TimelineEntry struct {
+			ID          string    `json:"id"`
+			Timestamp   time.Time `json:"timestamp"`
+			Description string    `json:"description"`
+			User        string    `json:"user"`
+			CreatedAt   time.Time `json:"created_at"`
+			UpdatedAt   time.Time `json:"updated_at"`
+		}
+
+		getTimelinePath := func(project string) string {
+			return filepath.Join(dataDir, project, "timeline.json")
+		}
+
+		loadTimeline := func(project string) ([]TimelineEntry, error) {
+			path := getTimelinePath(project)
+			data, err := os.ReadFile(path)
+			if err != nil {
+				if os.IsNotExist(err) {
+					return []TimelineEntry{}, nil
+				}
+				return nil, err
+			}
+			var entries []TimelineEntry
+			if err := json.Unmarshal(data, &entries); err != nil {
+				return nil, err
+			}
+			return entries, nil
+		}
+
+		saveTimeline := func(project string, entries []TimelineEntry) error {
+			path := getTimelinePath(project)
+			data, err := json.MarshalIndent(entries, "", "  ")
+			if err != nil {
+				return err
+			}
+			return os.WriteFile(path, data, 0644)
+		}
+
+		if r.Method == http.MethodGet {
+			project := r.URL.Query().Get("project")
+			if project == "" {
+				http.Error(w, "project is required", http.StatusBadRequest)
+				return
+			}
+			entries, err := loadTimeline(project)
+			if err != nil {
+				http.Error(w, "Failed to load timeline: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(entries)
+			return
+		}
+
+		if r.Method == http.MethodPost {
+			var req struct {
+				Project     string `json:"project"`
+				Timestamp   string `json:"timestamp"` // ISO 8601: "2006-01-02T15:04"
+				Description string `json:"description"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if req.Project == "" || req.Timestamp == "" || req.Description == "" {
+				http.Error(w, "project, timestamp, and description are required", http.StatusBadRequest)
+				return
+			}
+			if !isProjectOwner(req.Project) {
+				http.Error(w, "Only the project owner can add timeline entries", http.StatusForbidden)
+				return
+			}
+			ts, parseErr := time.ParseInLocation("2006-01-02T15:04", req.Timestamp, time.Local)
+			if parseErr != nil {
+				// fallback: try with seconds
+				ts, parseErr = time.ParseInLocation("2006-01-02T15:04:05", req.Timestamp, time.Local)
+				if parseErr != nil {
+					http.Error(w, "Invalid timestamp format, expected YYYY-MM-DDTHH:MM", http.StatusBadRequest)
+					return
+				}
+			}
+			entries, err := loadTimeline(req.Project)
+			if err != nil {
+				http.Error(w, "Failed to load timeline: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			now := time.Now()
+			newEntry := TimelineEntry{
+				ID:          fmt.Sprintf("%d", time.Now().UnixNano()),
+				Timestamp:   ts,
+				Description: req.Description,
+				User:        username,
+				CreatedAt:   now,
+				UpdatedAt:   now,
+			}
+			entries = append(entries, newEntry)
+			if err := saveTimeline(req.Project, entries); err != nil {
+				http.Error(w, "Failed to save timeline: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(newEntry)
+			return
+		}
+
+		if r.Method == http.MethodPut {
+			var req struct {
+				Project     string `json:"project"`
+				ID          string `json:"id"`
+				Timestamp   string `json:"timestamp"` // ISO 8601: "2006-01-02T15:04"
+				Description string `json:"description"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if req.Project == "" || req.ID == "" {
+				http.Error(w, "project and id are required", http.StatusBadRequest)
+				return
+			}
+			if !isProjectOwner(req.Project) {
+				http.Error(w, "Only the project owner can modify timeline entries", http.StatusForbidden)
+				return
+			}
+			entries, err := loadTimeline(req.Project)
+			if err != nil {
+				http.Error(w, "Failed to load timeline: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			found := false
+			for i, e := range entries {
+				if e.ID == req.ID {
+					if req.Timestamp != "" {
+						ts, parseErr := time.ParseInLocation("2006-01-02T15:04", req.Timestamp, time.Local)
+						if parseErr != nil {
+							ts, parseErr = time.ParseInLocation("2006-01-02T15:04:05", req.Timestamp, time.Local)
+						}
+						if parseErr == nil {
+							entries[i].Timestamp = ts
+						}
+					}
+					if req.Description != "" {
+						entries[i].Description = req.Description
+					}
+					entries[i].UpdatedAt = time.Now()
+					found = true
+					break
+				}
+			}
+			if !found {
+				http.Error(w, "Timeline entry not found", http.StatusNotFound)
+				return
+			}
+			if err := saveTimeline(req.Project, entries); err != nil {
+				http.Error(w, "Failed to save timeline: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{"message": "Entry updated"})
+			return
+		}
+
+		if r.Method == http.MethodDelete {
+			project := r.URL.Query().Get("project")
+			id := r.URL.Query().Get("id")
+			if project == "" || id == "" {
+				http.Error(w, "project and id are required", http.StatusBadRequest)
+				return
+			}
+			if !isProjectOwner(project) {
+				http.Error(w, "Only the project owner can delete timeline entries", http.StatusForbidden)
+				return
+			}
+			entries, err := loadTimeline(project)
+			if err != nil {
+				http.Error(w, "Failed to load timeline: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			newEntries := make([]TimelineEntry, 0, len(entries))
+			found := false
+			for _, e := range entries {
+				if e.ID == id {
+					found = true
+					continue
+				}
+				newEntries = append(newEntries, e)
+			}
+			if !found {
+				http.Error(w, "Timeline entry not found", http.StatusNotFound)
+				return
+			}
+			if err := saveTimeline(project, newEntries); err != nil {
+				http.Error(w, "Failed to save timeline: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{"message": "Entry deleted"})
+			return
+		}
+
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	})
 
 	// Simple health check

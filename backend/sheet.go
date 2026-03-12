@@ -150,6 +150,11 @@ func (s *Sheet) IsEditor(user string) bool {
 	if user == s.Owner {
 		return true
 	}
+	// Project admins are treated as editors/owners
+	topProject := strings.SplitN(s.ProjectName, "/", 2)[0]
+	if topProject != "" && globalProjectMeta.IsProjectAdmin(topProject, user) {
+		return true
+	}
 	for _, e := range s.Permissions.Editors {
 		if e == user {
 			return true
@@ -622,11 +627,12 @@ func (s *Sheet) IsCellLocked(row, col string) bool {
 	return c.Locked
 }
 
-// LockCell locks a cell. Only the sheet owner may lock.
+// LockCell locks a cell. Only the sheet owner or project admin may lock.
 func (s *Sheet) LockCell(row, col, user string) bool {
 	s.mu.Lock()
 	//defer s.mu.Unlock()
-	if user != s.Owner {
+	topProject := strings.SplitN(s.ProjectName, "/", 2)[0]
+	if user != s.Owner && !(topProject != "" && globalProjectMeta.IsProjectAdmin(topProject, user)) {
 		s.mu.Unlock()
 		return false
 	}
@@ -655,11 +661,12 @@ func (s *Sheet) LockCell(row, col, user string) bool {
 	return true
 }
 
-// UnlockCell unlocks a cell. Only the sheet owner may unlock.
+// UnlockCell unlocks a cell. Only the sheet owner or project admin may unlock.
 func (s *Sheet) UnlockCell(row, col, user string) bool {
 	s.mu.Lock()
 	//defer s.mu.Unlock()
-	if user != s.Owner {
+	topProject := strings.SplitN(s.ProjectName, "/", 2)[0]
+	if user != s.Owner && !(topProject != "" && globalProjectMeta.IsProjectAdmin(topProject, user)) {
 		s.mu.Unlock()
 		return false
 	}
@@ -2916,7 +2923,7 @@ func (sm *SheetManager) Load() {
 				}
 				// Skip non-sheet meta files
 				base := filepath.Base(path)
-				if base == "chat.json" || base == "projects.json" || base == "users.json" || base == "project_audit.log" {
+				if base == "chat.json" || base == "projects.json" || base == "users.json" || base == "project_audit.log" || base == "timeline.json" {
 					return nil
 				}
 				file, err := os.Open(path)

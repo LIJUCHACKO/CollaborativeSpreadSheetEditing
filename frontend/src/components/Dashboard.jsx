@@ -5,6 +5,7 @@ import {
     Search,
     LogOut,
     User,
+    Users,
     MoreVertical,
     Trash2,
     Edit2,
@@ -12,7 +13,8 @@ import {
     ArrowLeft,
     Copy,
     ClipboardPaste,
-    X
+    X,
+    Plus
 } from 'lucide-react';
 import 'bootstrap/dist/css/bootstrap.min.css';
 import { isSessionValid, clearAuth, authenticatedFetch, getUsername } from '../utils/auth';
@@ -51,6 +53,11 @@ export default function Dashboard() {
 
     // Project owner (only top-level project owner can create/paste sheets & subfolders)
     const [projectOwner, setProjectOwner] = useState('');
+    // Project admins (additional users with owner-like privileges)
+    const [projectAdmins, setProjectAdmins] = useState([]);
+    // Admin management UI state
+    const [showAdminManager, setShowAdminManager] = useState(false);
+    const [newAdminName, setNewAdminName] = useState('');
 
     // Audit sidebar state
     const [auditLog, setAuditLog] = useState([]);
@@ -174,12 +181,13 @@ export default function Dashboard() {
         try {
             const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
             const topProject = ((typeof pathOverride === 'string' ? pathOverride : project) || '').split('/')[0];
-            if (!topProject) { setProjectOwner(''); return; }
+            if (!topProject) { setProjectOwner(''); setProjectAdmins([]); return; }
             const res = await authenticatedFetch(`http://${host}/api/projects`);
             if (res.ok) {
                 const list = await res.json();
                 const found = Array.isArray(list) ? list.find(p => p.name === topProject) : null;
                 setProjectOwner(found?.owner || '');
+                setProjectAdmins(Array.isArray(found?.admins) ? found.admins : []);
             }
         } catch (e) { /* ignore */ }
     };
@@ -212,7 +220,7 @@ export default function Dashboard() {
             const body = currentPath
                 ? { name: newSheetName, user: username, project_name: currentPath, sheet_type: newSheetType }
                 : { name: newSheetName, user: username, sheet_type: newSheetType };
-            const res = await authenticatedFetch(`http://${host}api/sheets`, {
+            const res = await authenticatedFetch(`http://${host}/api/sheets`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body),
@@ -242,7 +250,7 @@ export default function Dashboard() {
     const handleLogout = async () => {
         try {
             const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
-            await authenticatedFetch(`http://${host}api/logout`, { method: 'POST' });
+            await authenticatedFetch(`http://${host}/api/logout`, { method: 'POST' });
         } catch (error) {
             console.error('Logout error', error);
         } finally {
@@ -256,7 +264,7 @@ export default function Dashboard() {
             const path = currentPath || project;
             if (!path) return;
             const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
-            const res = await authenticatedFetch(`http://${host}api/export_project?project=${encodeURIComponent(path)}`, { method: 'GET' });
+            const res = await authenticatedFetch(`http://${host}/api/export_project?project=${encodeURIComponent(path)}`, { method: 'GET' });
             if (!res.ok) {
                 const text = await res.text();
                 alert(`Failed to export project: ${text}`);
@@ -284,7 +292,7 @@ export default function Dashboard() {
             const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
             const form = new FormData();
             form.append('file', file);
-            const res = await authenticatedFetch(`http://${host}api/import_project_xlsx?project=${encodeURIComponent(path)}`, {
+            const res = await authenticatedFetch(`http://${host}/api/import_project_xlsx?project=${encodeURIComponent(path)}`, {
                 method: 'POST',
                 body: form,
             });
@@ -342,7 +350,7 @@ export default function Dashboard() {
         try {
             const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
             const body = { parent: currentPath || project || '', name };
-            const res = await authenticatedFetch(`http://${host}api/folders`, {
+            const res = await authenticatedFetch(`http://${host}/api/folders`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body),
@@ -382,7 +390,7 @@ export default function Dashboard() {
         try {
             const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
             const body = { parent: currentPath || project || '', old_name: oldName, new_name: newName };
-            const res = await authenticatedFetch(`http://${host}api/folders`, {
+            const res = await authenticatedFetch(`http://${host}/api/folders`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body),
@@ -498,7 +506,7 @@ export default function Dashboard() {
                     dest_path: destPath,
                 };
             }
-            const res = await authenticatedFetch(`http://${host}api/projects/paste`, {
+            const res = await authenticatedFetch(`http://${host}/api/projects/paste`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body),
@@ -556,7 +564,7 @@ export default function Dashboard() {
 
         try {
             const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
-            const res = await authenticatedFetch(`http://${host}api/sheets?id=${sheetId}${project ? `&project=${encodeURIComponent(project)}` : ''}` , {
+            const res = await authenticatedFetch(`http://${host}/api/sheets?id=${sheetId}${project ? `&project=${encodeURIComponent(project)}` : ''}` , {
                 method: 'DELETE',
             });
             if (res.status === 403) {
@@ -597,7 +605,7 @@ export default function Dashboard() {
 
         try {
             const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
-            const res = await authenticatedFetch(`http://${host}api/sheets`, {
+            const res = await authenticatedFetch(`http://${host}/api/sheets`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(currentPath ? { id: sheetId, name: editingSheetName, project_name: currentPath } : { id: sheetId, name: editingSheetName }),
@@ -635,8 +643,54 @@ export default function Dashboard() {
         return list.filter((s) => (s?.name || '').toLowerCase().includes(q));
     }, [sheets, searchQuery]);
 
-    // Only the project owner may create/paste sheets and subfolders
-    const isOwner = !projectOwner || projectOwner === username;
+    // Only the project owner or project admins may create/paste sheets and subfolders
+    const isOwner = !projectOwner || projectOwner === username || projectAdmins.includes(username);
+    // Only the original project owner can manage admins
+    const isOriginalOwner = !projectOwner || projectOwner === username;
+
+    // Admin management functions
+    const handleAddAdmin = async () => {
+        const adminToAdd = newAdminName.trim();
+        if (!adminToAdd) return;
+        try {
+            const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
+            const topProject = (project || '').split('/')[0];
+            const res = await authenticatedFetch(`http://${host}/api/projects/admins`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ project: topProject, admin: adminToAdd }),
+            });
+            if (res.ok) {
+                setNewAdminName('');
+                fetchProjectOwner(project);
+            } else {
+                const msg = await res.text();
+                alert(msg || 'Failed to add admin');
+            }
+        } catch (e) {
+            alert('Error adding admin');
+        }
+    };
+
+    const handleRemoveAdmin = async (admin) => {
+        if (!window.confirm(`Remove "${admin}" as project admin?`)) return;
+        try {
+            const host = import.meta.env.VITE_BACKEND_HOST || 'localhost';
+            const topProject = (project || '').split('/')[0];
+            const res = await authenticatedFetch(
+                `http://${host}/api/projects/admins?project=${encodeURIComponent(topProject)}&admin=${encodeURIComponent(admin)}`,
+                { method: 'DELETE' }
+            );
+            if (res.ok) {
+                fetchProjectOwner(project);
+            } else {
+                const msg = await res.text();
+                alert(msg || 'Failed to remove admin');
+            }
+        } catch (e) {
+            alert('Error removing admin');
+        }
+    };
 
     return (
         <div className="min-h-screen bg-gray-50 flex flex-col font-sans text-gray-900">
@@ -678,6 +732,22 @@ export default function Dashboard() {
                             >
                                 <FileSpreadsheet className="me-1" /> Import XLSX
                             </button>
+                            {isOriginalOwner && project && (
+                                <button
+                                    onClick={() => setShowAdminManager(!showAdminManager)}
+                                    className={`btn btn-outline-warning btn-sm d-flex align-items-center me-2 ${showAdminManager ? 'active' : ''}`}
+                                    title="Manage Project Admins"
+                                >
+                                    <Users className="me-1" /> Admins{projectAdmins.length > 0 ? ` (${projectAdmins.length})` : ''}
+                                </button>
+                            )}
+                            <button
+                                onClick={() => navigate(`/timeline/${encodeURIComponent(project)}`)}
+                                className="btn btn-outline-info btn-sm d-flex align-items-center me-2"
+                                title="Project Timeline"
+                            >
+                                <History className="me-1" /> Timeline
+                            </button>
                             <button
                                 onClick={toggleAuditSidebar}
                                 className={`btn btn-outline-primary btn-sm d-flex align-items-center me-2 ${isAuditOpen ? 'active' : ''}`}
@@ -714,6 +784,57 @@ export default function Dashboard() {
                     
                 </div>
             </nav>
+
+            {/* Admin Management Panel */}
+            {showAdminManager && project && isOriginalOwner && (
+                <div className="bg-warning bg-opacity-10 border-bottom border-warning px-4 py-3">
+                    <div className="max-w-7xl mx-auto">
+                        <div className="d-flex justify-content-between align-items-center mb-2">
+                            <h6 className="mb-0 d-flex align-items-center">
+                                <Users className="me-2" size={16} /> Project Admins
+                            </h6>
+                            <button className="btn btn-sm btn-light" onClick={() => setShowAdminManager(false)}>
+                                <X size={14} />
+                            </button>
+                        </div>
+                        <div className="d-flex flex-wrap gap-2 align-items-center mb-2">
+                            <span className="badge bg-primary">
+                                <User size={12} className="me-1" />
+                                {projectOwner} (Owner)
+                            </span>
+                            {projectAdmins.map(admin => (
+                                <span key={admin} className="badge bg-warning text-dark d-flex align-items-center gap-1">
+                                    <User size={12} />
+                                    {admin}
+                                    <button
+                                        className="btn-close btn-close-sm ms-1"
+                                        style={{ fontSize: '0.5rem' }}
+                                        onClick={() => handleRemoveAdmin(admin)}
+                                        title={`Remove ${admin}`}
+                                    />
+                                </span>
+                            ))}
+                        </div>
+                        <div className="d-flex gap-2" style={{ maxWidth: 400 }}>
+                            <input
+                                type="text"
+                                className="form-control form-control-sm"
+                                placeholder="Enter username to add as admin..."
+                                value={newAdminName}
+                                onChange={(e) => setNewAdminName(e.target.value)}
+                                onKeyDown={(e) => e.key === 'Enter' && handleAddAdmin()}
+                            />
+                            <button
+                                className="btn btn-warning btn-sm d-flex align-items-center"
+                                onClick={handleAddAdmin}
+                                disabled={!newAdminName.trim()}
+                            >
+                                <Plus size={14} className="me-1" /> Add
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
 
             <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8">
                 {project && (

@@ -37,6 +37,7 @@ export default function Document() {
     const [projectName, setProjectName] = useState(new URLSearchParams(location.search).get('project') || '');
     const [owner, setOwner] = useState('');
     const [editors, setEditors] = useState([]);
+    const [projectAdmins, setProjectAdmins] = useState([]);
     // Tree structure: row -> parent row number (0 means root)
     const [rowParents, setRowParents] = useState({});
 
@@ -70,7 +71,7 @@ export default function Document() {
     }, []);
     const COLS = COL_HEADERS.length;
 
-    const isOwner = username && owner && username === owner;
+    const isOwner = username && owner && (username === owner || projectAdmins.includes(username));
     const canEdit = !!username && (isOwner || (Array.isArray(editors) && editors.includes(username)));
 
     const handleUnauthorized = () => {
@@ -78,6 +79,20 @@ export default function Document() {
         alert('Your session has expired. Please log in again.');
         navigate('/');
     };
+
+    // Fetch project admins when projectName changes
+    useEffect(() => {
+        const topProject = (projectName || '').split('/')[0];
+        if (!topProject) { setProjectAdmins([]); return; }
+        authenticatedFetch(apiUrl('/api/projects'))
+            .then(r => r.ok ? r.json() : [])
+            .then(list => {
+                const found = Array.isArray(list) ? list.find(p => p.name === topProject) : null;
+                setProjectAdmins(Array.isArray(found?.admins) ? found.admins : []);
+            })
+            .catch(() => setProjectAdmins([]));
+    }, [projectName]);
+
     // Row cut/paste state
     const [cutRow, setCutRow] = useState(null);
     // Column cut/paste state
@@ -123,6 +138,9 @@ export default function Document() {
     const [diffPanel, setDiffPanel] = useState({ visible: false, entry: null, parts: [] });
     // Show/hide system audit logs
     const [showSystemLogs, setShowSystemLogs] = useState(true);
+    // Timeline filter: show logs after a selected timeline event
+    const [timelineEntries, setTimelineEntries] = useState([]);
+    const [filterAfterEventId, setFilterAfterEventId] = useState('');
     // Undo/Redo stacks for committed cell value edits
     const [undoStack, setUndoStack] = useState([]); // [{type:'cell_edit', row, col, oldValue, newValue}]
     const [redoStack, setRedoStack] = useState([]);
@@ -2431,6 +2449,13 @@ export default function Document() {
             setSidebarOpen(false);
         } else {
             setSidebarOpen(true);
+            // Fetch timeline entries for the filter dropdown
+            if (projectName) {
+                authenticatedFetch(apiUrl(`/api/timeline?project=${encodeURIComponent(projectName)}`))
+                    .then(r => r.ok ? r.json() : [])
+                    .then(d => setTimelineEntries(Array.isArray(d) ? d : []))
+                    .catch(() => {});
+            }
         }
     };
 
@@ -2827,7 +2852,7 @@ export default function Document() {
                                 ←
                             </button>
                         </div>
-                        <div className="p-2 border-bottom bg-white">
+                        <div className="p-2 border-bottom bg-white d-flex flex-column gap-1">
                             <label className="d-flex align-items-center gap-2 text-sm" style={{ fontSize: '0.875rem', cursor: 'pointer' }}>
                                 <input
                                     type="checkbox"
@@ -2838,9 +2863,112 @@ export default function Document() {
                                 />
                                 Show system logs
                             </label>
+                            {timelineEntries.length > 0 && (
+                                <div className="d-flex align-items-center gap-1" style={{ fontSize: '0.8rem' }}>
+                                    <label className="mb-0 text-muted" style={{ whiteSpace: 'nowrap' }}>After event:</label>
+                                    <select
+                                        className="form-select form-select-sm"
+                                        value={filterAfterEventId}
+                                        onChange={(e) => setFilterAfterEventId(e.target.value)}
+                                        style={{ fontSize: '0.78rem' }}
+                                    >
+                                        <option value="">— All logs —</option>
+                                        {[...timelineEntries].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp)).map(ev => {
+                                            const label = ev.timestamp ? new Date(ev.timestamp).toLocaleString(undefined, { year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : ev.id;
+                                            return <option key={ev.id} value={ev.id}>{label} — {ev.description.length > 30 ? ev.description.slice(0, 30) + '…' : ev.description}</option>;
+                                        })}
+                                    </select>
+                                </div>
+                            )}
+                            <div className="d-flex justify-content-end">
+                                <button
+                                    className="btn btn-outline-secondary btn-sm d-flex align-items-center gap-1"
+                                    style={{ fontSize: '0.78rem' }}
+                                    title="Download displayed logs as CSV"
+                                    onClick={() => {
+                                        const filterEvent = filterAfterEventId ? timelineEntries.find(e => e.id === filterAfterEventId) : null;
+                                        const cutoff = filterEvent?.timestamp ? new Date(filterEvent.timestamp) : null;
+                                        const rows = auditLog.slice().reverse().filter(entry => {
+                                            if (!showSystemLogs && entry.user === 'system') return false;
+                                            if (cutoff) {
+                                                const ts = entry.timestamp ? new Date(entry.timestamp) : null;
+                                                if (!ts || ts < cutoff) return false;
+                                            }
+                                            return true;
+                                        });
+                                        const header = ['Timestamp', 'User', 'Action', 'Details', 'Row', 'Col', 'Old Value', 'New Value'];
+                                        const escape = v => '"' + String(v ?? '').replace(/"/g, '""') + '"';
+                                        const csvContent = [header.map(escape).join(','), ...rows.map(e => [
+                                            e.timestamp ? new Date(e.timestamp).toLocaleString() : '',
+                                            e.user, e.action, e.details, e.row, e.col, e.old_value, e.new_value
+                                        ].map(escape).join(','))].join('\n');
+                                        const blob = new Blob([csvContent], { type: 'text/csv' });
+                                        const url = URL.createObjectURL(blob);
+                                        const a = document.createElement('a');
+                                        a.href = url;
+                                        a.download = `${sheetName || id}_activity_log.csv`;
+                                        document.body.appendChild(a);
+                                        a.click();
+                                        a.remove();
+                                        URL.revokeObjectURL(url);
+                                    }}
+                                >
+                                    <Download size={13} /> Download CSV
+                                </button>
+                            </div>
                         </div>
                         <div ref={auditLogRef} className="overflow-auto p-3" style={{ height: 'calc(70% - 96px)', overflowY: 'scroll' , opacity: 1 }}>
-                            {auditLog.slice().reverse().filter(entry => showSystemLogs || entry.user !== 'system').map((entry, i) => {
+                            {(() => {
+                                const filterEvent = filterAfterEventId ? timelineEntries.find(e => e.id === filterAfterEventId) : null;
+                                const cutoff = filterEvent?.timestamp ? new Date(filterEvent.timestamp) : null;
+                                const filteredLogs = auditLog.slice().reverse().filter(entry => {
+                                    if (!showSystemLogs && entry.user === 'system') return false;
+                                    if (cutoff) {
+                                        const ts = entry.timestamp ? new Date(entry.timestamp) : null;
+                                        if (!ts || ts < cutoff) return false;
+                                    }
+                                    return true;
+                                });
+                                // Build combined list of audit entries + timeline event markers, sorted newest-first
+                                const sortedTimeline = [...timelineEntries]
+                                    .filter(ev => ev.timestamp)
+                                    .filter(ev => !cutoff || new Date(ev.timestamp) >= cutoff)
+                                    .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+                                const combined = [];
+                                let tlIdx = 0;
+                                for (const entry of filteredLogs) {
+                                    const entryTs = entry.timestamp ? new Date(entry.timestamp) : null;
+                                    // Insert timeline markers that fall after this entry (newer)
+                                    while (tlIdx < sortedTimeline.length) {
+                                        const evTs = new Date(sortedTimeline[tlIdx].timestamp);
+                                        if (entryTs && evTs >= entryTs) {
+                                            combined.push({ _type: 'timeline', ev: sortedTimeline[tlIdx] });
+                                            tlIdx++;
+                                        } else break;
+                                    }
+                                    combined.push({ _type: 'audit', entry });
+                                }
+                                // Remaining timeline events older than all audit entries
+                                while (tlIdx < sortedTimeline.length) {
+                                    combined.push({ _type: 'timeline', ev: sortedTimeline[tlIdx] });
+                                    tlIdx++;
+                                }
+                                return combined;
+                            })().map((item, i) => {
+                                if (item._type === 'timeline') {
+                                    const ev = item.ev;
+                                    const evTs = ev.timestamp ? new Date(ev.timestamp).toLocaleString(undefined, { year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '';
+                                    return (
+                                        <div key={`tl-${ev.id}`} className="d-flex align-items-center my-2" style={{ gap: 6 }}>
+                                            <div style={{ flex: 1, height: 1, background: '#f59e0b' }} />
+                                            <div style={{ background: '#fef3c7', border: '1px solid #f59e0b', borderRadius: 10, padding: '2px 10px', fontSize: '0.75rem', color: '#92400e', whiteSpace: 'nowrap', maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis' }} title={`${evTs} — ${ev.description}`}>
+                                                📅 {evTs} — {ev.description.length > 28 ? ev.description.slice(0, 28) + '…' : ev.description}
+                                            </div>
+                                            <div style={{ flex: 1, height: 1, background: '#f59e0b' }} />
+                                        </div>
+                                    );
+                                }
+                                const entry = item.entry;
                                 const ts = entry.timestamp ? new Date(entry.timestamp).toLocaleString() : '';
                                 const entryId = `${entry.timestamp || i}|${entry.user || ''}|${entry.action || ''}|${entry.details || ''}`;
                                 const isSelected = selectedAuditId === entryId;

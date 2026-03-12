@@ -9,6 +9,7 @@ import Document from './components/Document';
 import Settings from './components/Settings';
 import ChangePassword from './components/ChangePassword';
 import Admin from './components/Admin';
+import Timeline from './components/Timeline';
 
 function App() {
   return (
@@ -22,6 +23,7 @@ function App() {
         <Route path="/settings/:id" element={<Settings />} />
         <Route path="/change-password" element={<ChangePassword />} />
         <Route path="/admin" element={<Admin />} />
+        <Route path="/timeline/:project" element={<Timeline />} />
       </Routes>
     </Router>
   );

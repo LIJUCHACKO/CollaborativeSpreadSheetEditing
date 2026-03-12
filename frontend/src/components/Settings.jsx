@@ -24,8 +24,11 @@ export default function Settings() {
   const [users, setUsers] = useState([]);
   const [editors, setEditors] = useState([]);
   const [newOwner, setNewOwner] = useState('');
+  const [projectAdmins, setProjectAdmins] = useState([]);
+  const [projectOwner, setProjectOwner] = useState('');
   const isOwner = sheet && sheet.owner === username;
-  const canManage = admin || isOwner;
+  const isProjectAdmin = projectOwner === username || projectAdmins.includes(username);
+  const canManage = admin || isOwner || isProjectAdmin;
 
   useEffect(() => {
     if (!username || !isSessionValid()) {
@@ -57,6 +60,18 @@ export default function Settings() {
         if (usersRes.ok) {
           const list = await usersRes.json();
           setUsers(Array.isArray(list) ? list : []);
+        }
+
+        // Fetch project admins
+        if (project) {
+          const topProject = project.split('/')[0];
+          const projRes = await authenticatedFetch(apiUrl('/api/projects'));
+          if (projRes.ok) {
+            const projList = await projRes.json();
+            const found = Array.isArray(projList) ? projList.find(p => p.name === topProject) : null;
+            setProjectOwner(found?.owner || '');
+            setProjectAdmins(Array.isArray(found?.admins) ? found.admins : []);
+          }
         }
       } catch (e) {
         console.error('Settings fetch error', e);
@@ -178,7 +193,7 @@ export default function Settings() {
             </button>
           </div>
           {!canManage && (
-      <p className="text-muted mt-2">Only the owner or an admin can transfer ownership.</p>
+      <p className="text-muted mt-2">Only the sheet owner, a project admin, or a site admin can transfer ownership.</p>
     )}
         </div>
 
@@ -208,7 +223,7 @@ export default function Settings() {
             </button>
           </div>
           {!canManage && (
-      <p className="text-muted mt-2">Only the owner or an admin can modify permissions.</p>
+      <p className="text-muted mt-2">Only the sheet owner, a project admin, or a site admin can modify permissions.</p>
     )}
         </div>
       </main>

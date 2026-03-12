@@ -12,7 +12,8 @@ import (
 // Stored at DATA/projects.json as { "projectName": { "owner": "username" }, ... }
 
 type ProjectMeta struct {
-	Owner string `json:"owner"`
+	Owner  string   `json:"owner"`
+	Admins []string `json:"admins,omitempty"` // additional project admins (besides the owner)
 }
 
 type ProjectMetaManager struct {
@@ -83,9 +84,79 @@ func (pm *ProjectMetaManager) SetOwner(project, owner string) {
 		return
 	}
 	pm.mu.Lock()
-	pm.data[project] = ProjectMeta{Owner: owner}
+	meta := pm.data[project]
+	meta.Owner = owner
+	pm.data[project] = meta
 	pm.mu.Unlock()
 	pm.Save()
+}
+
+// GetAdmins returns the list of additional admins for a project.
+func (pm *ProjectMetaManager) GetAdmins(project string) []string {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	return pm.data[project].Admins
+}
+
+// SetAdmins replaces the admins list for a project.
+func (pm *ProjectMetaManager) SetAdmins(project string, admins []string) {
+	pm.mu.Lock()
+	meta := pm.data[project]
+	meta.Admins = admins
+	pm.data[project] = meta
+	pm.mu.Unlock()
+	pm.Save()
+}
+
+// AddAdmin adds an admin to a project (no duplicates).
+func (pm *ProjectMetaManager) AddAdmin(project, admin string) {
+	if project == "" || admin == "" {
+		return
+	}
+	pm.mu.Lock()
+	meta := pm.data[project]
+	for _, a := range meta.Admins {
+		if a == admin {
+			pm.mu.Unlock()
+			return
+		}
+	}
+	meta.Admins = append(meta.Admins, admin)
+	pm.data[project] = meta
+	pm.mu.Unlock()
+	pm.Save()
+}
+
+// RemoveAdmin removes an admin from a project.
+func (pm *ProjectMetaManager) RemoveAdmin(project, admin string) {
+	pm.mu.Lock()
+	meta := pm.data[project]
+	newAdmins := make([]string, 0, len(meta.Admins))
+	for _, a := range meta.Admins {
+		if a != admin {
+			newAdmins = append(newAdmins, a)
+		}
+	}
+	meta.Admins = newAdmins
+	pm.data[project] = meta
+	pm.mu.Unlock()
+	pm.Save()
+}
+
+// IsProjectAdmin returns true if the user is the project owner or one of the admins.
+func (pm *ProjectMetaManager) IsProjectAdmin(project, user string) bool {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	meta := pm.data[project]
+	if meta.Owner == user {
+		return true
+	}
+	for _, a := range meta.Admins {
+		if a == user {
+			return true
+		}
+	}
+	return false
 }
 
 func (pm *ProjectMetaManager) Delete(project string) {
