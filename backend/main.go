@@ -2000,6 +2000,116 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]string{"message": "Ownership transferred"})
 	})
 
+	// Delete audit log entries before a specific timeline event.
+	// Only the sheet owner or a project admin can perform this action.
+	// Usage: DELETE /api/sheet/audit?sheet_name=<name>&project=<proj>&before_event_id=<timeline-event-id>
+	http.HandleFunc("/api/sheet/audit", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		if r.Method != http.MethodDelete {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		token := r.Header.Get("Authorization")
+		username, err := globalUserManager.ValidateToken(token)
+		if err != nil {
+			http.Error(w, "Unauthorized: "+err.Error(), http.StatusUnauthorized)
+			return
+		}
+
+		sheetName := r.URL.Query().Get("sheet_name")
+		project := r.URL.Query().Get("project")
+		beforeEventID := r.URL.Query().Get("before_event_id")
+
+		if sheetName == "" || beforeEventID == "" {
+			http.Error(w, "sheet_name and before_event_id are required", http.StatusBadRequest)
+			return
+		}
+
+		sheet := globalSheetManager.GetSheetBy(sheetName, project)
+		if sheet == nil {
+			http.Error(w, "Sheet not found", http.StatusNotFound)
+			return
+		}
+
+		// Permission check: sheet owner or project admin only
+		topProject := strings.SplitN(project, "/", 2)[0]
+		isAdmin := globalUserManager.IsAdminUser(username) || globalProjectMeta.IsProjectAdmin(topProject, username)
+		sheet.mu.RLock()
+		isSheetOwner := sheet.Owner == username
+		sheet.mu.RUnlock()
+		if !isSheetOwner && !isAdmin {
+			http.Error(w, "Forbidden: sheet owner or project admin only", http.StatusForbidden)
+			return
+		}
+
+		// Load the project timeline to find the event's timestamp
+		timelinePath := filepath.Join(dataDir, topProject, "timeline.json")
+		timelineData, readErr := os.ReadFile(timelinePath)
+		if readErr != nil {
+			if os.IsNotExist(readErr) {
+				http.Error(w, "Timeline not found for this project", http.StatusNotFound)
+				return
+			}
+			http.Error(w, "Failed to read timeline: "+readErr.Error(), http.StatusInternalServerError)
+			return
+		}
+		type tlEntry struct {
+			ID        string    `json:"id"`
+			Timestamp time.Time `json:"timestamp"`
+		}
+		var tlEntries []tlEntry
+		if jsonErr := json.Unmarshal(timelineData, &tlEntries); jsonErr != nil {
+			http.Error(w, "Failed to parse timeline: "+jsonErr.Error(), http.StatusInternalServerError)
+			return
+		}
+		var cutoff time.Time
+		foundEvent := false
+		for _, e := range tlEntries {
+			if e.ID == beforeEventID {
+				cutoff = e.Timestamp
+				foundEvent = true
+				break
+			}
+		}
+		if !foundEvent {
+			http.Error(w, "Timeline event not found", http.StatusNotFound)
+			return
+		}
+
+		// Delete all audit entries with timestamp strictly before the cutoff
+		sheet.mu.Lock()
+		kept := sheet.AuditLog[:0]
+		deleted := 0
+		for _, entry := range sheet.AuditLog {
+			if entry.Timestamp.Before(cutoff) {
+				deleted++
+			} else {
+				kept = append(kept, entry)
+			}
+		}
+		sheet.AuditLog = kept
+		sheet.mu.Unlock()
+
+		// Persist the sheet
+		globalSheetManager.SaveSheet(sheet)
+
+		log.Printf("User %s deleted %d audit log entries before event %s on sheet %s/%s", username, deleted, beforeEventID, project, sheetName)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"message": fmt.Sprintf("Deleted %d audit log entries before the selected event", deleted),
+			"deleted": deleted,
+		})
+	})
+
 	// Timeline API: GET/POST/PUT/DELETE for project timeline entries
 	// Stored as timeline.json inside each project folder
 	http.HandleFunc("/api/timeline", func(w http.ResponseWriter, r *http.Request) {

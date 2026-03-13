@@ -19,7 +19,7 @@ import {
     Undo2,
     Redo2
 } from 'lucide-react';
-import { Lock, Code, ChevronDown } from 'lucide-react';
+import { Lock, Code, ChevronDown, Trash2 } from 'lucide-react';
 import { isSessionValid, clearAuth, getUsername, authenticatedFetch, apiUrl } from '../utils/auth';
 import 'bootstrap/dist/css/bootstrap.min.css';
 export default function DataSheet() {
@@ -149,6 +149,8 @@ export default function DataSheet() {
     // Preserve audit log scroll position across open/close
     const auditLogRef = useRef(null);
     const auditLogScrollTopRef = useRef(0);
+    // Tracks whether a delete-before-event audit purge is in progress
+    const [isDeletingAuditLogs, setIsDeletingAuditLogs] = useState(false);
     const editingOriginalValueRef = useRef(null);
     const editingOriginalScriptRef = useRef(null);
 
@@ -1218,6 +1220,7 @@ export default function DataSheet() {
                 sheet_name: id,
                 payload: { row: String(r), col: String(c), value, user: username }
             };
+            console.log("Sending cell update:", msg);
             ws.current.send(JSON.stringify(msg));
         }
         setCellModified(0);
@@ -1963,6 +1966,40 @@ export default function DataSheet() {
         }
     };
 
+    // Delete all audit log entries before the selected timeline event (owner/admin only)
+    const handleDeleteAuditBefore = async () => {
+        if (!filterAfterEventId) return;
+        const ev = timelineEntries.find(e => e.id === filterAfterEventId);
+        if (!ev) return;
+        const evLabel = ev.timestamp
+            ? new Date(ev.timestamp).toLocaleString(undefined, { year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+            : ev.id;
+        const confirmed = window.confirm(
+            `Delete all audit log entries BEFORE the event:\n"${evLabel} — ${ev.description}"?\n\nThis action cannot be undone.`
+        );
+        if (!confirmed) return;
+        setIsDeletingAuditLogs(true);
+        try {
+            const params = new URLSearchParams({ sheet_name: id, project: projectName, before_event_id: filterAfterEventId });
+            const res = await authenticatedFetch(apiUrl(`/api/sheet/audit?${params.toString()}`), { method: 'DELETE' });
+            if (!res.ok) {
+                const msg = await res.text();
+                alert('Failed to delete audit logs: ' + msg);
+                return;
+            }
+            const result = await res.json();
+            // Refetch the full sheet to get the updated audit log
+            authenticatedFetch(apiUrl(`/api/sheet?id=${encodeURIComponent(id)}&project=${encodeURIComponent(projectName)}`))
+                .then(r => r.ok ? r.json() : null)
+                .then(sheet => { if (sheet?.audit_log) setAuditLog(sheet.audit_log); });
+            alert(result.message || 'Audit logs deleted successfully.');
+        } catch (e) {
+            alert('Error deleting audit logs: ' + e.message);
+        } finally {
+            setIsDeletingAuditLogs(false);
+        }
+    };
+
     // Close sidebar capturing current scroll position
     const closeSidebar = () => {
         if (auditLogRef.current) {
@@ -2421,20 +2458,34 @@ export default function DataSheet() {
                                 Show system logs
                             </label>
                             {timelineEntries.length > 0 && (
-                                <div className="d-flex align-items-center gap-1" style={{ fontSize: '0.8rem' }}>
-                                    <label className="mb-0 text-muted" style={{ whiteSpace: 'nowrap' }}>After event:</label>
-                                    <select
-                                        className="form-select form-select-sm"
-                                        value={filterAfterEventId}
-                                        onChange={(e) => setFilterAfterEventId(e.target.value)}
-                                        style={{ fontSize: '0.78rem' }}
-                                    >
-                                        <option value="">— All logs —</option>
-                                        {[...timelineEntries].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp)).map(ev => {
-                                            const label = ev.timestamp ? new Date(ev.timestamp).toLocaleString(undefined, { year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : ev.id;
-                                            return <option key={ev.id} value={ev.id}>{label} — {ev.description.length > 30 ? ev.description.slice(0, 30) + '…' : ev.description}</option>;
-                                        })}
-                                    </select>
+                                <div className="d-flex flex-column gap-1">
+                                    <div className="d-flex align-items-center gap-1" style={{ fontSize: '0.8rem' }}>
+                                        <label className="mb-0 text-muted" style={{ whiteSpace: 'nowrap' }}>After event:</label>
+                                        <select
+                                            className="form-select form-select-sm"
+                                            value={filterAfterEventId}
+                                            onChange={(e) => setFilterAfterEventId(e.target.value)}
+                                            style={{ fontSize: '0.78rem' }}
+                                        >
+                                            <option value="">— All logs —</option>
+                                            {[...timelineEntries].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp)).map(ev => {
+                                                const label = ev.timestamp ? new Date(ev.timestamp).toLocaleString(undefined, { year: 'numeric', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : ev.id;
+                                                return <option key={ev.id} value={ev.id}>{label} — {ev.description.length > 30 ? ev.description.slice(0, 30) + '…' : ev.description}</option>;
+                                            })}
+                                        </select>
+                                    </div>
+                                    {isOwner && filterAfterEventId && (
+                                        <button
+                                            className="btn btn-sm btn-outline-danger d-flex align-items-center gap-1 align-self-start"
+                                            style={{ fontSize: '0.75rem' }}
+                                            title="Delete all audit log entries before this event (owner/admin only)"
+                                            disabled={isDeletingAuditLogs}
+                                            onClick={handleDeleteAuditBefore}
+                                        >
+                                            <Trash2 size={12} />
+                                            {isDeletingAuditLogs ? 'Deleting…' : 'Delete logs before this event'}
+                                        </button>
+                                    )}
                                 </div>
                             )}
                             <div className="d-flex justify-content-end">
