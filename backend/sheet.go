@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-const dataDir = "../DATA"
+const dataDir = "../../DATA"
 
 func firstNChar(s string, n int) string {
 	if len(s) <= n {
@@ -1202,6 +1202,112 @@ func (s *Sheet) InsertRowBelow(targetRowStr, user string) bool {
 	for _, loc := range scriptLocs {
 		ExecuteCellScriptonChange(s.ProjectName, s.Name, loc.row, loc.col)
 	}
+
+	globalSheetManager.SaveSheet(s)
+	return true
+}
+
+// InsertRowAbove inserts a new empty row directly above `targetRowStr`,
+// at the same tree level (inheriting the same parent). Shifts targetRow and
+// all subsequent rows (data and heights) down by one.
+// Returns true if an insertion occurred.
+func (s *Sheet) InsertRowAbove(targetRowStr, user string) bool {
+	var targetRow int
+	if _, err := fmt.Sscanf(targetRowStr, "%d", &targetRow); err != nil || targetRow < 1 {
+		return false
+	}
+
+	s.mu.Lock()
+	// The new row goes exactly where targetRow currently is
+	insertRow := targetRow
+
+	// Remember the parent of the target row BEFORE we shift anything
+	parentOfTarget := 0
+	if s.RowParents != nil {
+		if p, ok := s.RowParents[targetRowStr]; ok {
+			parentOfTarget = p
+		}
+	}
+
+	// Shift existing rows [insertRow..] down by 1
+	maxRow := 0
+	for rowKey := range s.Data {
+		var r int
+		if _, err := fmt.Sscanf(rowKey, "%d", &r); err == nil {
+			if r > maxRow {
+				maxRow = r
+			}
+		}
+	}
+	for r := maxRow; r >= insertRow; r-- {
+		fromKey := itoa(r)
+		toKey := itoa(r + 1)
+		if rowData, ok := s.Data[fromKey]; ok {
+			delete(s.Data, fromKey)
+			s.Data[toKey] = rowData
+		} else {
+			delete(s.Data, toKey)
+		}
+	}
+
+	// Ensure the new row exists but empty
+	newKey := itoa(insertRow)
+	if s.Data == nil {
+		s.Data = make(map[string]map[string]Cell)
+	}
+	if _, ok := s.Data[newKey]; !ok {
+		s.Data[newKey] = make(map[string]Cell)
+	}
+
+	// Shift RowHeights
+	if s.RowHeights == nil {
+		s.RowHeights = make(map[string]int)
+	}
+	maxHeightRow := 0
+	for rowKey := range s.RowHeights {
+		var r int
+		if _, err := fmt.Sscanf(rowKey, "%d", &r); err == nil {
+			if r > maxHeightRow {
+				maxHeightRow = r
+			}
+		}
+	}
+	for r := maxHeightRow; r >= insertRow; r-- {
+		fromKey := itoa(r)
+		toKey := itoa(r + 1)
+		if h, ok := s.RowHeights[fromKey]; ok {
+			delete(s.RowHeights, fromKey)
+			s.RowHeights[toKey] = h
+		} else {
+			delete(s.RowHeights, toKey)
+		}
+	}
+
+	// Adjust RowParents references for the inserted row
+	s.adjustRowParentsOnInsert(insertRow)
+	// The new row inherits the same parent as the original target row
+	if s.RowParents == nil {
+		s.RowParents = make(map[string]int)
+	}
+	if parentOfTarget > 0 {
+		s.RowParents[newKey] = parentOfTarget
+	}
+
+	// Adjust audit log row references for rows at or below the inserted position
+	s.adjustAuditRowsOnInsert(insertRow)
+
+	s.AuditLog = append(s.AuditLog, AuditEntry{
+		Timestamp: time.Now(),
+		User:      user,
+		Action:    "INSERT_ROW_ABOVE",
+		Row1:      insertRow,
+	})
+	s.mu.Unlock()
+
+	// Adjust script tags in cells for row insertion
+	s.adjustScriptTagsOnInsertRow(insertRow)
+	// Adjust OptionsRange references in cells for row insertion
+	s.adjustOptionsRangeOnInsertRow(insertRow)
 
 	globalSheetManager.SaveSheet(s)
 	return true

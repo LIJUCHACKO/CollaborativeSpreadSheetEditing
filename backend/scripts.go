@@ -560,8 +560,8 @@ func (s *Sheet) adjustScriptTagsOnDeleteRow(deleteRow int) {
 				// Single cell reference {{A2}}
 				if submatches[3] == "" || submatches[4] == "" {
 					if row1 == deleteRow {
-						// Reference to deleted row becomes invalid - keep as is or mark
-						return match
+						// Reference to deleted row - mark as removed so script shows error
+						return fmt.Sprintf("{{%s%d_removed}}", col1, row1)
 					}
 					if row1 > deleteRow {
 						row1--
@@ -577,8 +577,8 @@ func (s *Sheet) adjustScriptTagsOnDeleteRow(deleteRow int) {
 				if deleteRow >= row1 && deleteRow <= row2 {
 					// Row is within range - shrink the range
 					if row1 == row2 {
-						// Single row range that got deleted - keep as invalid reference
-						return match
+						// Single row range that got deleted - mark as removed
+						return fmt.Sprintf("{{%s%d_removed:%s%d_removed}}", col1, row1, col2, row2)
 					}
 					if deleteRow == row1 {
 						row1++
@@ -604,6 +604,9 @@ func (s *Sheet) adjustScriptTagsOnDeleteRow(deleteRow int) {
 
 			if newScript != cell.Script {
 				cell.Script = newScript
+				if strings.Contains(newScript, "_removed}}") {
+					cell.Value = "reference removed"
+				}
 				s.Data[rowKey][colKey] = cell
 				pending = append(pending, depUpd{s.ProjectName, s.Name, cell.CellID, newScript, rowKey, colKey})
 			}
@@ -675,8 +678,8 @@ func (s *Sheet) adjustScriptTagsOnDeleteRow(deleteRow int) {
 					// Single cell reference {{project/sheet/A2}}
 					if submatches[5] == "" || submatches[6] == "" {
 						if row1 == deleteRow {
-							// Reference to deleted row becomes invalid - keep as is
-							return match
+							// Reference to deleted row - mark as removed so script shows error
+							return fmt.Sprintf("{{%s/%s/%s%d_removed}}", refProject, refSheet, col1, row1)
 						}
 						if row1 > deleteRow {
 							row1--
@@ -692,8 +695,8 @@ func (s *Sheet) adjustScriptTagsOnDeleteRow(deleteRow int) {
 					if deleteRow >= row1 && deleteRow <= row2 {
 						// Row is within range - shrink the range
 						if row1 == row2 {
-							// Single row range that got deleted - keep as invalid reference
-							return match
+							// Single row range that got deleted - mark as removed
+							return fmt.Sprintf("{{%s/%s/%s%d_removed:%s%d_removed}}", refProject, refSheet, col1, row1, col2, row2)
 						}
 						if deleteRow == row1 {
 							row1++
@@ -719,6 +722,9 @@ func (s *Sheet) adjustScriptTagsOnDeleteRow(deleteRow int) {
 
 				if newScript != cell.Script {
 					cell.Script = newScript
+					if strings.Contains(newScript, "_removed}}") {
+						cell.Value = "reference removed"
+					}
 					sheet.Data[rowKey][colKey] = cell
 					modified = true
 				}
@@ -742,8 +748,7 @@ func (s *Sheet) adjustScriptTagsOnDeleteRow(deleteRow int) {
 				globalSheetManager.UpdateScriptDependencies(u.project, u.sheet, u.cellID, u.script, u.row, u.col)
 			}
 			globalSheetManager.SaveSheet(sheet)
-			// Send ROW_COL_UPDATED m
-			// essage to clients for this modified sheet
+			// Send ROW_COL_UPDATED message to clients for this modified sheet
 			if globalHub != nil {
 				globalSheetManager.QueueRowColUpdate(sheet.ProjectName, sheet.Name)
 			}
@@ -1207,7 +1212,8 @@ func (s *Sheet) adjustScriptTagsOnDeleteRowBlock(blockStart, blockSize int) {
 				if submatches[3] == "" || submatches[4] == "" {
 					// Single cell reference
 					if row1 >= blockStart && row1 <= blockEnd {
-						return match // deleted row - keep as is
+						// Reference to deleted row - mark as removed so script shows error
+						return fmt.Sprintf("{{%s%d_removed}}", col1, row1)
 					}
 					if row1 > blockEnd {
 						row1 -= blockSize
@@ -1222,8 +1228,8 @@ func (s *Sheet) adjustScriptTagsOnDeleteRowBlock(blockStart, blockSize int) {
 				// Adjust range endpoints for block delete
 				newRow1, newRow2 := row1, row2
 				if blockStart <= row1 && blockEnd >= row2 {
-					// Entire range deleted
-					return match
+					// Entire range deleted - mark as removed
+					return fmt.Sprintf("{{%s%d_removed:%s%d_removed}}", col1, row1, col2, row2)
 				}
 				if blockStart >= row1 && blockEnd <= row2 {
 					// Block is within range - shrink
@@ -1248,6 +1254,9 @@ func (s *Sheet) adjustScriptTagsOnDeleteRowBlock(blockStart, blockSize int) {
 
 			if newScript != cell.Script {
 				cell.Script = newScript
+				if strings.Contains(newScript, "_removed}}") {
+					cell.Value = "reference removed"
+				}
 				s.Data[rowKey][colKey] = cell
 				pending = append(pending, depUpd{s.ProjectName, s.Name, cell.CellID, newScript, rowKey, colKey})
 			}
@@ -1315,7 +1324,8 @@ func (s *Sheet) adjustScriptTagsOnDeleteRowBlock(blockStart, blockSize int) {
 
 					if submatches[5] == "" || submatches[6] == "" {
 						if row1 >= blockStart && row1 <= blockEnd {
-							return match
+							// Reference to deleted row - mark as removed so script shows error
+							return fmt.Sprintf("{{%s/%s/%s%d_removed}}", refProject, refSheet, col1, row1)
 						}
 						if row1 > blockEnd {
 							row1 -= blockSize
@@ -1328,7 +1338,8 @@ func (s *Sheet) adjustScriptTagsOnDeleteRowBlock(blockStart, blockSize int) {
 
 					newRow1, newRow2 := row1, row2
 					if blockStart <= row1 && blockEnd >= row2 {
-						return match
+						// Entire range deleted - mark as removed
+						return fmt.Sprintf("{{%s/%s/%s%d_removed:%s%d_removed}}", refProject, refSheet, col1, row1, col2, row2)
 					}
 					if blockStart >= row1 && blockEnd <= row2 {
 						newRow2 = row2 - blockSize
@@ -1350,6 +1361,9 @@ func (s *Sheet) adjustScriptTagsOnDeleteRowBlock(blockStart, blockSize int) {
 
 				if newScript != cell.Script {
 					cell.Script = newScript
+					if strings.Contains(newScript, "_removed}}") {
+						cell.Value = "reference removed"
+					}
 					sheet.Data[rowKey][colKey] = cell
 					modified = true
 				}
@@ -1589,8 +1603,8 @@ func (s *Sheet) adjustScriptTagsOnDeleteCol(deleteIdx int) {
 				// Single cell reference {{A2}}
 				if submatches[3] == "" || submatches[4] == "" {
 					if col1Idx == deleteIdx {
-						// Reference to deleted column becomes invalid - keep as is
-						return match
+						// Reference to deleted column - mark as removed so script shows error
+						return fmt.Sprintf("{{%s%s_removed}}", col1, row1)
 					}
 					if col1Idx > deleteIdx {
 						col1Idx--
@@ -1608,8 +1622,8 @@ func (s *Sheet) adjustScriptTagsOnDeleteCol(deleteIdx int) {
 				if deleteIdx >= col1Idx && deleteIdx <= col2Idx {
 					// Column is within range - shrink the range
 					if col1Idx == col2Idx {
-						// Single column range that got deleted - keep as invalid reference
-						return match
+						// Single column range that got deleted - mark as removed
+						return fmt.Sprintf("{{%s%s_removed:%s%s_removed}}", col1, row1, col2, row2)
 					}
 					if deleteIdx == col1Idx {
 						col1Idx++
@@ -1640,6 +1654,9 @@ func (s *Sheet) adjustScriptTagsOnDeleteCol(deleteIdx int) {
 
 			if newScript != cell.Script {
 				cell.Script = newScript
+				if strings.Contains(newScript, "_removed}}") {
+					cell.Value = "reference removed"
+				}
 				s.Data[rowKey][colKey] = cell
 				pending = append(pending, depUpd{s.ProjectName, s.Name, cell.CellID, newScript, rowKey, colKey})
 			}
@@ -1712,8 +1729,8 @@ func (s *Sheet) adjustScriptTagsOnDeleteCol(deleteIdx int) {
 					// Single cell reference {{project/sheet/A2}}
 					if submatches[5] == "" || submatches[6] == "" {
 						if col1Idx == deleteIdx {
-							// Reference to deleted column becomes invalid - keep as is
-							return match
+							// Reference to deleted column - mark as removed so script shows error
+							return fmt.Sprintf("{{%s/%s/%s%s_removed}}", refProject, refSheet, col1, row1)
 						}
 						if col1Idx > deleteIdx {
 							col1Idx--
@@ -1731,8 +1748,8 @@ func (s *Sheet) adjustScriptTagsOnDeleteCol(deleteIdx int) {
 					if deleteIdx >= col1Idx && deleteIdx <= col2Idx {
 						// Column is within range - shrink the range
 						if col1Idx == col2Idx {
-							// Single column range that got deleted - keep as invalid reference
-							return match
+							// Single column range that got deleted - mark as removed
+							return fmt.Sprintf("{{%s/%s/%s%s_removed:%s%s_removed}}", refProject, refSheet, col1, row1, col2, row2)
 						}
 						if deleteIdx == col1Idx {
 							col1Idx++
@@ -1763,6 +1780,9 @@ func (s *Sheet) adjustScriptTagsOnDeleteCol(deleteIdx int) {
 
 				if newScript != cell.Script {
 					cell.Script = newScript
+					if strings.Contains(newScript, "_removed}}") {
+						cell.Value = "reference removed"
+					}
 					sheet.Data[rowKey][colKey] = cell
 					modified = true
 				}

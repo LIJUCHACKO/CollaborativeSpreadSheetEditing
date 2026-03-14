@@ -22,6 +22,7 @@ import {
 import { Lock, Code, ChevronDown, ListOrdered, Trash2 } from 'lucide-react';
 import { isSessionValid, clearAuth, getUsername, authenticatedFetch, apiUrl } from '../utils/auth';
 import MarkdownEditorPanel from './MarkdownEditorPanel';
+import ScriptEditorPanel from './ScriptEditorPanel';
 import 'bootstrap/dist/css/bootstrap.min.css';
 export default function Document() {
     const navigate = useNavigate();
@@ -1205,7 +1206,7 @@ export default function Document() {
                     }
                 }
 
-                setTimeout(sendInitialPing, 5000);
+                setTimeout(sendInitialPing, 1000);
 
             };
 
@@ -1334,7 +1335,7 @@ export default function Document() {
                     // Try to reconnect after 2 seconds
                     reconnectTimeout = setTimeout(() => {
                         connectWS();
-                    }, 5000);
+                    }, 2000);
                 }
             };
 
@@ -1505,6 +1506,18 @@ export default function Document() {
         editingOriginalScriptRef.current = null;
     };
 
+    // Returns a human-readable label for a stack entry (used in button tooltips/labels)
+    const stackEntryLabel = (entry) => {
+        if (!entry) return '';
+        switch (entry.type) {
+            case 'cell_edit': return `Edit ${entry.col}${entry.row}`;
+            case 'cell_script': return `Script ${entry.col}${entry.row}`;
+            case 'paste': return 'Paste';
+            case 'option_selection': return `Option ${entry.col}${entry.row}`;
+            default: return entry.type;
+        }
+    };
+
     const doUndo = () => {
         if (undoStack.length === 0 || !canEdit) return;
         closeAllPopups();
@@ -1599,74 +1612,6 @@ export default function Document() {
             }
             setRedoStack(prev => [...prev, last]);
             setUndoStack(prev => prev.slice(0, -1));
-        } else if (last.type === 'insert_row') {
-            const { insertedRow } = last;
-            if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-                ws.current.send(JSON.stringify({ type: 'DELETE_ROW', sheet_name: id, payload: { row: String(insertedRow), user: username } }));
-            }
-            setRedoStack(prev => [...prev, last]);
-            setUndoStack(prev => prev.slice(0, -1));
-        } else if (last.type === 'move_row') {
-            const { fromRow, targetRow, destIndex } = last;
-            // Inverse move: move the row currently at destIndex back to original fromRow
-            const inverseTarget = (fromRow < destIndex) ? (fromRow - 1) : fromRow;
-            if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-                ws.current.send(JSON.stringify({ type: 'MOVE_ROW', sheet_name: id, payload: { fromRow: String(destIndex), targetRow: String(inverseTarget), user: username } }));
-            }
-            setRedoStack(prev => [...prev, last]);
-            setUndoStack(prev => prev.slice(0, -1));
-        } else if (last.type === 'move_row_as_child') {
-            const { fromRow, targetRow, destIndex } = last;
-            const inverseTarget = (fromRow < destIndex) ? (fromRow - 1) : fromRow;
-            if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-                ws.current.send(JSON.stringify({ type: 'MOVE_ROW', sheet_name: id, payload: { fromRow: String(destIndex), targetRow: String(inverseTarget), user: username } }));
-            }
-            setRedoStack(prev => [...prev, last]);
-            setUndoStack(prev => prev.slice(0, -1));
-        } else if (last.type === 'insert_col') {
-            const { newCol } = last;
-            if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-                ws.current.send(JSON.stringify({ type: 'DELETE_COL', sheet_name: id, payload: { col: String(newCol), user: username } }));
-            }
-            setRedoStack(prev => [...prev, last]);
-            setUndoStack(prev => prev.slice(0, -1));
-        } else if (last.type === 'delete_row') {
-            const { row } = last;
-            // Re-insert the deleted row at its original position
-            if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-                ws.current.send(JSON.stringify({ type: 'INSERT_ROW', sheet_name: id, payload: { targetRow: String(Number(row) - 1), user: username } }));
-            }
-            setRedoStack(prev => [...prev, last]);
-            setUndoStack(prev => prev.slice(0, -1));
-        } else if (last.type === 'delete_col') {
-            const { targetLeft } = last;
-            // Re-insert the deleted column to the right of its previous left neighbor (fallback to current first column)
-            const targetCol = targetLeft ?? colLabelAt(0);
-            if (targetCol && ws.current && ws.current.readyState === WebSocket.OPEN) {
-                ws.current.send(JSON.stringify({ type: 'INSERT_COL', sheet_name: id, payload: { targetCol: String(targetCol), user: username } }));
-            }
-            setRedoStack(prev => [...prev, last]);
-            setUndoStack(prev => prev.slice(0, -1));
-        } else if (last.type === 'move_col') {
-            const { fromCol, targetCol, destIndex } = last;
-            const destLabel = colLabelAt(destIndex);
-            const origIdx = colIndexMap[String(fromCol)] ?? -1;
-            if (destLabel && origIdx >= 0 && ws.current && ws.current.readyState === WebSocket.OPEN) {
-                // Compute inverse targetIdx' per MOVE_COL insertion semantics
-                const fromIdx2 = destIndex;
-                let targetIdxPrime;
-                if (fromIdx2 >= origIdx) {
-                    targetIdxPrime = origIdx - 1;
-                } else {
-                    targetIdxPrime = origIdx;
-                }
-                const targetLabelPrime = colLabelAt(targetIdxPrime);
-                if (targetLabelPrime) {
-                    ws.current.send(JSON.stringify({ type: 'MOVE_COL', sheet_name: id, payload: { fromCol: String(destLabel), targetCol: String(targetLabelPrime), user: username } }));
-                }
-            }
-            setRedoStack(prev => [...prev, last]);
-            setUndoStack(prev => prev.slice(0, -1));
         }
     };
 
@@ -1756,59 +1701,6 @@ export default function Document() {
                     sheet_name: id,
                     payload: { row, col, value: newValue, option_selected: newSelected, user: username }
                 }));
-            }
-            setUndoStack(prev => [...prev, last]);
-            setRedoStack(prev => prev.slice(0, -1));
-        } else if (last.type === 'insert_row') {
-            const { insertedRow } = last;
-            // Re-insert the row at the same position (target = insertedRow - 1)
-            if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-                ws.current.send(JSON.stringify({ type: 'INSERT_ROW', sheet_name: id, payload: { targetRow: String(Number(insertedRow) - 1), user: username } }));
-            }
-            setUndoStack(prev => [...prev, last]);
-            setRedoStack(prev => prev.slice(0, -1));
-        } else if (last.type === 'move_row') {
-            const { fromRow, targetRow, destIndex } = last;
-            // Reapply original move
-            if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-                ws.current.send(JSON.stringify({ type: 'MOVE_ROW', sheet_name: id, payload: { fromRow: String(fromRow), targetRow: String(targetRow), user: username } }));
-            }
-            setUndoStack(prev => [...prev, last]);
-            setRedoStack(prev => prev.slice(0, -1));
-        } else if (last.type === 'move_row_as_child') {
-            const { fromRow, targetRow, destIndex } = last;
-            if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-                ws.current.send(JSON.stringify({ type: 'MOVE_ROW_AS_CHILD', sheet_name: id, payload: { fromRow: String(fromRow), targetRow: String(targetRow), user: username } }));
-            }
-            setUndoStack(prev => [...prev, last]);
-            setRedoStack(prev => prev.slice(0, -1));
-        } else if (last.type === 'insert_col') {
-            const { targetCol } = last;
-            if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-                ws.current.send(JSON.stringify({ type: 'INSERT_COL', sheet_name: id, payload: { targetCol: String(targetCol), user: username } }));
-            }
-            setUndoStack(prev => [...prev, last]);
-            setRedoStack(prev => prev.slice(0, -1));
-        } else if (last.type === 'move_col') {
-            const { fromCol, targetCol } = last;
-            if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-                ws.current.send(JSON.stringify({ type: 'MOVE_COL', sheet_name: id, payload: { fromCol: String(fromCol), targetCol: String(targetCol), user: username } }));
-            }
-            setUndoStack(prev => [...prev, last]);
-            setRedoStack(prev => prev.slice(0, -1));
-        } else if (last.type === 'delete_row') {
-            const { row } = last;
-            // Reapply deletion of the row
-            if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-                ws.current.send(JSON.stringify({ type: 'DELETE_ROW', sheet_name: id, payload: { row: String(row), user: username } }));
-            }
-            setUndoStack(prev => [...prev, last]);
-            setRedoStack(prev => prev.slice(0, -1));
-        } else if (last.type === 'delete_col') {
-            const { col } = last;
-            // Reapply deletion of the column
-            if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-                ws.current.send(JSON.stringify({ type: 'DELETE_COL', sheet_name: id, payload: { col: String(col), user: username } }));
             }
             setUndoStack(prev => [...prev, last]);
             setRedoStack(prev => prev.slice(0, -1));
@@ -2088,9 +1980,6 @@ export default function Document() {
             // Compute final destination index consistent with backend logic
             let destIndex = Number(targetRow) + 1;
             if (Number(cutRow) < destIndex) destIndex -= 1;
-            // Push undo entry for structural move
-            setUndoStack(prev => [...prev, { type: 'move_row', fromRow: Number(cutRow), targetRow: Number(targetRow), destIndex }]);
-            setRedoStack([]);
             ws.current.send(JSON.stringify({ type: 'MOVE_ROW', sheet_name: id, payload }));
         }
 
@@ -2105,8 +1994,6 @@ export default function Document() {
             const payload = { fromRow: String(cutRow), targetRow: String(targetRow), user: username };
             let destIndex = Number(targetRow) + 1;
             if (Number(cutRow) < destIndex) destIndex -= 1;
-            setUndoStack(prev => [...prev, { type: 'move_row_as_child', fromRow: Number(cutRow), targetRow: Number(targetRow), destIndex }]);
-            setRedoStack([]);
             ws.current.send(JSON.stringify({ type: 'MOVE_ROW_AS_CHILD', sheet_name: id, payload }));
         }
 
@@ -2121,12 +2008,6 @@ export default function Document() {
             // Compute final destination index (0-based) and push undo
             const fromIdx = colIndexMap[String(cutCol)] ?? -1;
             const targetIdx = colIndexMap[String(targetCol)] ?? -1;
-            if (fromIdx >= 0 && targetIdx >= 0) {
-                let destIdx = targetIdx + 1;
-                if (fromIdx < destIdx) destIdx -= 1;
-                setUndoStack(prev => [...prev, { type: 'move_col', fromCol: String(cutCol), targetCol: String(targetCol), destIndex: destIdx }]);
-                setRedoStack([]);
-            }
             ws.current.send(JSON.stringify({ type: 'MOVE_COL', sheet_name: id, payload }));
         }
         setCutCol(null);
@@ -2136,11 +2017,16 @@ export default function Document() {
         if (isFilterActive) return;
         if (canEdit && ws.current && ws.current.readyState === WebSocket.OPEN) {
             const payload = { targetRow: String(targetRow), user: username };
-            // Record undo as deletion of the newly inserted row
-            const insertedRow = Number(targetRow) + 1;
-            setUndoStack(prev => [...prev, { type: 'insert_row', insertedRow }]);
-            setRedoStack([]);
             ws.current.send(JSON.stringify({ type: 'INSERT_ROW', sheet_name: id, payload }));
+        }
+    };
+
+    // Insert a row above the given row
+    const insertRowAbove = (targetRow) => {
+        if (isFilterActive) return;
+        if (canEdit && ws.current && ws.current.readyState === WebSocket.OPEN) {
+            const payload = { targetRow: String(targetRow), user: username };
+            ws.current.send(JSON.stringify({ type: 'INSERT_ROW_ABOVE', sheet_name: id, payload }));
         }
     };
 
@@ -2149,9 +2035,6 @@ export default function Document() {
         if (isFilterActive) return;
         if (canEdit && ws.current && ws.current.readyState === WebSocket.OPEN) {
             const payload = { targetRow: String(0), user: username };
-            // The inserted row will be row 1
-            setUndoStack(prev => [...prev, { type: 'insert_row', insertedRow: 1 }]);
-            setRedoStack([]);
             ws.current.send(JSON.stringify({ type: 'INSERT_ROW', sheet_name: id, payload }));
         }
     };
@@ -2372,14 +2255,6 @@ export default function Document() {
             const payload = { targetCol: String(targetCol), user: username };
             // Compute newly inserted column label (based on current headers)
             const targetIdx = colIndexMap[String(targetCol)] ?? -1;
-            if (targetIdx >= 0) {
-                const newIdx = targetIdx + 1;
-                const newCol = colLabelAt(newIdx);
-                if (newCol) {
-                    setUndoStack(prev => [...prev, { type: 'insert_col', newCol: String(newCol), targetCol: String(targetCol) }]);
-                    setRedoStack([]);
-                }
-            }
             ws.current.send(JSON.stringify({ type: 'INSERT_COL', sheet_name: id, payload }));
         }
     };
@@ -2390,9 +2265,6 @@ export default function Document() {
         if (canEdit && ws.current && ws.current.readyState === WebSocket.OPEN) {
             // Use empty target to signal left-most insertion to backend
             const payload = { targetCol: String(''), user: username };
-            // New column label will be 'A'
-            setUndoStack(prev => [...prev, { type: 'insert_col', newCol: String('A'), targetCol: String('') }]);
-            setRedoStack([]);
             ws.current.send(JSON.stringify({ type: 'INSERT_COL', sheet_name: id, payload }));
         }
     };
@@ -2412,9 +2284,6 @@ export default function Document() {
         if (canEdit && ws.current && ws.current.readyState === WebSocket.OPEN) {
             const payload = { row: String(rowLabel), user: username };
             ws.current.send(JSON.stringify({ type: 'DELETE_ROW', sheet_name: id, payload }));
-            // Push undo entry to allow reinsertion at the same index
-            setUndoStack(prev => [...prev, { type: 'delete_row', row: Number(rowLabel) }]);
-            setRedoStack([]);
         }
     };
 
@@ -2426,11 +2295,6 @@ export default function Document() {
         if (canEdit && ws.current && ws.current.readyState === WebSocket.OPEN) {
             const payload = { col: String(colLabel), user: username };
             ws.current.send(JSON.stringify({ type: 'DELETE_COL', sheet_name: id, payload }));
-            // Push undo entry with left-neighbor hint for reinsertion
-            const idx = colIndexMap[String(colLabel)] ?? -1;
-            const leftLabel = idx > 0 ? colLabelAt(idx - 1) : null;
-            setUndoStack(prev => [...prev, { type: 'delete_col', col: String(colLabel), targetLeft: leftLabel }]);
-            setRedoStack([]);
         }
     };
 
@@ -2741,17 +2605,19 @@ export default function Document() {
                             className="px-2 py-1.5 text-sm rounded border border-gray-300 bg-white hover:bg-indigo-100 hover:shadow-md active:bg-indigo-200 active:scale-95 transition-all duration-100 flex items-center gap-1"
                             onClick={doUndo}
                             disabled={!canEdit || undoStack.length === 0}
-                            title="Undo (Ctrl+Z)"
+                            title={undoStack.length > 0 ? `Undo: ${stackEntryLabel(undoStack[undoStack.length - 1])} (Ctrl+Z)` : 'Nothing to undo'}
                         >
-                            <Undo2 size={16} /> Undo
+                            <Undo2 size={16} />
+                            <span>Undo{undoStack.length > 0 ? `: ${stackEntryLabel(undoStack[undoStack.length - 1])}` : ''}</span>
                         </button>
                         <button
                             className="px-2 py-1.5 text-sm rounded border border-gray-300 bg-white hover:bg-gray-100 flex items-center gap-1"
                             onClick={doRedo}
                             disabled={!canEdit || redoStack.length === 0}
-                            title="Redo (Ctrl+Y / Ctrl+Shift+Z)"
+                            title={redoStack.length > 0 ? `Redo: ${stackEntryLabel(redoStack[redoStack.length - 1])} (Ctrl+Y)` : 'Nothing to redo'}
                         >
-                            <Redo2 size={16} /> Redo
+                            <Redo2 size={16} />
+                            <span>Redo{redoStack.length > 0 ? `: ${stackEntryLabel(redoStack[redoStack.length - 1])}` : ''}</span>
                         </button>
                         
 
@@ -3110,85 +2976,33 @@ export default function Document() {
                     </div>
                 )}
                 {scriptPopup.visible && (
-                    <div style={{ position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', zIndex: 2100 }} className="bg-white border rounded shadow p-3">
-                        <div className="flex items-center gap-2">
-                            <span className="text-sm text-gray-600">Python Script [Cell : {String(scriptPopup.col)}{String(scriptPopup.row)}]</span>
-                        </div>
-                        <div className="flex items-center gap-2">
-                            
-                            <textarea
-                                ref={scriptTextareaRef}
-                                className="border rounded px-2 py-1 text-sm"
-                                rows={3}
-                                style={{ minWidth: 240, resize: 'both', overflow: 'auto' }}
-                                value={scriptText}
-                                onChange={(e) => setScriptText(e.target.value)}
-                                disabled={!canEdit}
-                                placeholder={`Edit script for ${String(scriptPopup.col)}${String(scriptPopup.row)}`}
-                                title="Edit script"
-                            />
-                            <div className="flex items-center gap-1 ml-2">
-                                <label className="text-xs text-gray-600" title="Rows spanned by script output">Output Rows</label>
-                                <input
-                                    type="number"
-                                    min={1}
-                                    className="w-14 border rounded px-2 py-1 text-sm"
-                                    value={scriptRowSpan}
-                                    onChange={(e) => setScriptRowSpan(Math.max(1, parseInt(e.target.value, 10) || 1))}
-                                    disabled={!canEdit}
-                                    title="Script output row span"
-                                />
-                            </div>
-                            <div className="flex items-center gap-1 ml-2">
-                                <label className="text-xs text-gray-600 ml-2" title="Columns spanned by script output">Output Cols</label>
-                                <input
-                                    type="number"
-                                    min={1}
-                                    className="w-14 border rounded px-2 py-1 text-sm"
-                                    value={scriptColSpan}
-                                    onChange={(e) => setScriptColSpan(Math.max(1, parseInt(e.target.value, 10) || 1))}
-                                    disabled={!canEdit}
-                                    title="Script output column span"
-                                />
-                            </div>
-                        </div>
-                        <div className="mt-2 flex items-center gap-2 justify-between">
-                            <button
-                                className="px-2 py-1 text-sm rounded border border-gray-300 bg-white hover:bg-green-100 hover:shadow-md active:bg-green-200 active:scale-95 transition-all duration-100"
-                                onClick={insertSelectedRangeIntoScript}
-                                disabled={!canEdit }
-                                title="Insert selected range into script at cursor position"
-                            >
-                                Insert Range
-                            </button>
-                            <div className="flex items-center gap-2">
-                                <button
-                                    className="px-2 py-1 text-sm rounded border border-gray-300 bg-white hover:bg-red-100 hover:shadow-md active:bg-red-200 active:scale-95 transition-all duration-100"
-                                    onClick={() => {
-                                        const { row, col } = scriptPopup;
-                                        const key = row && col ? `${row}-${col}` : null;
-                                        const isLocked = key ? (data[key]?.locked === true) : false;
-                                        if (!canEdit || isLocked || owner !== username) { closeScriptPopup(); return; }
-                                        if (!row || !col) { closeScriptPopup(); return; }
-                                        updateCellScriptState(row, col, scriptText, username, scriptRowSpan, scriptColSpan);
-                                        handleScriptChange(row, col, scriptText, scriptRowSpan, scriptColSpan);
-                                        closeScriptPopup();
-                                    }}
-                                    disabled={!canEdit || owner !== username || (scriptPopup.row && scriptPopup.col ? (data[`${scriptPopup.row}-${scriptPopup.col}`]?.locked === true) : false)}
-                                    title="Apply script (owner only)"
-                                >
-                                    Apply Script
-                                </button>
-                                <button
-                                    className="px-2 py-1 text-sm rounded border border-gray-300 bg-white hover:bg-indigo-100 hover:shadow-md active:bg-indigo-200 active:scale-95 transition-all duration-100"
-                                    onClick={() => { closeScriptPopup();  }}
-                                    title="Cancel"
-                                >
-                                    Cancel
-                                </button>
-                            </div>
-                        </div>
-                    </div>
+                    <ScriptEditorPanel
+                        cellRow={scriptPopup.row}
+                        cellCol={scriptPopup.col}
+                        cellName=""
+                        scriptText={scriptText}
+                        setScriptText={setScriptText}
+                        scriptRowSpan={scriptRowSpan}
+                        setScriptRowSpan={setScriptRowSpan}
+                        scriptColSpan={scriptColSpan}
+                        setScriptColSpan={setScriptColSpan}
+                        canEdit={canEdit}
+                        isOwner={owner === username}
+                        isLocked={scriptPopup.row && scriptPopup.col ? (data[`${scriptPopup.row}-${scriptPopup.col}`]?.locked === true) : false}
+                        onApply={() => {
+                            const { row, col } = scriptPopup;
+                            const key = row && col ? `${row}-${col}` : null;
+                            const isLocked = key ? (data[key]?.locked === true) : false;
+                            if (!canEdit || isLocked || owner !== username) { closeScriptPopup(); return; }
+                            if (!row || !col) { closeScriptPopup(); return; }
+                            updateCellScriptState(row, col, scriptText, username, scriptRowSpan, scriptColSpan);
+                            handleScriptChange(row, col, scriptText, scriptRowSpan, scriptColSpan);
+                            closeScriptPopup();
+                        }}
+                        onClose={() => { closeScriptPopup(); }}
+                        onInsertRange={insertSelectedRangeIntoScript}
+                        textareaRef={scriptTextareaRef}
+                    />
                 )}
 
                 {/* Cell Type Dialog */}
@@ -3728,6 +3542,18 @@ export default function Document() {
                                                         style={{ padding: '0 0px', fontSize: '8px' }}
                                                     >
                                                         <span role="img" aria-label="insert-row">➕</span>
+                                                    </button>
+                                                )}
+                                                {connected && canEdit && rowLabel > 1 && (
+                                                    <button
+                                                        type="button"
+                                                        className="btn btn-xs btn-light"
+                                                        disabled={isFilterActive}
+                                                        title={isFilterActive ? 'Disabled while filters are active' : `Insert row above ${rowLabel}`}
+                                                        onClick={() => insertRowAbove(rowLabel)}
+                                                        style={{ padding: '0 0px', fontSize: '8px' }}
+                                                    >
+                                                        <span role="img" aria-label="insert-row-above">⬆️</span>
                                                     </button>
                                                 )}
                                                 {connected && canEdit && rowLabel > 1 &&(

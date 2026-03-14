@@ -612,6 +612,31 @@ func (h *Hub) run() {
 				} else {
 					log.Printf("Error unmarshalling INSERT_ROW payload: %v", err)
 				}
+			} else if message.Type == "INSERT_ROW_ABOVE" {
+				if denyIfNotEditor() {
+					continue
+				}
+				var ins struct {
+					TargetRow string `json:"targetRow"`
+					User      string `json:"user"`
+				}
+				if err := json.Unmarshal(message.Payload, &ins); err == nil {
+					sheet := globalSheetManager.GetSheetBy(message.SheetName, message.Project)
+					if sheet != nil {
+						inserted := sheet.InsertRowAbove(ins.TargetRow, message.User)
+						if inserted {
+							payload, _ := json.Marshal(sheet.SnapshotForClient())
+							toSend = &Message{
+								Type:      "ROW_COL_UPDATED",
+								SheetName: message.SheetName,
+								Payload:   payload,
+								User:      message.User,
+							}
+						}
+					}
+				} else {
+					log.Printf("Error unmarshalling INSERT_ROW_ABOVE payload: %v", err)
+				}
 			} else if message.Type == "INSERT_COL" {
 				if denyIfNotEditor() {
 					continue
