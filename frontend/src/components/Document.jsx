@@ -19,7 +19,7 @@ import {
     Undo2,
     Redo2
 } from 'lucide-react';
-import { Lock, Code, ChevronDown, ListOrdered, Trash2 } from 'lucide-react';
+import { Lock, Code, ChevronDown, ListOrdered, Trash2, Plus, Scissors, ClipboardPaste, MoreVertical, CornerDownRight } from 'lucide-react';
 import { isSessionValid, clearAuth, getUsername, authenticatedFetch, apiUrl } from '../utils/auth';
 import MarkdownEditorPanel from './MarkdownEditorPanel';
 import ScriptEditorPanel from './ScriptEditorPanel';
@@ -98,6 +98,10 @@ export default function Document() {
     const [cutRow, setCutRow] = useState(null);
     // Column cut/paste state
     const [cutCol, setCutCol] = useState(null);
+
+    // Header context menu state (right-click on col/row labels)
+    const [colHeaderMenu, setColHeaderMenu] = useState({ visible: false, x: 0, y: 0, col: null });
+    const [rowHeaderMenu, setRowHeaderMenu] = useState({ visible: false, x: 0, y: 0, row: null });
 
     // Cell style controls
     const [styleBg, setStyleBg] = useState('');
@@ -191,6 +195,8 @@ export default function Document() {
         setCutRow(null);
         setCutCol(null);
         setContextMenu(prev => ({ ...prev, visible: false }));
+        setColHeaderMenu(prev => ({ ...prev, visible: false }));
+        setRowHeaderMenu(prev => ({ ...prev, visible: false }));
     };
 
     const sendSelection = () => {
@@ -1847,7 +1853,7 @@ export default function Document() {
 
     useEffect(() => {
         const onWindowMouseUp = () => {};
-        const onWindowClick = () => closeContextMenu();
+        const onWindowClick = () => { closeContextMenu(); setColHeaderMenu(p => ({ ...p, visible: false })); setRowHeaderMenu(p => ({ ...p, visible: false })); };
         window.addEventListener('mouseup', onWindowMouseUp);
         window.addEventListener('click', onWindowClick);
         return () => {
@@ -3367,73 +3373,46 @@ export default function Document() {
                                     <th
                                         className="bg-gray-50 border-b border-r border-gray-200 p-2 relative select-none"
                                         style={{ width: `${rowLabelWidth}px`, height: `${colHeaderHeight}px` }}
+                                        title="Right-click for options"
                                     >
-                                        
+                                        <span className="text-xs text-gray-400">#</span>
                                     </th>
                                     {displayedColHeaders.map(h => (
                                         <th
                                             key={h}
-                                            className="bg-gray-50 border-b border-r border-gray-200 p-2 text-xs font-semibold text-gray-500 uppercase tracking-wider text-center select-none relative"
+                                            className="bg-gray-50 border-b border-r border-gray-200 text-xs font-semibold text-gray-500 uppercase tracking-wider text-center select-none relative group/col"
                                             style={{position: 'relative', width: `${colWidths[h] || DEFAULT_COL_WIDTH}px`, height: `${colHeaderHeight}px` ,padding :`0`}}
                                             onMouseOver={()=> endSelection()}
-                                            
+                                            onContextMenu={(e) => {
+                                                if (!connected || !canEdit || (colIndexMap[h] ?? -1) <= 2) return;
+                                                e.preventDefault();
+                                                setRowHeaderMenu({ visible: false, x: 0, y: 0, row: null });
+                                                setColHeaderMenu({ visible: true, x: e.clientX, y: e.clientY, col: h });
+                                            }}
                                         >
-                                            <div className="flex items-center justify-center gap-1">
-                                                <span>{h}</span>
-                                                <div style={{ position: 'absolute', top: 2, left: 2, display: 'flex', gap: '4px', zIndex: 25 }}>
-                                                      
-                                                    {connected && canEdit && (colIndexMap[h] ?? -1) > 2 && (
-                                                        <button
-                                                            type="button"
-                                                            className="btn btn-xs btn-light"
-                                                            disabled={isFilterActive}
-                                                            title={isFilterActive ? 'Disabled while filters are active' : `Insert column to the right of ${h}`}
-                                                            onClick={() => insertColumnRight(h)}
-                                                            style={{ padding: '0 4px', fontSize: '10px' }}
-                                                        >
-                                                            <span role="img" aria-label="insert-col">➕</span>
-                                                        </button>
-                                                    )}
-                                                    {connected && canEdit && (colIndexMap[h] ?? -1) > 2 && (
-                                                        <button
-                                                            type="button"
-                                                            className="btn btn-xs btn-light"
-                                                            disabled={isFilterActive}
-                                                            title={isFilterActive ? 'Disabled while filters are active' : `Delete column ${h}`}
-                                                            onClick={() => deleteColumn(h)}
-                                                            style={{ padding: '0 4px', fontSize: '10px' }}
-                                                        >
-                                                            <span role="img" aria-label="delete-col">🗑️</span>
-                                                        </button>
-                                                    )}
-                                                    { cutCol == null && connected && canEdit && (colIndexMap[h] ?? -1) > 2 && (
-                                                        <button
-                                                            type="button"
-                                                            className="btn btn-xs btn-light"
-                                                            disabled={isFilterActive}
-                                                            title={isFilterActive ? 'Disabled while filters are active' : `Cut column ${h}`}
-                                                            onClick={() => {
-                                                                if (hasLockedInCol(h)) { alert('Cannot cut: column has locked cell(s).'); return; }
-                                                                setCutCol(h); setCutRow(null);
-                                                            }}
-                                                            style={{ padding: '0 4px', fontSize: '10px' }}
-                                                        >
-                                                            <span role="img" aria-label="cut">✂️</span>
-                                                        </button>
-                                                    )}
-                                                    {cutCol != null && cutCol !== h && connected && canEdit && (
-                                                        <button
-                                                            type="button"
-                                                            className="btn btn-xs btn-light"
-                                                            disabled={isFilterActive}
-                                                            title={isFilterActive ? 'Disabled while filters are active' : `Insert cut column to the right of ${h}`}
-                                                            onClick={() => { moveCutColRight(h); setCutRow(null); setCutCol(null); }}
-                                                            style={{ padding: '0 4px', fontSize: '10px' }}
-                                                        >
-                                                            <span role="img" aria-label="paste">📋</span>
-                                                        </button>
-                                                    )}
-                                                </div>
+                                            <div className="flex items-center justify-center h-full" style={{ position: 'relative' }}>
+                                                <span style={{ color: cutCol === h ? '#6366f1' : undefined, fontWeight: cutCol === h ? 700 : undefined }}>{h}</span>
+                                                {cutCol === h && (
+                                                    <span style={{ position: 'absolute', top: 1, right: 10, color: '#6366f1' }} title="Column marked for cut">
+                                                        <Scissors size={10} />
+                                                    </span>
+                                                )}
+                                                {connected && canEdit && (colIndexMap[h] ?? -1) > 2 && (
+                                                    <button
+                                                        type="button"
+                                                        className="opacity-0 group-hover/col:opacity-100 transition-opacity duration-150"
+                                                        style={{ position: 'absolute', top: 1, left: 2, background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: '#9ca3af', lineHeight: 1 }}
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            setRowHeaderMenu({ visible: false, x: 0, y: 0, row: null });
+                                                            const rect = e.currentTarget.getBoundingClientRect();
+                                                            setColHeaderMenu({ visible: true, x: rect.left, y: rect.bottom + 2, col: h });
+                                                        }}
+                                                        title={`Column ${h} options`}
+                                                    >
+                                                        <ChevronDown size={12} />
+                                                    </button>
+                                                )}
                                             </div>
                                             <span
                                                 onMouseDown={(e) => onColResizeMouseDown(h, e)}
@@ -3448,7 +3427,7 @@ export default function Document() {
                                                     height: '100%',
                                                     cursor: 'col-resize',
                                                     userSelect: 'none',
-                                                    background: 'rgba(250, 250, 250, 0)', // indigo-500 tint
+                                                    background: 'rgba(250, 250, 250, 0)',
                                                     borderRight: '1px solid rgb(113, 114, 113)',
                                                     zIndex: 20,
                                                     touchAction: 'none'
@@ -3525,105 +3504,43 @@ export default function Document() {
                                 {displayedRowHeaders.map((rowLabel) => (
                                     <tr key={rowLabel}>
                                         <td
-                                            className="bg-gray-50 border-b border-r border-gray-200 p-2 text-right text-xs font-semibold text-gray-500 select-none relative"
+                                            className="bg-gray-50 border-b border-r border-gray-200 p-2 text-right text-xs font-semibold text-gray-500 select-none relative group/row"
                                             style={{ position: 'relative',height: `${rowHeights[rowLabel] || DEFAULT_ROW_HEIGHT}px`, width: `${rowLabelWidth}px`,padding :`0` }}
                                             onMouseOver={()=> endSelection()}
+                                            onContextMenu={(e) => {
+                                                if (!connected || !canEdit) return;
+                                                e.preventDefault();
+                                                setColHeaderMenu({ visible: false, x: 0, y: 0, col: null });
+                                                setRowHeaderMenu({ visible: true, x: e.clientX, y: e.clientY, row: rowLabel });
+                                            }}
                                         >
-                                            
-                                            {/* Row actions: Insert / Cut / Paste / Insert Child */}
-                                            <div style={{ position: 'absolute', top: 0, left: 0, display: 'flex', gap: '4px', zIndex: 25 }}>
+                                            <div className="flex items-center justify-end h-full px-1" style={{ position: 'relative' }}>
                                                 {connected && canEdit && (
                                                     <button
                                                         type="button"
-                                                        className="btn btn-xs btn-light"
-                                                        disabled={isFilterActive}
-                                                        title={isFilterActive ? 'Disabled while filters are active' : `Insert row below ${rowLabel}`}
-                                                        onClick={() => insertRowBelow(rowLabel)}
-                                                        style={{ padding: '0 0px', fontSize: '8px' }}
+                                                        className="opacity-0 group-hover/row:opacity-100 transition-opacity duration-150"
+                                                        style={{ position: 'absolute', top: 1, left: 1, background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: '#9ca3af', lineHeight: 1 }}
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            setColHeaderMenu({ visible: false, x: 0, y: 0, col: null });
+                                                            const rect = e.currentTarget.getBoundingClientRect();
+                                                            setRowHeaderMenu({ visible: true, x: rect.right + 2, y: rect.top, row: rowLabel });
+                                                        }}
+                                                        title={`Row ${rowLabel} options`}
                                                     >
-                                                        <span role="img" aria-label="insert-row">➕</span>
+                                                        <MoreVertical size={12} />
                                                     </button>
                                                 )}
-                                                {connected && canEdit && rowLabel > 1 && (
-                                                    <button
-                                                        type="button"
-                                                        className="btn btn-xs btn-light"
-                                                        disabled={isFilterActive}
-                                                        title={isFilterActive ? 'Disabled while filters are active' : `Insert row above ${rowLabel}`}
-                                                        onClick={() => insertRowAbove(rowLabel)}
-                                                        style={{ padding: '0 0px', fontSize: '8px' }}
-                                                    >
-                                                        <span role="img" aria-label="insert-row-above">⬆️</span>
-                                                    </button>
+                                                <span style={{ paddingLeft: `${getRowDepth(rowLabel) * 8}px`, color: cutRow === rowLabel ? '#6366f1' : undefined, fontWeight: cutRow === rowLabel ? 700 : undefined }}>
+                                                    {getRowDepth(rowLabel) > 0 && <span style={{ color: '#9ca3af', fontSize: '8px', marginRight: '2px' }}>{'└'}</span>}
+                                                    {rowLabel}
+                                                </span>
+                                                {cutRow === rowLabel && (
+                                                    <span style={{ marginLeft: 2, color: '#6366f1' }} title="Row marked for cut">
+                                                        <Scissors size={9} />
+                                                    </span>
                                                 )}
-                                                {connected && canEdit && rowLabel > 1 &&(
-                                                    <button
-                                                        type="button"
-                                                        className="btn btn-xs btn-light"
-                                                        disabled={isFilterActive}
-                                                        title={isFilterActive ? 'Disabled while filters are active' : `Insert child row under ${rowLabel}`}
-                                                        onClick={() => insertChildRow(rowLabel)}
-                                                        style={{ padding: '0 0px', fontSize: '8px' }}
-                                                    >
-                                                        <span role="img" aria-label="insert-child">🔽</span>
-                                                    </button>
-                                                )}
-                                               
-                                                {connected && canEdit && rowLabel > 1 && (
-                                                    <button
-                                                        type="button"
-                                                        className="btn btn-xs btn-light"
-                                                        disabled={isFilterActive}
-                                                        title={isFilterActive ? 'Disabled while filters are active' : `Delete row ${rowLabel}${hasChildren(rowLabel) ? ' and all descendants' : ''}`}
-                                                        onClick={() => deleteRow(rowLabel)}
-                                                        style={{ padding: '0 0px', fontSize: '8px' }}
-                                                    >
-                                                        <span role="img" aria-label="delete-row">🗑️</span>
-                                                    </button>
-                                                )}
-                                                {cutRow === null && connected && canEdit && rowLabel > 1 &&(<button
-                                                    type="button"
-                                                    className="btn btn-xs btn-light"
-                                                    disabled={isFilterActive}
-                                                    title={isFilterActive ? 'Disabled while filters are active' : `Cut this row${hasChildren(rowLabel) ? ' and all descendants' : ''}`}
-                                                    onClick={() => {
-                                                        if (hasLockedInRow(rowLabel)) { alert('Cannot cut: row has locked cell(s).'); return; }
-                                                        setCutRow(rowLabel); setCutCol(null);
-                                                    }}
-                                                    style={{ padding: '0 0px', fontSize: '8px' }}
-                                                >
-                                                    <span role="img" aria-label="cut">✂️</span>
-                                                </button>)}
-                                                {cutRow != null && cutRow !== rowLabel && connected && canEdit &&(
-                                                    <>
-                                                    <button
-                                                        type="button"
-                                                        className="btn btn-xs btn-light"
-                                                        disabled={isFilterActive}
-                                                        title={isFilterActive ? 'Disabled while filters are active' : `Paste cut row below row ${rowLabel}`}
-                                                        onClick={() => { moveCutRowBelow(rowLabel); setCutRow(null); setCutCol(null); }}
-                                                        style={{ padding: '0 0px', fontSize: '8px' }}
-                                                    >
-                                                        <span role="img" aria-label="paste-below">📋↓</span>
-                                                    </button>
-                                                    <button
-                                                        type="button"
-                                                        className="btn btn-xs btn-light"
-                                                        disabled={isFilterActive}
-                                                        title={isFilterActive ? 'Disabled while filters are active' : `Paste cut row as child of row ${rowLabel}`}
-                                                        onClick={() => { moveCutRowAsChild(rowLabel); setCutRow(null); setCutCol(null); }}
-                                                        style={{ padding: '0 0px', fontSize: '8px' }}
-                                                    >
-                                                        <span role="img" aria-label="paste-as-child">📋→</span>
-                                                    </button>
-                                                    </>
-                                                )}
-                                                
                                             </div>
-                                            <span style={{ paddingLeft: `${getRowDepth(rowLabel) * 8}px` }}>
-                                                {getRowDepth(rowLabel) > 0 && <span style={{ color: '#9ca3af', fontSize: '8px', marginRight: '2px' }}>{'└'}</span>}
-                                                {rowLabel}
-                                            </span>
                                              <div
                                                 onMouseDown={(e) => onRowResizeMouseDown(rowLabel, e)}
                                                 title="Drag to resize row"
@@ -4167,6 +4084,204 @@ export default function Document() {
                         )}
 
                         {/* Chat panel (fixed bottom-right) */}
+
+                        {/* Column header context menu */}
+                        {colHeaderMenu.visible && colHeaderMenu.col && (
+                            <div
+                                className="shadow-lg border rounded-lg overflow-hidden"
+                                style={{
+                                    position: 'fixed',
+                                    top: colHeaderMenu.y,
+                                    left: colHeaderMenu.x,
+                                    zIndex: 3000,
+                                    background: '#fff',
+                                    minWidth: 180,
+                                    fontSize: '0.82rem',
+                                }}
+                                onClick={(e) => e.stopPropagation()}
+                            >
+                                <div className="px-3 py-1.5 text-xs font-semibold text-gray-400 uppercase tracking-wider border-b" style={{ background: '#f9fafb' }}>
+                                    Column {colHeaderMenu.col}
+                                </div>
+                                <button
+                                    className="d-flex align-items-center gap-2 w-100 text-start px-3 py-2 border-0 bg-white"
+                                    style={{ cursor: 'pointer' }}
+                                    disabled={isFilterActive}
+                                    onMouseEnter={(e) => e.currentTarget.style.background = '#f0f4ff'}
+                                    onMouseLeave={(e) => e.currentTarget.style.background = '#fff'}
+                                    onClick={() => { insertColumnRight(colHeaderMenu.col); setColHeaderMenu({ visible: false, x: 0, y: 0, col: null }); }}
+                                >
+                                    <Plus size={14} className="text-indigo-500" /> Insert column right
+                                </button>
+                                <button
+                                    className="d-flex align-items-center gap-2 w-100 text-start px-3 py-2 border-0 bg-white"
+                                    style={{ cursor: 'pointer' }}
+                                    disabled={isFilterActive}
+                                    onMouseEnter={(e) => e.currentTarget.style.background = '#fef2f2'}
+                                    onMouseLeave={(e) => e.currentTarget.style.background = '#fff'}
+                                    onClick={() => { deleteColumn(colHeaderMenu.col); setColHeaderMenu({ visible: false, x: 0, y: 0, col: null }); }}
+                                >
+                                    <Trash2 size={14} className="text-red-500" /> Delete column
+                                </button>
+                                {cutCol == null && (
+                                    <button
+                                        className="d-flex align-items-center gap-2 w-100 text-start px-3 py-2 border-0 bg-white"
+                                        style={{ cursor: 'pointer' }}
+                                        disabled={isFilterActive}
+                                        onMouseEnter={(e) => e.currentTarget.style.background = '#f0f4ff'}
+                                        onMouseLeave={(e) => e.currentTarget.style.background = '#fff'}
+                                        onClick={() => {
+                                            if (hasLockedInCol(colHeaderMenu.col)) { alert('Cannot cut: column has locked cell(s).'); setColHeaderMenu({ visible: false, x: 0, y: 0, col: null }); return; }
+                                            setCutCol(colHeaderMenu.col); setCutRow(null);
+                                            setColHeaderMenu({ visible: false, x: 0, y: 0, col: null });
+                                        }}
+                                    >
+                                        <Scissors size={14} className="text-orange-500" /> Cut column
+                                    </button>
+                                )}
+                                {cutCol != null && cutCol !== colHeaderMenu.col && (
+                                    <button
+                                        className="d-flex align-items-center gap-2 w-100 text-start px-3 py-2 border-0 bg-white"
+                                        style={{ cursor: 'pointer' }}
+                                        disabled={isFilterActive}
+                                        onMouseEnter={(e) => e.currentTarget.style.background = '#f0fdf4'}
+                                        onMouseLeave={(e) => e.currentTarget.style.background = '#fff'}
+                                        onClick={() => { moveCutColRight(colHeaderMenu.col); setCutRow(null); setCutCol(null); setColHeaderMenu({ visible: false, x: 0, y: 0, col: null }); }}
+                                    >
+                                        <ClipboardPaste size={14} className="text-green-600" /> Paste column here
+                                    </button>
+                                )}
+                                {cutCol != null && (
+                                    <button
+                                        className="d-flex align-items-center gap-2 w-100 text-start px-3 py-2 border-0 bg-white border-t"
+                                        style={{ cursor: 'pointer', color: '#9ca3af' }}
+                                        onMouseEnter={(e) => e.currentTarget.style.background = '#f9fafb'}
+                                        onMouseLeave={(e) => e.currentTarget.style.background = '#fff'}
+                                        onClick={() => { setCutCol(null); setColHeaderMenu({ visible: false, x: 0, y: 0, col: null }); }}
+                                    >
+                                        Cancel cut
+                                    </button>
+                                )}
+                            </div>
+                        )}
+
+                        {/* Row header context menu */}
+                        {rowHeaderMenu.visible && rowHeaderMenu.row && (
+                            <div
+                                className="shadow-lg border rounded-lg overflow-hidden"
+                                style={{
+                                    position: 'fixed',
+                                    top: rowHeaderMenu.y,
+                                    left: rowHeaderMenu.x,
+                                    zIndex: 3000,
+                                    background: '#fff',
+                                    minWidth: 200,
+                                    fontSize: '0.82rem',
+                                }}
+                                onClick={(e) => e.stopPropagation()}
+                            >
+                                <div className="px-3 py-1.5 text-xs font-semibold text-gray-400 uppercase tracking-wider border-b" style={{ background: '#f9fafb' }}>
+                                    Row {rowHeaderMenu.row}
+                                </div>
+                                <button
+                                    className="d-flex align-items-center gap-2 w-100 text-start px-3 py-2 border-0 bg-white"
+                                    style={{ cursor: 'pointer' }}
+                                    disabled={isFilterActive}
+                                    onMouseEnter={(e) => e.currentTarget.style.background = '#f0f4ff'}
+                                    onMouseLeave={(e) => e.currentTarget.style.background = '#fff'}
+                                    onClick={() => { insertRowBelow(rowHeaderMenu.row); setRowHeaderMenu({ visible: false, x: 0, y: 0, row: null }); }}
+                                >
+                                    <Plus size={14} className="text-indigo-500" /> Insert row below
+                                </button>
+                                {rowHeaderMenu.row > 1 && (
+                                    <button
+                                        className="d-flex align-items-center gap-2 w-100 text-start px-3 py-2 border-0 bg-white"
+                                        style={{ cursor: 'pointer' }}
+                                        disabled={isFilterActive}
+                                        onMouseEnter={(e) => e.currentTarget.style.background = '#f0f4ff'}
+                                        onMouseLeave={(e) => e.currentTarget.style.background = '#fff'}
+                                        onClick={() => { insertRowAbove(rowHeaderMenu.row); setRowHeaderMenu({ visible: false, x: 0, y: 0, row: null }); }}
+                                    >
+                                        <Plus size={14} className="text-indigo-500" /> Insert row above
+                                    </button>
+                                )}
+                                {rowHeaderMenu.row > 1 && (
+                                    <button
+                                        className="d-flex align-items-center gap-2 w-100 text-start px-3 py-2 border-0 bg-white"
+                                        style={{ cursor: 'pointer' }}
+                                        disabled={isFilterActive}
+                                        onMouseEnter={(e) => e.currentTarget.style.background = '#f0f4ff'}
+                                        onMouseLeave={(e) => e.currentTarget.style.background = '#fff'}
+                                        onClick={() => { insertChildRow(rowHeaderMenu.row); setRowHeaderMenu({ visible: false, x: 0, y: 0, row: null }); }}
+                                    >
+                                        <CornerDownRight size={14} className="text-indigo-500" /> Insert child row
+                                    </button>
+                                )}
+                                {rowHeaderMenu.row > 1 && (
+                                    <button
+                                        className="d-flex align-items-center gap-2 w-100 text-start px-3 py-2 border-0 bg-white"
+                                        style={{ cursor: 'pointer' }}
+                                        disabled={isFilterActive}
+                                        onMouseEnter={(e) => e.currentTarget.style.background = '#fef2f2'}
+                                        onMouseLeave={(e) => e.currentTarget.style.background = '#fff'}
+                                        onClick={() => { deleteRow(rowHeaderMenu.row); setRowHeaderMenu({ visible: false, x: 0, y: 0, row: null }); }}
+                                    >
+                                        <Trash2 size={14} className="text-red-500" /> Delete row{hasChildren(rowHeaderMenu.row) ? ' & descendants' : ''}
+                                    </button>
+                                )}
+                                {cutRow == null && rowHeaderMenu.row > 1 && (
+                                    <button
+                                        className="d-flex align-items-center gap-2 w-100 text-start px-3 py-2 border-0 bg-white"
+                                        style={{ cursor: 'pointer' }}
+                                        disabled={isFilterActive}
+                                        onMouseEnter={(e) => e.currentTarget.style.background = '#f0f4ff'}
+                                        onMouseLeave={(e) => e.currentTarget.style.background = '#fff'}
+                                        onClick={() => {
+                                            if (hasLockedInRow(rowHeaderMenu.row)) { alert('Cannot cut: row has locked cell(s).'); setRowHeaderMenu({ visible: false, x: 0, y: 0, row: null }); return; }
+                                            setCutRow(rowHeaderMenu.row); setCutCol(null);
+                                            setRowHeaderMenu({ visible: false, x: 0, y: 0, row: null });
+                                        }}
+                                    >
+                                        <Scissors size={14} className="text-orange-500" /> Cut row{hasChildren(rowHeaderMenu.row) ? ' & descendants' : ''}
+                                    </button>
+                                )}
+                                {cutRow != null && cutRow !== rowHeaderMenu.row && (
+                                    <>
+                                        <button
+                                            className="d-flex align-items-center gap-2 w-100 text-start px-3 py-2 border-0 bg-white"
+                                            style={{ cursor: 'pointer' }}
+                                            disabled={isFilterActive}
+                                            onMouseEnter={(e) => e.currentTarget.style.background = '#f0fdf4'}
+                                            onMouseLeave={(e) => e.currentTarget.style.background = '#fff'}
+                                            onClick={() => { moveCutRowBelow(rowHeaderMenu.row); setCutRow(null); setCutCol(null); setRowHeaderMenu({ visible: false, x: 0, y: 0, row: null }); }}
+                                        >
+                                            <ClipboardPaste size={14} className="text-green-600" /> Paste row below
+                                        </button>
+                                        <button
+                                            className="d-flex align-items-center gap-2 w-100 text-start px-3 py-2 border-0 bg-white"
+                                            style={{ cursor: 'pointer' }}
+                                            disabled={isFilterActive}
+                                            onMouseEnter={(e) => e.currentTarget.style.background = '#f0fdf4'}
+                                            onMouseLeave={(e) => e.currentTarget.style.background = '#fff'}
+                                            onClick={() => { moveCutRowAsChild(rowHeaderMenu.row); setCutRow(null); setCutCol(null); setRowHeaderMenu({ visible: false, x: 0, y: 0, row: null }); }}
+                                        >
+                                            <CornerDownRight size={14} className="text-green-600" /> Paste as child
+                                        </button>
+                                    </>
+                                )}
+                                {cutRow != null && (
+                                    <button
+                                        className="d-flex align-items-center gap-2 w-100 text-start px-3 py-2 border-0 bg-white border-t"
+                                        style={{ cursor: 'pointer', color: '#9ca3af' }}
+                                        onMouseEnter={(e) => e.currentTarget.style.background = '#f9fafb'}
+                                        onMouseLeave={(e) => e.currentTarget.style.background = '#fff'}
+                                        onClick={() => { setCutRow(null); setRowHeaderMenu({ visible: false, x: 0, y: 0, row: null }); }}
+                                    >
+                                        Cancel cut
+                                    </button>
+                                )}
+                            </div>
+                        )}
 
                         {isChatOpen && (
                         <div style={{ position: 'fixed', right: 16, bottom: 16, width: 360, zIndex: 1100 }}>
