@@ -4067,6 +4067,7 @@ export default function Document() {
                                 cellCol={mdPanelCell.col}
                                 value={(data[`${mdPanelCell.row}-${mdPanelCell.col}`] || {}).value || ''}
                                 readOnly={mdPanelReadOnly || !canEdit || !!(data[`${mdPanelCell.row}-${mdPanelCell.col}`] || {}).locked}
+                                project={projectName}
                                 onSave={(newValue) => {
                                     if (canEdit && ws.current && ws.current.readyState === WebSocket.OPEN) {
                                         updateCellState(mdPanelCell.row, mdPanelCell.col, newValue, username);

@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { marked } from 'marked';
-import { X, Eye, Edit3, Bold, Italic, Heading1, Heading2, Heading3, List, ListOrdered, Code, Link, Image, Quote, Minus, CheckSquare, Maximize2, Minimize2, Sigma, Table } from 'lucide-react';
+import { X, Eye, Edit3, Bold, Italic, Heading1, Heading2, Heading3, List, ListOrdered, Code, Link, Image, Quote, Minus, CheckSquare, Maximize2, Minimize2, Sigma, Table, FolderOpen } from 'lucide-react';
+import AssetBrowser from './AssetBrowser';
 
 // Configure marked for safe rendering
 marked.setOptions({
@@ -32,10 +33,11 @@ function ensureMathJax() {
     document.head.appendChild(script);
 }
 
-export default function MarkdownEditorPanel({ cellRow, cellCol, value, onSave, onClose, readOnly }) {
+export default function MarkdownEditorPanel({ cellRow, cellCol, value, onSave, onClose, readOnly, project }) {
     const [content, setContent] = useState(value || '');
     const [activeTab, setActiveTab] = useState('edit'); // 'edit' | 'preview' | 'split'
     const [isMaximized, setIsMaximized] = useState(false);
+    const [assetBrowserOpen, setAssetBrowserOpen] = useState(false);
     const textareaRef = useRef(null);
     const panelRef = useRef(null);
     const previewRef = useRef(null);
@@ -399,6 +401,8 @@ export default function MarkdownEditorPanel({ cellRow, cellCol, value, onSave, o
         },
         { type: 'separator' },
         { icon: <Table size={14} />, title: 'Insert Table', action: () => setTablePopover(v => !v), isTableBtn: true },
+        { type: 'separator' },
+        { icon: <FolderOpen size={14} />, title: 'Browse & Insert Asset Image', action: () => setAssetBrowserOpen(true) },
     ];
 
     // Keyboard shortcuts
@@ -785,6 +789,17 @@ export default function MarkdownEditorPanel({ cellRow, cellCol, value, onSave, o
                         )}
                     </div>
                 </>
+            )}
+
+            {/* Asset Browser */}
+            {assetBrowserOpen && (
+                <AssetBrowser
+                    project={project || ''}
+                    onInsert={(snippet) => {
+                        insertMarkdown(snippet);
+                    }}
+                    onClose={() => setAssetBrowserOpen(false)}
+                />
             )}
 
             {/* Footer */}

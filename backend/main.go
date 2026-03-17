@@ -1377,7 +1377,7 @@ func main() {
 			}
 			folders := make([]Folder, 0)
 			for _, e := range entries {
-				if e.IsDir() {
+				if e.IsDir() && e.Name() != "assets" {
 					folders = append(folders, Folder{Name: e.Name()})
 				}
 			}
@@ -2337,6 +2337,200 @@ func main() {
 		}
 
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	})
+
+	// ── Assets API ────────────────────────────────────────────────────────────
+	// GET    /api/assets?project=<p>              → list assets
+	// POST   /api/assets?project=<p>              → upload (multipart form field "file")
+	// DELETE /api/assets?project=<p>&name=<n>    → delete a named asset
+	// GET    /api/assets/serve?project=<p>&name=<n> → stream asset bytes
+	http.HandleFunc("/api/assets", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		token := r.Header.Get("Authorization")
+		username, err := globalUserManager.ValidateToken(token)
+		if err != nil {
+			http.Error(w, "Unauthorized: "+err.Error(), http.StatusUnauthorized)
+			return
+		}
+
+		project := r.URL.Query().Get("project")
+		if project == "" {
+			http.Error(w, "project is required", http.StatusBadRequest)
+			return
+		}
+		// Reject path traversal
+		if strings.Contains(project, "..") {
+			http.Error(w, "invalid project", http.StatusBadRequest)
+			return
+		}
+		assetsDir := filepath.Join(dataDir, project, "assets")
+
+		switch r.Method {
+		case http.MethodGet:
+			// List assets: return [{name, url, size, content_type}]
+			if err := os.MkdirAll(assetsDir, 0755); err != nil {
+				http.Error(w, "Failed to read assets dir", http.StatusInternalServerError)
+				return
+			}
+			entries, err := os.ReadDir(assetsDir)
+			if err != nil {
+				http.Error(w, "Failed to read assets", http.StatusInternalServerError)
+				return
+			}
+			type AssetInfo struct {
+				Name string `json:"name"`
+				Size int64  `json:"size"`
+				URL  string `json:"url"`
+			}
+			list := make([]AssetInfo, 0, len(entries))
+			for _, e := range entries {
+				if e.IsDir() {
+					continue
+				}
+				info, _ := e.Info()
+				sz := int64(0)
+				if info != nil {
+					sz = info.Size()
+				}
+				list = append(list, AssetInfo{
+					Name: e.Name(),
+					Size: sz,
+					URL:  "/api/assets/serve?project=" + project + "&name=" + e.Name(),
+				})
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(list)
+
+		case http.MethodPost:
+			// Upload an asset (up to 20 MB)
+			if err := r.ParseMultipartForm(20 << 20); err != nil {
+				http.Error(w, "Failed to parse form: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			file, header, err := r.FormFile("file")
+			if err != nil {
+				http.Error(w, "file field required: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			defer file.Close()
+
+			// Basic safety: only allow image types
+			allowedExts := map[string]bool{
+				".jpg": true, ".jpeg": true, ".png": true,
+				".gif": true, ".webp": true, ".svg": true, ".bmp": true,
+			}
+			ext := strings.ToLower(filepath.Ext(header.Filename))
+			if !allowedExts[ext] {
+				http.Error(w, "Only image files are allowed (jpg, jpeg, png, gif, webp, svg, bmp)", http.StatusBadRequest)
+				return
+			}
+
+			if err := os.MkdirAll(assetsDir, 0755); err != nil {
+				http.Error(w, "Failed to create assets dir", http.StatusInternalServerError)
+				return
+			}
+
+			// Use timestamp prefix to avoid name collisions
+			safeName := fmt.Sprintf("%d_%s", time.Now().UnixMilli(), filepath.Base(header.Filename))
+			destPath := filepath.Join(assetsDir, safeName)
+
+			data := make([]byte, 0, header.Size)
+			buf := make([]byte, 32*1024)
+			for {
+				n, readErr := file.Read(buf)
+				if n > 0 {
+					data = append(data, buf[:n]...)
+				}
+				if readErr != nil {
+					break
+				}
+			}
+			if err := os.WriteFile(destPath, data, 0644); err != nil {
+				http.Error(w, "Failed to save file: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+
+			globalProjectAuditManager.Append(project, username, "UPLOAD_ASSET", "Uploaded asset '"+safeName+"'")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{
+				"name": safeName,
+				"url":  "/api/assets/serve?project=" + project + "&name=" + safeName,
+			})
+
+		case http.MethodDelete:
+			assetName := r.URL.Query().Get("name")
+			if assetName == "" {
+				http.Error(w, "name is required", http.StatusBadRequest)
+				return
+			}
+			// Reject path traversal in asset name
+			if strings.Contains(assetName, "..") || strings.Contains(assetName, "/") || strings.Contains(assetName, string(os.PathSeparator)) {
+				http.Error(w, "invalid asset name", http.StatusBadRequest)
+				return
+			}
+			// Only project admin/owner may delete assets
+			topProject := strings.SplitN(project, "/", 2)[0]
+			if !globalProjectMeta.IsProjectAdmin(topProject, username) {
+				http.Error(w, "Forbidden: owner or project admin only", http.StatusForbidden)
+				return
+			}
+			assetPath := filepath.Join(assetsDir, assetName)
+			if err := os.Remove(assetPath); err != nil {
+				if os.IsNotExist(err) {
+					http.Error(w, "Asset not found", http.StatusNotFound)
+					return
+				}
+				http.Error(w, "Failed to delete asset: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			globalProjectAuditManager.Append(project, username, "DELETE_ASSET", "Deleted asset '"+assetName+"'")
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{"message": "Asset deleted"})
+
+		default:
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
+	// Serve asset bytes
+	http.HandleFunc("/api/assets/serve", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		// Asset serving is public – no token required so that images embedded
+		// in markdown previews (via plain <img> tags) load without authentication.
+		project := r.URL.Query().Get("project")
+		assetName := r.URL.Query().Get("name")
+		if project == "" || assetName == "" {
+			http.Error(w, "project and name are required", http.StatusBadRequest)
+			return
+		}
+		if strings.Contains(project, "..") || strings.Contains(assetName, "..") || strings.Contains(assetName, "/") {
+			http.Error(w, "invalid parameters", http.StatusBadRequest)
+			return
+		}
+
+		assetPath := filepath.Join(dataDir, project, "assets", assetName)
+		http.ServeFile(w, r, assetPath)
 	})
 
 	// Simple health check
