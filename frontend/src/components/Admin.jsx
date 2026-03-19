@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { authenticatedFetch, isSessionValid, clearAuth, getUsername, isAdmin, apiUrl } from '../utils/auth';
-import { ShieldCheck, KeyRound, ToggleLeft, ToggleRight, LogOut, ArrowLeft, RefreshCw } from 'lucide-react';
+import { ShieldCheck, KeyRound, ToggleLeft, ToggleRight, LogOut, ArrowLeft, RefreshCw, Download } from 'lucide-react';
 import 'bootstrap/dist/css/bootstrap.min.css';
 
 export default function Admin() {
@@ -136,6 +136,32 @@ export default function Admin() {
     }
   };
 
+  const downloadBackup = async () => {
+    try {
+      const res = await authenticatedFetch(apiUrl('/api/admin/backup'));
+      if (!res.ok) {
+        const text = await res.text();
+        alert(text || 'Failed to download backup');
+        return;
+      }
+      const blob = await res.blob();
+      // Extract filename from Content-Disposition header if available
+      const disposition = res.headers.get('Content-Disposition') || '';
+      const match = disposition.match(/filename="?([^"]+)"?/);
+      const filename = match ? match[1] : 'backup.zip';
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      alert('Network error while downloading backup');
+    }
+  };
+
   const handleLogout = async () => {
     try {
       await authenticatedFetch(apiUrl('/api/logout'), { method: 'POST' });
@@ -211,6 +237,9 @@ export default function Admin() {
         </div>
         <div className="d-flex align-items-center gap-2">
           <span className="text-light small me-2">{username}</span>
+          <button className="btn btn-sm btn-outline-info" onClick={downloadBackup} title="Download full DATA folder as zip backup">
+            <Download size={14} className="me-1" /> Backup
+          </button>
           <button className="btn btn-sm btn-outline-light" onClick={handleLogout}>
             <LogOut size={14} className="me-1" /> Logout
           </button>

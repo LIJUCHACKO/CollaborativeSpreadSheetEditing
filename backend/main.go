@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -826,6 +827,77 @@ func main() {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"message": "sheet owner updated"})
+	})
+
+	// Admin: download entire DATA folder as a zip archive for backup
+	http.HandleFunc("/api/admin/backup", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		token := r.Header.Get("Authorization")
+		caller, err := globalUserManager.ValidateToken(token)
+		if err != nil {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if !globalUserManager.IsAdminUser(caller) {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+
+		// Flush any pending saves so the zip includes the latest data
+		globalSheetManager.Save()
+
+		now := time.Now()
+		zipName := fmt.Sprintf("backup_%s.zip", now.Format("2006-01-02_15-04-05"))
+
+		w.Header().Set("Content-Type", "application/zip")
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, zipName))
+
+		zw := zip.NewWriter(w)
+		defer zw.Close()
+
+		absDataDir, absErr := filepath.Abs(dataDir)
+		if absErr != nil {
+			absDataDir = dataDir
+		}
+
+		walkErr := filepath.Walk(absDataDir, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if info.IsDir() {
+				return nil
+			}
+			rel, relErr := filepath.Rel(absDataDir, path)
+			if relErr != nil {
+				rel = info.Name()
+			}
+			// Use forward slashes inside the zip
+			rel = filepath.ToSlash(rel)
+
+			f, createErr := zw.Create(rel)
+			if createErr != nil {
+				return createErr
+			}
+			data, readErr := os.ReadFile(path)
+			if readErr != nil {
+				return readErr
+			}
+			_, writeErr := f.Write(data)
+			return writeErr
+		})
+		if walkErr != nil {
+			log.Printf("backup: walk error: %v", walkErr)
+		}
 	})
 
 	// Returns JSON files in the given project directory that are empty or cannot be unmarshalled as a Sheet.
