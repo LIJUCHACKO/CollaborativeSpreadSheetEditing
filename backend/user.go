@@ -259,20 +259,24 @@ func (um *UserManager) Load() {
 	um.mu.Lock()
 	defer um.mu.Unlock()
 
-	file, err := os.Open(userPersistenceFile)
+	absPath, _ := filepath.Abs(userPersistenceFile)
+	data, err := os.ReadFile(userPersistenceFile)
 	if err != nil {
 		if os.IsNotExist(err) {
 			um.ensureAdminLocked()
 			return
 		}
-		log.Printf("Error opening users file: %v", err)
+		log.Printf("Error reading users file: %v", err)
 		return
 	}
-	defer file.Close()
+
+	// Integrity check
+	CheckAndRecord(absPath, data)
 
 	var loadedUsers map[string]*User
-	if err := json.NewDecoder(file).Decode(&loadedUsers); err != nil {
+	if err := json.Unmarshal(data, &loadedUsers); err != nil {
 		log.Printf("Error decoding users: %v", err)
+		globalIntegrity.Record(absPath, false, false, "json decode error: "+err.Error())
 		return
 	}
 
@@ -310,17 +314,18 @@ func (um *UserManager) ensureAdminLocked() {
 }
 
 func (um *UserManager) saveUsersLocked() {
-	file, err := os.Create(userPersistenceFile)
+	data, err := json.Marshal(um.users)
 	if err != nil {
+		log.Printf("Error encoding users: %v", err)
+		return
+	}
+	data = append(data, '\n')
+	absPath, _ := filepath.Abs(userPersistenceFile)
+	if err := WriteFileWithChecksum(absPath, data); err != nil {
 		log.Printf("Error saving users: %v", err)
 		return
 	}
-	defer file.Close()
-
-	encoder := json.NewEncoder(file)
-	if err := encoder.Encode(um.users); err != nil {
-		log.Printf("Error encoding users: %v", err)
-	}
+	globalIntegrity.Record(absPath, true, false, "")
 }
 
 // GetPreferences returns the stored preferences for a user

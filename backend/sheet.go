@@ -110,6 +110,7 @@ type Sheet struct {
 	RowHeights    map[string]int             `json:"row_heights,omitempty"`
 	RowParents    map[string]int             `json:"row_parents,omitempty"`    // row (string) -> parent row number (int). 0 means root.
 	SectionScheme string                     `json:"section_scheme,omitempty"` // e.g. "1.1.1", "I.A.1", "A.1.a" or empty for none
+	ReadOnly      bool                       `json:"read_only,omitempty"`      // true when file integrity check failed
 	mu            sync.RWMutex
 }
 
@@ -231,18 +232,21 @@ func (sm *SheetManager) saveSheetLocked(sheet *Sheet) {
 		dir = dataDir
 	}
 	filePath := filepath.Join(dir, sheet.Name+".json")
-	file, err := os.Create(filePath)
+
+	data, err := json.MarshalIndent(sheet, "", "  ")
 	if err != nil {
+		log.Printf("Error encoding sheet %s: %v", sheet.Name, err)
+		return
+	}
+	// Append newline to match previous encoder behaviour
+	data = append(data, '\n')
+	absPath, _ := filepath.Abs(filePath)
+	if err := WriteFileWithChecksum(absPath, data); err != nil {
 		log.Printf("Error saving sheet %s: %v", sheet.Name, err)
 		return
 	}
-	defer file.Close()
-
-	encoder := json.NewEncoder(file)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(sheet); err != nil {
-		log.Printf("Error encoding sheet %s: %v", sheet.Name, err)
-	}
+	// Mark as intact in the registry after a successful save
+	globalIntegrity.Record(absPath, true, false, "")
 	fmt.Printf("Sheet %s saved successfully at %s\n", sheet.Name, filePath)
 }
 
@@ -402,6 +406,12 @@ func generateID() string {
 func (s *Sheet) SetCell(row, col, value, user string, reverted bool) {
 	s.mu.Lock()
 	// defer s.mu.Unlock() // MOVED to explicit unlock before Save()
+
+	// Prevent all writes to read-only (corrupt) sheets
+	if s.ReadOnly {
+		s.mu.Unlock()
+		return
+	}
 
 	if s.Data[row] == nil {
 		s.Data[row] = make(map[string]Cell)
@@ -3032,18 +3042,31 @@ func (sm *SheetManager) Load() {
 				if base == "chat.json" || base == "projects.json" || base == "users.json" || base == "project_audit.log" || base == "timeline.json" {
 					return nil
 				}
-				file, err := os.Open(path)
-				if err != nil {
-					log.Printf("Error opening sheet file %s: %v", path, err)
+
+				absPath, _ := filepath.Abs(path)
+				data, readErr := os.ReadFile(path)
+				if readErr != nil {
+					log.Printf("Error reading sheet file %s: %v", path, readErr)
 					return nil
 				}
+
+				// Verify integrity before decoding
+				intact := CheckAndRecord(absPath, data)
+
 				var sheet Sheet
-				if err := json.NewDecoder(file).Decode(&sheet); err != nil {
+				if err := json.Unmarshal(data, &sheet); err != nil {
 					log.Printf("Error decoding sheet file %s: %v", path, err)
-					file.Close()
+					// Record as corrupt and unreachable
+					globalIntegrity.Record(absPath, false, false, "json decode error: "+err.Error())
 					return nil
 				}
-				file.Close()
+
+				// If checksum check failed (mismatch OR missing), mark sheet as read-only
+				if !intact {
+					sheet.ReadOnly = true
+					log.Printf("integrity: sheet %s marked read-only (checksum failed or missing)", path)
+				}
+
 				//  infer relative project path from DATA dir
 				//if sheet.ProjectName == "" {
 				rel, relErr := filepath.Rel(dataDir, filepath.Dir(path))

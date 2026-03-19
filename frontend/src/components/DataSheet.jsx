@@ -19,7 +19,7 @@ import {
     Undo2,
     Redo2
 } from 'lucide-react';
-import { Lock, Code, ChevronDown, Trash2, Plus, Scissors, ClipboardPaste, MoreVertical, GripVertical } from 'lucide-react';
+import { Lock, Code, ChevronDown, Trash2, Plus, Scissors, ClipboardPaste, MoreVertical, GripVertical, AlertTriangle } from 'lucide-react';
 import { isSessionValid, clearAuth, getUsername, authenticatedFetch, apiUrl } from '../utils/auth';
 import ScriptEditorPanel from './ScriptEditorPanel';
 import 'bootstrap/dist/css/bootstrap.min.css';
@@ -36,6 +36,7 @@ export default function DataSheet() {
     const [sheetName, setSheetName] = useState('');
     const [projectName, setProjectName] = useState(new URLSearchParams(location.search).get('project') || '');
     const [owner, setOwner] = useState('');
+    const [isCorrupt, setIsCorrupt] = useState(false);
     const [editors, setEditors] = useState([]);
     const [projectAdmins, setProjectAdmins] = useState([]);
 
@@ -1156,6 +1157,7 @@ export default function DataSheet() {
         if (sheet.owner) {
             setOwner(sheet.owner);
         }
+        setIsCorrupt(!!sheet.read_only);
         if (sheet.permissions && Array.isArray(sheet.permissions.editors)) {
             setEditors(sheet.permissions.editors);
         }
@@ -2108,6 +2110,11 @@ export default function DataSheet() {
                         <span className="navbar-text me-4 d-flex align-items-center">
                             <i className="bi bi-person me-1" /> {username}
                         </span>
+                        {isCorrupt && (
+                            <span className="badge bg-danger d-inline-flex align-items-center gap-1 me-3" title="File integrity check failed — this sheet may be corrupt and is read-only">
+                                <AlertTriangle size={13} /> Corrupt
+                            </span>
+                        )}
                         <span className={`navbar-text d-flex align-items-center fw-bold ${connected ? 'text-success' : 'text-danger'}`}
                               title={connected ? 'Connected' : 'Offline'}>
                             {connected ? <Wifi className="me-1" size={18} /> : <WifiOff className="me-1" size={18} />}

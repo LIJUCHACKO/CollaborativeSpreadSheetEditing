@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { authenticatedFetch, isSessionValid, clearAuth, getUsername, isAdmin, apiUrl } from '../utils/auth';
-import { ShieldCheck, KeyRound, ToggleLeft, ToggleRight, LogOut, ArrowLeft, RefreshCw, Download } from 'lucide-react';
+import { ShieldCheck, KeyRound, ToggleLeft, ToggleRight, LogOut, ArrowLeft, RefreshCw, Download, AlertTriangle, CheckCircle } from 'lucide-react';
 import 'bootstrap/dist/css/bootstrap.min.css';
 
 export default function Admin() {
@@ -27,6 +27,10 @@ export default function Admin() {
   const [sheetNewOwner, setSheetNewOwner] = useState('');
   const [sheetTransferMsg, setSheetTransferMsg] = useState('');
 
+  // Integrity report state
+  const [integrityReport, setIntegrityReport] = useState(null);
+  const [integrityLoading, setIntegrityLoading] = useState(false);
+
   useEffect(() => {
     if (!username || !isSessionValid()) {
       clearAuth();
@@ -38,6 +42,7 @@ export default function Admin() {
       return;
     }
     fetchUsers();
+    fetchIntegrityReport();
 
     const interval = setInterval(() => {
       if (!isSessionValid()) {
@@ -75,6 +80,29 @@ export default function Admin() {
       setError('Network error');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const fetchIntegrityReport = async () => {
+    setIntegrityLoading(true);
+    try {
+      const res = await authenticatedFetch(apiUrl('/api/admin/integrity'));
+      if (res.ok) {
+        const data = await res.json();
+        // Sort: corrupted first, then by path
+        if (data.files) {
+          data.files.sort((a, b) => {
+            if (!a.intact && !a.missing && (b.intact || b.missing)) return -1;
+            if (!b.intact && !b.missing && (a.intact || a.missing)) return 1;
+            return (a.path || '').localeCompare(b.path || '');
+          });
+        }
+        setIntegrityReport(data);
+      }
+    } catch (e) {
+      console.error('integrity fetch failed', e);
+    } finally {
+      setIntegrityLoading(false);
     }
   };
 
@@ -397,6 +425,65 @@ export default function Admin() {
           </div>
 
           
+        </div>
+
+        {/* Integrity Report */}
+        <div className="mt-4 card shadow-sm border-0">
+          <div className="card-header d-flex align-items-center justify-content-between bg-white">
+            <h5 className="mb-0 fw-bold d-flex align-items-center gap-2">
+              {integrityReport?.system_corrupt
+                ? <AlertTriangle size={18} className="text-danger" />
+                : <CheckCircle size={18} className="text-success" />}
+              File Integrity Report
+            </h5>
+            <button className="btn btn-sm btn-outline-secondary" onClick={fetchIntegrityReport} disabled={integrityLoading}>
+              <RefreshCw size={14} className="me-1" /> Refresh
+            </button>
+          </div>
+          <div className="card-body p-0">
+            {integrityLoading ? (
+              <div className="text-center py-3"><div className="spinner-border spinner-border-sm text-secondary" /></div>
+            ) : integrityReport ? (
+              <>
+                {integrityReport.system_corrupt && (
+                  <div className="alert alert-danger mb-0 rounded-0 d-flex align-items-center gap-2 px-3 py-2">
+                    <AlertTriangle size={16} />
+                    <span><strong>Critical:</strong> users.json or projects.json is corrupt — all projects are read-only.</span>
+                  </div>
+                )}
+                <table className="table table-sm table-hover mb-0 align-middle">
+                  <thead className="table-light">
+                    <tr>
+                      <th>File</th>
+                      <th className="text-center">Status</th>
+                      <th>Details</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(integrityReport.files || []).map(f => (
+                      <tr key={f.path}>
+                        <td className="font-monospace small">{f.path}</td>
+                        <td className="text-center">
+                          {f.intact
+                            ? <span className="badge bg-success d-inline-flex align-items-center gap-1"><CheckCircle size={11}/> Intact</span>
+                            : f.missing
+                              ? <span className="badge bg-warning text-dark d-inline-flex align-items-center gap-1"><AlertTriangle size={11}/> No checksum</span>
+                              : <span className="badge bg-danger d-inline-flex align-items-center gap-1"><AlertTriangle size={11}/> Corrupt</span>
+                          }
+                        </td>
+                        <td className="small text-muted">{f.error || (f.missing ? 'First run or external write — will be protected on next save' : '')}</td>
+                      </tr>
+                    ))}
+                    {(!integrityReport.files || integrityReport.files.length === 0) && (
+                      <tr><td colSpan={3} className="text-center text-muted py-3">No files tracked yet.</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </>
+            ) : (
+              <div className="text-center text-muted py-3 small">Click Refresh to load integrity report.</div>
+            )}
+          </div>
         </div>
 
         <div className="mt-4 p-3 bg-white border rounded small text-muted">

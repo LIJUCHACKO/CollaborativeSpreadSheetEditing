@@ -39,20 +39,22 @@ func (pm *ProjectAuditManager) Load() {
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		log.Printf("project audit: ensure data dir: %v", err)
 	}
-	f, err := os.Open(pm.filePath())
+	absPath, _ := filepath.Abs(pm.filePath())
+	data, err := os.ReadFile(pm.filePath())
 	if err != nil {
 		if os.IsNotExist(err) {
 			pm.logs = make(map[string][]ProjectAuditEntry)
 			return
 		}
-		log.Printf("project audit: open: %v", err)
+		log.Printf("project audit: read: %v", err)
 		return
 	}
-	defer f.Close()
-	dec := json.NewDecoder(f)
+	// Integrity check
+	CheckAndRecord(absPath, data)
 	var m map[string][]ProjectAuditEntry
-	if err := dec.Decode(&m); err != nil {
+	if err := json.Unmarshal(data, &m); err != nil {
 		log.Printf("project audit: decode: %v", err)
+		globalIntegrity.Record(absPath, false, false, "json decode error: "+err.Error())
 		return
 	}
 	pm.logs = m
@@ -66,17 +68,18 @@ func (pm *ProjectAuditManager) Save() {
 		log.Printf("project audit: ensure data dir: %v", err)
 		return
 	}
-	f, err := os.Create(pm.filePath())
+	data, err := json.MarshalIndent(pm.logs, "", "  ")
 	if err != nil {
-		log.Printf("project audit: create: %v", err)
+		log.Printf("project audit: encode: %v", err)
 		return
 	}
-	defer f.Close()
-	enc := json.NewEncoder(f)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(pm.logs); err != nil {
-		log.Printf("project audit: encode: %v", err)
+	data = append(data, '\n')
+	absPath, _ := filepath.Abs(pm.filePath())
+	if err := WriteFileWithChecksum(absPath, data); err != nil {
+		log.Printf("project audit: save: %v", err)
+		return
 	}
+	globalIntegrity.Record(absPath, true, false, "")
 }
 
 func (pm *ProjectAuditManager) Append(project, user, action, details string) {

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import 'bootstrap/dist/css/bootstrap.min.css';
 import { apiUrl } from '../utils/auth';
@@ -10,7 +10,16 @@ export default function Login() {
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [systemCorrupt, setSystemCorrupt] = useState(false);
   const navigate = useNavigate();
+
+  // Check integrity status on mount (public endpoint, no auth needed)
+  useEffect(() => {
+    fetch(apiUrl('/api/integrity/status'))
+      .then(r => r.ok ? r.json() : null)
+      .then(data => { if (data?.system_corrupt) setSystemCorrupt(true); })
+      .catch(() => {});
+  }, []);
 
   const handleLogin = async (e) => {
     e.preventDefault();
@@ -68,6 +77,18 @@ export default function Login() {
 
   return (
     <main className="text-center">
+      {systemCorrupt && (
+        <div className="alert alert-danger mx-auto mb-3 d-flex align-items-start gap-2" style={{ maxWidth: 460, textAlign: 'left' }} role="alert">
+          <span style={{ fontSize: '1.3rem' }}>⚠️</span>
+          <div>
+            <strong>System integrity warning — Login &amp; Registration disabled</strong>
+            <div className="small mt-1">
+              One or more critical data files (<code>users.json</code> or <code>projects.json</code>) have failed their integrity check and may be corrupted.
+              <strong> Login and registration are currently disabled</strong> to protect data integrity. Contact your administrator to restore the affected files.
+            </div>
+          </div>
+        </div>
+      )}
       <form className="form-signin" onSubmit={handleLogin}>
         <h2 className="h3 mb-3 font-weight-normal text-center">
           {isRegistering ? 'Register' : 'Login'}

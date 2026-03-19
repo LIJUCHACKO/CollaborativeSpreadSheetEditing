@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { authenticatedFetch, isSessionValid, clearAuth, getUsername, apiUrl, isAdmin, canCreateProject } from '../utils/auth';
-import { Copy, ClipboardPaste, Edit2, Trash2, Search, User, LogOut, Folder, Lock, X, ShieldCheck } from 'lucide-react';
+import { Copy, ClipboardPaste, Edit2, Trash2, Search, User, LogOut, Folder, Lock, X, ShieldCheck, AlertTriangle, CheckCircle } from 'lucide-react';
 import 'bootstrap/dist/css/bootstrap.min.css';
 
 // Shared clipboard helpers using localStorage
@@ -27,6 +27,7 @@ export default function Projects() {
   const [clipboard, setClipboard] = useState(() => getClipboard()); // {type:'folder'|'sheet', sourcePath, sourceSheetId?}
   const [pastingTarget, setPastingTarget] = useState(null); // project name or '__project_root__'
   const [pasteName, setPasteName] = useState('');
+  const [systemCorrupt, setSystemCorrupt] = useState(false);
   // ...existing code...
   const navigate = useNavigate();
   const username = getUsername();
@@ -65,6 +66,15 @@ export default function Projects() {
       if (res.ok) {
         const data = await res.json();
         setProjects(Array.isArray(data) ? data : []);
+        // systemCorrupt is for common files (users.json / projects.json) — check separately
+        const anyProjectCorrupt = Array.isArray(data) && data.some(p => p.read_only);
+        // Also check common-file integrity via the public status endpoint
+        fetch(apiUrl('/api/integrity/status'))
+          .then(r => r.ok ? r.json() : null)
+          .then(d => setSystemCorrupt(!!(d?.system_corrupt)))
+          .catch(() => {});
+        // If any project itself is corrupt we still want the banner visible
+        if (anyProjectCorrupt) setSystemCorrupt(true);
       } else if (res.status === 401) {
         clearAuth();
         alert('Your session has expired. Please log in again.');
@@ -271,8 +281,9 @@ export default function Projects() {
 
   const displayed = useMemo(() => {
     const q = search.trim().toLowerCase();
-    if (!q) return [...projects].sort((a,b) => (a?.name||'').localeCompare(b?.name||''));
-    return projects.filter(p => (p?.name||'').toLowerCase().includes(q));
+    const visible = projects.filter(p => p?.name !== 'pythonDirectory');
+    if (!q) return [...visible].sort((a,b) => (a?.name||'').localeCompare(b?.name||''));
+    return visible.filter(p => (p?.name||'').toLowerCase().includes(q));
   }, [projects, search]);
 
   const handleLogout = async () => {
@@ -367,6 +378,16 @@ export default function Projects() {
         )}
 
         <div className="bg-white border border-gray-200 rounded-2xl shadow-sm overflow-hidden">
+          {systemCorrupt && (
+            <div className="alert alert-danger mb-0 rounded-0 rounded-top d-flex align-items-start gap-2 px-4 py-3" role="alert">
+              <AlertTriangle size={18} className="text-danger mt-1 flex-shrink-0" />
+              <div>
+                <strong>Integrity warning:</strong> One or more files have failed their integrity check.
+                Affected projects are shown as <span className="badge bg-danger ms-1">Corrupt</span> and are read-only.
+                {isAdmin() && <span className="ms-2"><a href="/admin" className="alert-link">View details in Admin Panel</a>.</span>}
+              </div>
+            </div>
+          )}
           <table className="table mb-0">
             <thead>
               <tr style={{background: 'lightgray'}}>
@@ -381,7 +402,15 @@ export default function Projects() {
                   <td onClick={() => navigate(`/project/${encodeURIComponent(p.name)}`)}>
                     {editingProject === p.name ? (
                       <input type="text" className="form-control form-control-sm" value={editingName} onChange={(e)=>setEditingName(e.target.value)} onClick={(e)=>e.stopPropagation()} onKeyDown={(e)=>{ if (e.key==='Enter') renameProject(); if (e.key==='Escape') cancelRename(); }} autoFocus />
-                    ) : p.name}
+                    ) : (
+                      <span className="d-inline-flex align-items-center gap-2">
+                        {p.name}
+                        {p.read_only
+                          ? <span className="badge bg-danger d-inline-flex align-items-center gap-1" title="One or more files in this project failed integrity check"><AlertTriangle size={11} /> Corrupt</span>
+                          : <span className="badge bg-success d-inline-flex align-items-center gap-1" title="All files in this project passed integrity check"><CheckCircle size={11} /> Intact</span>
+                        }
+                      </span>
+                    )}
                   </td>
                   <td>
                     {p.owner || ''}

@@ -18,15 +18,21 @@ import (
 
 var addr = flag.String("addr", ":8082", "http service address")
 var pythonExecPath = flag.String("python", "python3", "path to Python executable")
+var pythonRunAsFlag = flag.String("python-user", "", "OS username to run Python scripts as (via sudo -u); defaults to the current process user")
 
 // Global hub instance for WebSocket connections
 var globalHub *Hub
 
 func main() {
 	flag.Parse()
-	initPython(*pythonExecPath)
+	initPython(*pythonExecPath, *pythonRunAsFlag)
 
-	// Initialize Hub
+	// Ensure pythonDirectory exists as the working directory for all script executions.
+	pythonDir := filepath.Join(dataDir, "pythonDirectory")
+	if err := os.MkdirAll(pythonDir, 0666); err != nil {
+		log.Fatalf("Failed to create pythonDirectory: %v", err)
+	}
+	log.Printf("Python working directory: %s", pythonDir)
 	globalHub = newHub()
 	go globalHub.run()
 	log.Printf("Server starting..1")
@@ -470,6 +476,11 @@ func main() {
 			return
 		}
 
+		if globalIntegrity.CommonFilesCorrupt() {
+			http.Error(w, "System integrity check failed: user database or project database is corrupt. Registration is disabled.", http.StatusServiceUnavailable)
+			return
+		}
+
 		if err := globalUserManager.Register(req.Username, req.Password); err != nil {
 			http.Error(w, err.Error(), http.StatusConflict) // User exists
 			return
@@ -501,6 +512,11 @@ func main() {
 			return
 		}
 
+		if globalIntegrity.CommonFilesCorrupt() {
+			http.Error(w, "System integrity check failed: user database or project database is corrupt. Login is disabled.", http.StatusServiceUnavailable)
+			return
+		}
+
 		token, err := globalUserManager.Login(req.Username, req.Password)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusUnauthorized)
@@ -513,6 +529,7 @@ func main() {
 			"username":           req.Username,
 			"is_admin":           globalUserManager.IsAdminUser(req.Username),
 			"can_create_project": globalUserManager.CanUserCreateProject(req.Username),
+			"system_corrupt":     globalIntegrity.CommonFilesCorrupt(),
 		})
 	})
 
@@ -900,6 +917,56 @@ func main() {
 		}
 	})
 
+	// Admin: get full integrity report for all loaded JSON files
+	http.HandleFunc("/api/admin/integrity", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		token := r.Header.Get("Authorization")
+		caller, err := globalUserManager.ValidateToken(token)
+		if err != nil {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if !globalUserManager.IsAdminUser(caller) {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+		results := globalIntegrity.AllResults()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"system_corrupt": globalIntegrity.CommonFilesCorrupt(),
+			"files":          results,
+		})
+	})
+
+	// Public: lightweight integrity status (for login page — no auth required)
+	http.HandleFunc("/api/integrity/status", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"system_corrupt": globalIntegrity.CommonFilesCorrupt(),
+		})
+	})
+
 	// Returns JSON files in the given project directory that are empty or cannot be unmarshalled as a Sheet.
 	http.HandleFunc("/api/sheets/corrupted", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -1193,9 +1260,10 @@ func main() {
 				return
 			}
 			type Project struct {
-				Name   string   `json:"name"`
-				Owner  string   `json:"owner,omitempty"`
-				Admins []string `json:"admins,omitempty"`
+				Name     string   `json:"name"`
+				Owner    string   `json:"owner,omitempty"`
+				Admins   []string `json:"admins,omitempty"`
+				ReadOnly bool     `json:"read_only,omitempty"` // true when common files or a sheet in this project is corrupt
 			}
 			projects := make([]Project, 0)
 			for _, e := range entries {
@@ -1205,7 +1273,9 @@ func main() {
 					if admins == nil {
 						admins = []string{}
 					}
-					projects = append(projects, Project{Name: e.Name(), Owner: owner, Admins: admins})
+					// Mark project read-only only when files inside it are corrupt
+					projectReadOnly := globalIntegrity.ProjectHasCorruption(e.Name())
+					projects = append(projects, Project{Name: e.Name(), Owner: owner, Admins: admins, ReadOnly: projectReadOnly})
 				}
 			}
 			w.Header().Set("Content-Type", "application/json")

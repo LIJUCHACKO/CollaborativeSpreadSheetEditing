@@ -5,29 +5,52 @@ import (
 	"fmt"
 	"log"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
 )
 
 var (
-	pythonPath    string
-	pythonPathSet bool
+	pythonPath      string
+	pythonPathSet   bool
+	pythonRunAsUser string // OS user to run scripts as; empty = current process user
+	pythonWorkDir   string // working directory for all python executions
 )
 
-// initPython sets the Python executable path to use for script execution.
-func initPython(path string) {
+// initPython sets the Python executable path and optional run-as OS user.
+// If runAsUser is non-empty every script invocation will be wrapped as:
+//
+//	sudo -u <runAsUser> <pythonPath> ...
+func initPython(path, runAsUser string) {
 	pythonPath = path
 	pythonPathSet = true
-	log.Printf("Python executable: %s", pythonPath)
+	pythonRunAsUser = runAsUser
+	pythonWorkDir = filepath.Join(dataDir, "pythonDirectory")
+	if runAsUser != "" {
+		log.Printf("Python executable: %s (running as OS user: %s)", pythonPath, pythonRunAsUser)
+	} else {
+		log.Printf("Python executable: %s", pythonPath)
+	}
 }
 
 // pythonCmd returns an *exec.Cmd ready to run the given Python arguments.
+// When pythonRunAsUser is configured the command is wrapped with "sudo -u <user>".
+// The working directory is always set to pythonWorkDir (dataDir/pythonDirectory).
 func pythonCmd(args ...string) (*exec.Cmd, error) {
 	if !pythonPathSet || pythonPath == "" {
 		return nil, fmt.Errorf("Python executable not configured (use -python flag)")
 	}
-	return exec.Command(pythonPath, args...), nil
+	var cmd *exec.Cmd
+	if pythonRunAsUser != "" {
+		// Build: sudo -u <pythonRunAsUser> <pythonPath> <args...>
+		sudoArgs := append([]string{"-u", pythonRunAsUser, pythonPath}, args...)
+		cmd = exec.Command("sudo", sudoArgs...)
+	} else {
+		cmd = exec.Command(pythonPath, args...)
+	}
+	cmd.Dir = pythonWorkDir
+	return cmd, nil
 }
 
 func (sm *SheetManager) initAsyncSaver() {

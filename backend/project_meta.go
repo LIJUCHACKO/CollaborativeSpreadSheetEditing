@@ -34,20 +34,22 @@ func (pm *ProjectMetaManager) Load() {
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		log.Printf("project meta: ensure data dir: %v", err)
 	}
-	f, err := os.Open(pm.filePath())
+	absPath, _ := filepath.Abs(pm.filePath())
+	data, err := os.ReadFile(pm.filePath())
 	if err != nil {
 		if os.IsNotExist(err) {
 			pm.data = make(map[string]ProjectMeta)
 			return
 		}
-		log.Printf("project meta: open: %v", err)
+		log.Printf("project meta: read: %v", err)
 		return
 	}
-	defer f.Close()
-	dec := json.NewDecoder(f)
+	// Integrity check
+	CheckAndRecord(absPath, data)
 	var m map[string]ProjectMeta
-	if err := dec.Decode(&m); err != nil {
+	if err := json.Unmarshal(data, &m); err != nil {
 		log.Printf("project meta: decode: %v", err)
+		globalIntegrity.Record(absPath, false, false, "json decode error: "+err.Error())
 		return
 	}
 	pm.data = m
@@ -60,17 +62,18 @@ func (pm *ProjectMetaManager) Save() {
 		log.Printf("project meta: ensure data dir: %v", err)
 		return
 	}
-	f, err := os.Create(pm.filePath())
+	data, err := json.MarshalIndent(pm.data, "", "  ")
 	if err != nil {
-		log.Printf("project meta: create: %v", err)
+		log.Printf("project meta: encode: %v", err)
 		return
 	}
-	defer f.Close()
-	enc := json.NewEncoder(f)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(pm.data); err != nil {
-		log.Printf("project meta: encode: %v", err)
+	data = append(data, '\n')
+	absPath, _ := filepath.Abs(pm.filePath())
+	if err := WriteFileWithChecksum(absPath, data); err != nil {
+		log.Printf("project meta: save: %v", err)
+		return
 	}
+	globalIntegrity.Record(absPath, true, false, "")
 }
 
 func (pm *ProjectMetaManager) GetOwner(project string) string {

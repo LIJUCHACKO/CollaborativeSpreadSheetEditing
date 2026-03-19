@@ -14,7 +14,9 @@ import {
     Copy,
     ClipboardPaste,
     X,
-    Plus
+    Plus,
+    AlertTriangle,
+    CheckCircle
 } from 'lucide-react';
 import 'bootstrap/dist/css/bootstrap.min.css';
 import { isSessionValid, clearAuth, authenticatedFetch, getUsername } from '../utils/auth';
@@ -966,6 +968,7 @@ export default function Dashboard() {
                             <tr style={{background: 'lightgray'}}>
                                 <th scope="col">Sheet Name</th>
                                 <th scope="col">Type</th>
+                                <th scope="col">Integrity</th>
                                 <th scope="col">Owner Name</th>
                                 <th scope="col" className="text-end">Actions</th>
                             </tr>
@@ -1002,6 +1005,16 @@ export default function Dashboard() {
                                         {sheet.sheet_type === 'document'
                                             ? <span className="badge" style={{ backgroundColor: '#d4edda', color: '#155724' }}>📄 Document</span>
                                             : <span className="badge" style={{ backgroundColor: '#cce5ff', color: '#004085' }}>📊 DataSheet</span>
+                                        }
+                                    </td>
+                                    <td onClick={() => !editingSheetId && window.open(sheetUrl)}>
+                                        {sheet.read_only
+                                            ? <span className="badge bg-danger d-inline-flex align-items-center gap-1" title="Checksum mismatch or missing — file may be corrupt">
+                                                <AlertTriangle size={11} /> Corrupt
+                                              </span>
+                                            : <span className="badge bg-success d-inline-flex align-items-center gap-1" title="Checksum verified — file is intact">
+                                                <CheckCircle size={11} /> Intact
+                                              </span>
                                         }
                                     </td>
                                     <td onClick={() => !editingSheetId && window.open(sheetUrl)}>{sheet.owner}</td>
@@ -1063,13 +1076,15 @@ export default function Dashboard() {
                                 <tr key={`corrupted-${cf.name}`} style={{ opacity: 0.85 }}>
                                     <td>
                                         <span style={{ color: 'red', fontWeight: 500 }} title={`Corrupted: ${cf.reason}`}>
-                                            ⚠ {cf.name}
-                                        </span>
-                                        <span className="ms-2 badge" style={{ backgroundColor: '#f8d7da', color: '#842029', fontSize: '0.7rem' }}>
-                                            corrupted
+                                            {cf.name}
                                         </span>
                                     </td>
                                     <td><span className="text-muted small">—</span></td>
+                                    <td>
+                                        <span className="badge bg-danger d-inline-flex align-items-center gap-1" title={cf.reason}>
+                                            <AlertTriangle size={11} /> Corrupt
+                                        </span>
+                                    </td>
                                     <td><span className="text-muted small">—</span></td>
                                     <td className="text-end">
                                         <span className="text-danger small" title={cf.reason}>Cannot open</span>
