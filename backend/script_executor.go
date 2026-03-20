@@ -1120,8 +1120,9 @@ func addMergedAuditEntries(s *Sheet, cellChanges map[string]cellChangesstruct) {
 		oldValForNew := change.oldVal
 		if prevIdx >= 0 {
 			prevTimestamp := s.AuditLog[prevIdx].Timestamp
-			// Merge if previous log is after the last timeline event
-			prevIsAfterLastTimelineEvent := !lastTimelineEvent.IsZero() && prevTimestamp.After(lastTimelineEvent)
+			// Merge if previous log is after the last timeline event.
+			// Also merge when there is no timeline entry (zero time).
+			prevIsAfterLastTimelineEvent := lastTimelineEvent.IsZero() || prevTimestamp.After(lastTimelineEvent)
 			if prevIsAfterLastTimelineEvent {
 				oldValForNew = s.AuditLog[prevIdx].OldValue
 				s.AuditLog = append(s.AuditLog[:prevIdx], s.AuditLog[prevIdx+1:]...)

@@ -312,37 +312,7 @@ func (s *Sheet) SetCellScript(row, col, script, user string, reverted bool, rowS
 		}
 		// Add merged audit entries before save
 		addMergedAuditEntries(s, cellChanges)
-		/*
-			prevIdx := -1
-			r1 := atoiSafe(row)
-			for i := len(s.AuditLog) - 1; i >= 0; i-- {
-				entry := s.AuditLog[i]
-				if entry.Action == "EDIT_SCRIPT" && entry.Row1 == r1 && entry.Col1 == col {
-					if entry.User == user && !entry.ChangeReversed {
-						prevIdx = i
-					}
-					break
-				}
-			}
-			if prevIdx >= 0 {
-				if time.Since(s.AuditLog[prevIdx].Timestamp) < 24*time.Hour {
-					oldScript = s.AuditLog[prevIdx].OldValue
-					s.AuditLog = append(s.AuditLog[:prevIdx], s.AuditLog[prevIdx+1:]...)
-				}
-			}
-			if oldScript != script {
-				s.AuditLog = append(s.AuditLog, AuditEntry{
-					Timestamp:      time.Now(),
-					User:           user,
-					Action:         "EDIT_SCRIPT",
-					Row1:           r1,
-					Col1:           col,
-					OldValue:       oldScript,
-					NewValue:       script,
-					ChangeReversed: false,
-				})
-			}
-		*/
+
 	}
 
 	// Preserve existing metadata

@@ -476,43 +476,7 @@ func (s *Sheet) SetCell(row, col, value, user string, reverted bool) {
 		}
 		// Add merged audit entries before save
 		addMergedAuditEntries(s, cellChanges)
-		/*
-			oldValForNew := ""
-			if exists {
-				oldValForNew = currentVal.Value
-			}
 
-			prevIdx := -1
-			for i := len(s.AuditLog) - 1; i >= 0; i-- {
-				entry := s.AuditLog[i]
-				if entry.Action == "EDIT_CELL" && entry.Row1 == r1 && entry.Col1 == col {
-					if entry.User == user && !entry.ChangeReversed {
-						prevIdx = i
-					}
-					break
-				}
-			}
-			if prevIdx >= 0 {
-				// Only merge if previous log is within 24 hours
-				if time.Since(s.AuditLog[prevIdx].Timestamp) < 24*time.Hour {
-					oldValForNew = s.AuditLog[prevIdx].OldValue
-					s.AuditLog = append(s.AuditLog[:prevIdx], s.AuditLog[prevIdx+1:]...)
-				}
-			}
-			if oldValForNew != value {
-				s.AuditLog = append(s.AuditLog, AuditEntry{
-					Timestamp:      time.Now(),
-					User:           user,
-					Action:         "EDIT_CELL",
-					Row1:           r1,
-					Col1:           col,
-					OldValue:       oldValForNew,
-					NewValue:       value,
-					ChangeReversed: false,
-				})
-
-			}
-		*/
 	}
 
 	s.mu.Unlock() // Unlock BEFORE saving to avoid deadlock (Save -> MarshalJSON -> tries RLock)
