@@ -29,7 +29,7 @@ func main() {
 
 	// Ensure pythonDirectory exists as the working directory for all script executions.
 	pythonDir := filepath.Join(dataDir, "pythonDirectory")
-	if err := os.MkdirAll(pythonDir, 0666); err != nil {
+	if err := os.MkdirAll(pythonDir, 0777); err != nil {
 		log.Fatalf("Failed to create pythonDirectory: %v", err)
 	}
 	log.Printf("Python working directory: %s", pythonDir)
@@ -2641,6 +2641,175 @@ func main() {
 		default:
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
+	})
+
+	// ── Python-Files API ─────────────────────────────────────────────────────
+	// GET    /api/python-files              → list files in pythonDirectory
+	// POST   /api/python-files              → upload a file (multipart form field "file")
+	// DELETE /api/python-files?name=<n>    → delete a named file
+	// GET    /api/python-files/serve?name=<n> → stream file bytes
+	http.HandleFunc("/api/python-files", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		token := r.Header.Get("Authorization")
+		username, err := globalUserManager.ValidateToken(token)
+		if err != nil {
+			http.Error(w, "Unauthorized: "+err.Error(), http.StatusUnauthorized)
+			return
+		}
+
+		pyDir := filepath.Join(dataDir, "pythonDirectory")
+		if err := os.MkdirAll(pyDir, 0777); err != nil {
+			http.Error(w, "Failed to access pythonDirectory", http.StatusInternalServerError)
+			return
+		}
+
+		switch r.Method {
+		case http.MethodGet:
+			entries, err := os.ReadDir(pyDir)
+			if err != nil {
+				http.Error(w, "Failed to read pythonDirectory", http.StatusInternalServerError)
+				return
+			}
+			type FileInfo struct {
+				Name string `json:"name"`
+				Size int64  `json:"size"`
+				URL  string `json:"url"`
+			}
+			list := make([]FileInfo, 0, len(entries))
+			for _, e := range entries {
+				if e.IsDir() {
+					continue
+				}
+				info, _ := e.Info()
+				sz := int64(0)
+				if info != nil {
+					sz = info.Size()
+				}
+				list = append(list, FileInfo{
+					Name: e.Name(),
+					Size: sz,
+					URL:  "/api/python-files/serve?name=" + e.Name(),
+				})
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(list)
+
+		case http.MethodPost:
+			// Upload a file (up to 50 MB)
+			if err := r.ParseMultipartForm(50 << 20); err != nil {
+				http.Error(w, "Failed to parse form: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			file, header, err := r.FormFile("file")
+			if err != nil {
+				http.Error(w, "file field required: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			defer file.Close()
+
+			// Reject path traversal in filename
+			baseName := filepath.Base(header.Filename)
+			if strings.Contains(baseName, "..") {
+				http.Error(w, "invalid filename", http.StatusBadRequest)
+				return
+			}
+
+			destPath := filepath.Join(pyDir, baseName)
+			data := make([]byte, 0, header.Size)
+			buf := make([]byte, 32*1024)
+			for {
+				n, readErr := file.Read(buf)
+				if n > 0 {
+					data = append(data, buf[:n]...)
+				}
+				if readErr != nil {
+					break
+				}
+			}
+			if err := os.WriteFile(destPath, data, 0644); err != nil {
+				http.Error(w, "Failed to save file: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+
+			globalProjectAuditManager.Append("pythonDirectory", username, "UPLOAD_PYTHON_FILE", "Uploaded python file '"+baseName+"'")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{
+				"name": baseName,
+				"url":  "/api/python-files/serve?name=" + baseName,
+			})
+
+		case http.MethodDelete:
+			fileName := r.URL.Query().Get("name")
+			if fileName == "" {
+				http.Error(w, "name is required", http.StatusBadRequest)
+				return
+			}
+			// Reject path traversal
+			if strings.Contains(fileName, "..") || strings.Contains(fileName, "/") || strings.Contains(fileName, string(os.PathSeparator)) {
+				http.Error(w, "invalid file name", http.StatusBadRequest)
+				return
+			}
+			// Only admin users may delete python files
+			if !globalUserManager.IsAdminUser(username) {
+				http.Error(w, "Forbidden: admin only", http.StatusForbidden)
+				return
+			}
+			filePath := filepath.Join(pyDir, fileName)
+			if err := os.Remove(filePath); err != nil {
+				if os.IsNotExist(err) {
+					http.Error(w, "File not found", http.StatusNotFound)
+					return
+				}
+				http.Error(w, "Failed to delete file: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			globalProjectAuditManager.Append("pythonDirectory", username, "DELETE_PYTHON_FILE", "Deleted python file '"+fileName+"'")
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{"message": "File deleted"})
+
+		default:
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
+	// Serve python-directory file bytes
+	http.HandleFunc("/api/python-files/serve", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		// Serving is public – no token required so that images embedded in
+		// markdown previews (via plain <img> tags) load without authentication.
+		fileName := r.URL.Query().Get("name")
+		if fileName == "" {
+			http.Error(w, "name is required", http.StatusBadRequest)
+			return
+		}
+		if strings.Contains(fileName, "..") || strings.Contains(fileName, "/") {
+			http.Error(w, "invalid parameters", http.StatusBadRequest)
+			return
+		}
+
+		filePath := filepath.Join(dataDir, "pythonDirectory", fileName)
+		http.ServeFile(w, r, filePath)
 	})
 
 	// Serve asset bytes

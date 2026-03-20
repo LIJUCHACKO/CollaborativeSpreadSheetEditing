@@ -1,7 +1,8 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { marked } from 'marked';
-import { X, Eye, Edit3, Bold, Italic, Heading1, Heading2, Heading3, List, ListOrdered, Code, Link, Image, Quote, Minus, CheckSquare, Maximize2, Minimize2, Sigma, Table, FolderOpen } from 'lucide-react';
+import { X, Eye, Edit3, Bold, Italic, Heading1, Heading2, Heading3, List, ListOrdered, Code, Link, Image, Quote, Minus, CheckSquare, Maximize2, Minimize2, Sigma, Table, FolderOpen, FileCode } from 'lucide-react';
 import AssetBrowser from './AssetBrowser';
+import PythonFileBrowser from './PythonFileBrowser';
 
 // Configure marked for safe rendering
 marked.setOptions({
@@ -38,6 +39,7 @@ export default function MarkdownEditorPanel({ cellRow, cellCol, value, onSave, o
     const [activeTab, setActiveTab] = useState('edit'); // 'edit' | 'preview' | 'split'
     const [isMaximized, setIsMaximized] = useState(false);
     const [assetBrowserOpen, setAssetBrowserOpen] = useState(false);
+    const [pythonFileBrowserOpen, setPythonFileBrowserOpen] = useState(false);
     const textareaRef = useRef(null);
     const panelRef = useRef(null);
     const previewRef = useRef(null);
@@ -403,6 +405,7 @@ export default function MarkdownEditorPanel({ cellRow, cellCol, value, onSave, o
         { icon: <Table size={14} />, title: 'Insert Table', action: () => setTablePopover(v => !v), isTableBtn: true },
         { type: 'separator' },
         { icon: <FolderOpen size={14} />, title: 'Browse & Insert Asset Image', action: () => setAssetBrowserOpen(true) },
+        { icon: <FileCode size={14} />, title: 'Browse & Insert Python File Link', action: () => setPythonFileBrowserOpen(true) },
     ];
 
     // Keyboard shortcuts
@@ -799,6 +802,16 @@ export default function MarkdownEditorPanel({ cellRow, cellCol, value, onSave, o
                         insertMarkdown(snippet);
                     }}
                     onClose={() => setAssetBrowserOpen(false)}
+                />
+            )}
+
+            {/* Python File Browser */}
+            {pythonFileBrowserOpen && (
+                <PythonFileBrowser
+                    onInsert={(snippet) => {
+                        insertMarkdown(snippet);
+                    }}
+                    onClose={() => setPythonFileBrowserOpen(false)}
                 />
             )}
 
