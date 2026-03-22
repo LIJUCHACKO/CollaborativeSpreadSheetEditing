@@ -735,6 +735,9 @@ export default function DataSheet() {
         ws.current.send(JSON.stringify({ type: 'UPDATE_CELL_TYPE', sheet_name: id, payload }));
         setShowCellTypeDialog(false);
         setCellTypeDialogCell(null);
+        if (selectedCellType === 1) {
+            openScriptPopup(row, col);
+        }
     };
 
     // Handler to add option to cell type options

@@ -129,7 +129,7 @@ func (s *Sheet) extractOptionsFromRange(rangeStr string) []string {
 func (s *Sheet) SetCellType(row, col string, cellType int, options []string, optionsRange string, user string) bool {
 	s.mu.Lock()
 	//defer s.mu.Unlock()
-
+	//fmt.Printf("SetCellType %s %s %d %v %s %s\n", row, col, cellType, options, optionsRange, user)
 	// Only owner can change cell type
 	if user != s.Owner {
 		s.mu.Unlock()
@@ -161,8 +161,12 @@ func (s *Sheet) SetCellType(row, col string, cellType int, options []string, opt
 	// Clear selected options when changing cell type
 	if cellType != ComboBoxCell && cellType != MultipleSelectionCell {
 		current.OptionsSelected = nil
+		current.Options = nil
+		current.OptionsRange = ""
 	}
-
+	if cellType != ScriptCell {
+		current.Script = ""
+	}
 	// If options changed, update Value based on previous selection
 	optionsChanged := len(oldOptions) != len(options)
 	if !optionsChanged {
@@ -173,9 +177,11 @@ func (s *Sheet) SetCellType(row, col string, cellType int, options []string, opt
 			}
 		}
 	}
-
+	s.Data[row][col] = current
 	if optionsChanged && (cellType == ComboBoxCell || cellType == MultipleSelectionCell) {
 		if s.SheetType == "document" {
+
+			//In Document Option setting for first row is disabled
 			for targetRow := range s.Data {
 				if targetRow == "1" {
 					continue
