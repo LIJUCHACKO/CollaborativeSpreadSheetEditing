@@ -351,6 +351,20 @@ func (s *Sheet) SetCellScript(row, col, script, user string, reverted bool, rowS
 	//s.FillValueFromScriptOutput(row, col)
 }
 
+// cellDepText returns the text that should be used for dependency tracking for a cell.
+// For AI-generated cells (type 4), this is the AIPrompt; for script cells, this is the Script.
+func cellDepText(cell Cell) string {
+	if cell.CellType == AIGeneratedCell && strings.TrimSpace(cell.AIPrompt) != "" {
+		return cell.AIPrompt
+	}
+	return cell.Script
+}
+
+// cellHasRefs returns true if the cell has any reference text (Script or AIPrompt) that might contain {{}} references.
+func cellHasRefs(cell Cell) bool {
+	return cell.Script != "" || cell.AIPrompt != ""
+}
+
 // adjustScriptTagsOnInsertRow increments row references in script tags for rows at or below insertRow
 // This function updates both same-sheet references and cross-sheet references, and updates scriptDeps
 func (s *Sheet) adjustScriptTagsOnInsertRow(insertRow int) {
@@ -363,11 +377,11 @@ func (s *Sheet) adjustScriptTagsOnInsertRow(insertRow int) {
 	pending := make([]depUpd, 0)
 	for rowKey, rowMap := range s.Data {
 		for colKey, cell := range rowMap {
-			if cell.Script == "" {
+			if cell.Script == "" && cell.AIPrompt == "" {
 				continue
 			}
 
-			newScript := sameSheetPattern.ReplaceAllStringFunc(cell.Script, func(match string) string {
+			sameSheetReplacer := func(match string) string {
 				submatches := sameSheetPattern.FindStringSubmatch(match)
 				if len(submatches) < 3 {
 					return match
@@ -396,12 +410,15 @@ func (s *Sheet) adjustScriptTagsOnInsertRow(insertRow int) {
 				}
 
 				return fmt.Sprintf("{{%s%d:%s%d}}", col1, row1, col2, row2)
-			})
+			}
+			newScript := sameSheetPattern.ReplaceAllStringFunc(cell.Script, sameSheetReplacer)
 
-			if newScript != cell.Script {
+			newPrompt := sameSheetPattern.ReplaceAllStringFunc(cell.AIPrompt, sameSheetReplacer)
+			if newScript != cell.Script || newPrompt != cell.AIPrompt {
 				cell.Script = newScript
+				cell.AIPrompt = newPrompt
 				s.Data[rowKey][colKey] = cell
-				pending = append(pending, depUpd{s.ProjectName, s.Name, cell.CellID, newScript, rowKey, colKey})
+				pending = append(pending, depUpd{s.ProjectName, s.Name, cell.CellID, cellDepText(cell), rowKey, colKey})
 			}
 		}
 	}
@@ -448,11 +465,11 @@ func (s *Sheet) adjustScriptTagsOnInsertRow(insertRow int) {
 		modified := false
 		for rowKey, rowMap := range sheet.Data {
 			for colKey, cell := range rowMap {
-				if cell.Script == "" {
+				if cell.Script == "" && cell.AIPrompt == "" {
 					continue
 				}
 
-				newScript := crossSheetPattern.ReplaceAllStringFunc(cell.Script, func(match string) string {
+				crossSheetReplacer := func(match string) string {
 					submatches := crossSheetPattern.FindStringSubmatch(match)
 					if len(submatches) < 5 {
 						return match
@@ -489,10 +506,13 @@ func (s *Sheet) adjustScriptTagsOnInsertRow(insertRow int) {
 					}
 
 					return fmt.Sprintf("{{%s/%s/%s%d:%s%d}}", refProject, refSheet, col1, row1, col2, row2)
-				})
+				}
+				newScript := crossSheetPattern.ReplaceAllStringFunc(cell.Script, crossSheetReplacer)
 
-				if newScript != cell.Script {
+				newPrompt := crossSheetPattern.ReplaceAllStringFunc(cell.AIPrompt, crossSheetReplacer)
+				if newScript != cell.Script || newPrompt != cell.AIPrompt {
 					cell.Script = newScript
+					cell.AIPrompt = newPrompt
 					sheet.Data[rowKey][colKey] = cell
 					modified = true
 				}
@@ -508,8 +528,8 @@ func (s *Sheet) adjustScriptTagsOnInsertRow(insertRow int) {
 			sheet.mu.RLock()
 			for rKey, rowMap := range sheet.Data {
 				for cKey, cell := range rowMap {
-					if cell.Script != "" {
-						updList = append(updList, depUpd2{sheet.ProjectName, sheet.Name, cell.CellID, cell.Script, rKey, cKey})
+					if cellHasRefs(cell) {
+						updList = append(updList, depUpd2{sheet.ProjectName, sheet.Name, cell.CellID, cellDepText(cell), rKey, cKey})
 					}
 				}
 			}
@@ -537,11 +557,11 @@ func (s *Sheet) adjustScriptTagsOnDeleteRow(deleteRow int) {
 	pending := make([]depUpd, 0)
 	for rowKey, rowMap := range s.Data {
 		for colKey, cell := range rowMap {
-			if cell.Script == "" {
+			if cell.Script == "" && cell.AIPrompt == "" {
 				continue
 			}
 
-			newScript := sameSheetPattern.ReplaceAllStringFunc(cell.Script, func(match string) string {
+			sameSheetReplacer := func(match string) string {
 				submatches := sameSheetPattern.FindStringSubmatch(match)
 				if len(submatches) < 3 {
 					return match
@@ -593,15 +613,18 @@ func (s *Sheet) adjustScriptTagsOnDeleteRow(deleteRow int) {
 				}
 
 				return fmt.Sprintf("{{%s%d:%s%d}}", col1, row1, col2, row2)
-			})
+			}
+			newScript := sameSheetPattern.ReplaceAllStringFunc(cell.Script, sameSheetReplacer)
 
-			if newScript != cell.Script {
+			newPrompt := sameSheetPattern.ReplaceAllStringFunc(cell.AIPrompt, sameSheetReplacer)
+			if newScript != cell.Script || newPrompt != cell.AIPrompt {
 				cell.Script = newScript
-				if strings.Contains(newScript, "_removed}}") {
+				cell.AIPrompt = newPrompt
+				if strings.Contains(newScript, "_removed}}") || strings.Contains(newPrompt, "_removed}}") {
 					cell.Value = "reference removed"
 				}
 				s.Data[rowKey][colKey] = cell
-				pending = append(pending, depUpd{s.ProjectName, s.Name, cell.CellID, newScript, rowKey, colKey})
+				pending = append(pending, depUpd{s.ProjectName, s.Name, cell.CellID, cellDepText(cell), rowKey, colKey})
 			}
 		}
 	}
@@ -647,11 +670,11 @@ func (s *Sheet) adjustScriptTagsOnDeleteRow(deleteRow int) {
 		modified := false
 		for rowKey, rowMap := range sheet.Data {
 			for colKey, cell := range rowMap {
-				if cell.Script == "" {
+				if cell.Script == "" && cell.AIPrompt == "" {
 					continue
 				}
 
-				newScript := crossSheetPattern.ReplaceAllStringFunc(cell.Script, func(match string) string {
+				crossSheetReplacer := func(match string) string {
 					submatches := crossSheetPattern.FindStringSubmatch(match)
 					if len(submatches) < 5 {
 						return match
@@ -711,11 +734,14 @@ func (s *Sheet) adjustScriptTagsOnDeleteRow(deleteRow int) {
 					}
 
 					return fmt.Sprintf("{{%s/%s/%s%d:%s%d}}", refProject, refSheet, col1, row1, col2, row2)
-				})
+				}
+				newScript := crossSheetPattern.ReplaceAllStringFunc(cell.Script, crossSheetReplacer)
 
-				if newScript != cell.Script {
+				newPrompt := crossSheetPattern.ReplaceAllStringFunc(cell.AIPrompt, crossSheetReplacer)
+				if newScript != cell.Script || newPrompt != cell.AIPrompt {
 					cell.Script = newScript
-					if strings.Contains(newScript, "_removed}}") {
+					cell.AIPrompt = newPrompt
+					if strings.Contains(newScript, "_removed}}") || strings.Contains(newPrompt, "_removed}}") {
 						cell.Value = "reference removed"
 					}
 					sheet.Data[rowKey][colKey] = cell
@@ -731,8 +757,8 @@ func (s *Sheet) adjustScriptTagsOnDeleteRow(deleteRow int) {
 			sheet.mu.RLock()
 			for rKey, rowMap := range sheet.Data {
 				for cKey, cell := range rowMap {
-					if cell.Script != "" {
-						updList = append(updList, depUpd2{sheet.ProjectName, sheet.Name, cell.CellID, cell.Script, rKey, cKey})
+					if cellHasRefs(cell) {
+						updList = append(updList, depUpd2{sheet.ProjectName, sheet.Name, cell.CellID, cellDepText(cell), rKey, cKey})
 					}
 				}
 			}
@@ -760,11 +786,11 @@ func (s *Sheet) adjustScriptTagsOnMoveRow(fromRow, destIndex int) {
 	pending := make([]depUpd, 0)
 	for rowKey, rowMap := range s.Data {
 		for colKey, cell := range rowMap {
-			if cell.Script == "" {
+			if cell.Script == "" && cell.AIPrompt == "" {
 				continue
 			}
 
-			newScript := sameSheetPattern.ReplaceAllStringFunc(cell.Script, func(match string) string {
+			sameSheetReplacer := func(match string) string {
 				submatches := sameSheetPattern.FindStringSubmatch(match)
 				if len(submatches) < 3 {
 					return match
@@ -828,12 +854,15 @@ func (s *Sheet) adjustScriptTagsOnMoveRow(fromRow, destIndex int) {
 				}
 
 				return fmt.Sprintf("{{%s%d:%s%d}}", col1, row1, col2, row2)
-			})
+			}
+			newScript := sameSheetPattern.ReplaceAllStringFunc(cell.Script, sameSheetReplacer)
 
-			if newScript != cell.Script {
+			newPrompt := sameSheetPattern.ReplaceAllStringFunc(cell.AIPrompt, sameSheetReplacer)
+			if newScript != cell.Script || newPrompt != cell.AIPrompt {
 				cell.Script = newScript
+				cell.AIPrompt = newPrompt
 				s.Data[rowKey][colKey] = cell
-				pending = append(pending, depUpd{s.ProjectName, s.Name, cell.CellID, newScript, rowKey, colKey})
+				pending = append(pending, depUpd{s.ProjectName, s.Name, cell.CellID, cellDepText(cell), rowKey, colKey})
 			}
 		}
 	}
@@ -882,11 +911,11 @@ func (s *Sheet) adjustScriptTagsOnMoveRow(fromRow, destIndex int) {
 		modified := false
 		for rowKey, rowMap := range sheet.Data {
 			for colKey, cell := range rowMap {
-				if cell.Script == "" {
+				if cell.Script == "" && cell.AIPrompt == "" {
 					continue
 				}
 
-				newScript := crossSheetPattern.ReplaceAllStringFunc(cell.Script, func(match string) string {
+				crossSheetReplacer := func(match string) string {
 					submatches := crossSheetPattern.FindStringSubmatch(match)
 					if len(submatches) < 5 {
 						return match
@@ -958,10 +987,13 @@ func (s *Sheet) adjustScriptTagsOnMoveRow(fromRow, destIndex int) {
 					}
 
 					return fmt.Sprintf("{{%s/%s/%s%d:%s%d}}", refProject, refSheet, col1, row1, col2, row2)
-				})
+				}
+				newScript := crossSheetPattern.ReplaceAllStringFunc(cell.Script, crossSheetReplacer)
 
-				if newScript != cell.Script {
+				newPrompt := crossSheetPattern.ReplaceAllStringFunc(cell.AIPrompt, crossSheetReplacer)
+				if newScript != cell.Script || newPrompt != cell.AIPrompt {
 					cell.Script = newScript
+					cell.AIPrompt = newPrompt
 					sheet.Data[rowKey][colKey] = cell
 					modified = true
 				}
@@ -975,8 +1007,8 @@ func (s *Sheet) adjustScriptTagsOnMoveRow(fromRow, destIndex int) {
 			sheet.mu.RLock()
 			for rKey, rowMap := range sheet.Data {
 				for cKey, cell := range rowMap {
-					if cell.Script != "" {
-						updList = append(updList, depUpd2{sheet.ProjectName, sheet.Name, cell.CellID, cell.Script, rKey, cKey})
+					if cellHasRefs(cell) {
+						updList = append(updList, depUpd2{sheet.ProjectName, sheet.Name, cell.CellID, cellDepText(cell), rKey, cKey})
 					}
 				}
 			}
@@ -1024,11 +1056,11 @@ func (s *Sheet) adjustScriptTagsOnMoveRowBlock(blockStart, blockSize, insertStar
 	pending := make([]depUpd, 0)
 	for rowKey, rowMap := range s.Data {
 		for colKey, cell := range rowMap {
-			if cell.Script == "" {
+			if cell.Script == "" && cell.AIPrompt == "" {
 				continue
 			}
 
-			newScript := sameSheetPattern.ReplaceAllStringFunc(cell.Script, func(match string) string {
+			sameSheetReplacer := func(match string) string {
 				submatches := sameSheetPattern.FindStringSubmatch(match)
 				if len(submatches) < 3 {
 					return match
@@ -1055,12 +1087,15 @@ func (s *Sheet) adjustScriptTagsOnMoveRowBlock(blockStart, blockSize, insertStar
 				row1 = adjustRow(row1)
 				row2 = adjustRow(row2)
 				return fmt.Sprintf("{{%s%d:%s%d}}", col1, row1, col2, row2)
-			})
+			}
+			newScript := sameSheetPattern.ReplaceAllStringFunc(cell.Script, sameSheetReplacer)
 
-			if newScript != cell.Script {
+			newPrompt := sameSheetPattern.ReplaceAllStringFunc(cell.AIPrompt, sameSheetReplacer)
+			if newScript != cell.Script || newPrompt != cell.AIPrompt {
 				cell.Script = newScript
+				cell.AIPrompt = newPrompt
 				s.Data[rowKey][colKey] = cell
-				pending = append(pending, depUpd{s.ProjectName, s.Name, cell.CellID, newScript, rowKey, colKey})
+				pending = append(pending, depUpd{s.ProjectName, s.Name, cell.CellID, cellDepText(cell), rowKey, colKey})
 			}
 		}
 	}
@@ -1104,11 +1139,11 @@ func (s *Sheet) adjustScriptTagsOnMoveRowBlock(blockStart, blockSize, insertStar
 		modified := false
 		for rowKey, rowMap := range sheet.Data {
 			for colKey, cell := range rowMap {
-				if cell.Script == "" {
+				if cell.Script == "" && cell.AIPrompt == "" {
 					continue
 				}
 
-				newScript := crossSheetPattern.ReplaceAllStringFunc(cell.Script, func(match string) string {
+				crossSheetReplacer := func(match string) string {
 					submatches := crossSheetPattern.FindStringSubmatch(match)
 					if len(submatches) < 5 {
 						return match
@@ -1142,10 +1177,13 @@ func (s *Sheet) adjustScriptTagsOnMoveRowBlock(blockStart, blockSize, insertStar
 					row1 = adjustRow(row1)
 					row2 = adjustRow(row2)
 					return fmt.Sprintf("{{%s/%s/%s%d:%s%d}}", refProject, refSheet, col1, row1, col2, row2)
-				})
+				}
+				newScript := crossSheetPattern.ReplaceAllStringFunc(cell.Script, crossSheetReplacer)
 
-				if newScript != cell.Script {
+				newPrompt := crossSheetPattern.ReplaceAllStringFunc(cell.AIPrompt, crossSheetReplacer)
+				if newScript != cell.Script || newPrompt != cell.AIPrompt {
 					cell.Script = newScript
+					cell.AIPrompt = newPrompt
 					sheet.Data[rowKey][colKey] = cell
 					modified = true
 				}
@@ -1159,8 +1197,8 @@ func (s *Sheet) adjustScriptTagsOnMoveRowBlock(blockStart, blockSize, insertStar
 			sheet.mu.RLock()
 			for rKey, rowMap := range sheet.Data {
 				for cKey, cell := range rowMap {
-					if cell.Script != "" {
-						updList = append(updList, depUpd2{sheet.ProjectName, sheet.Name, cell.CellID, cell.Script, rKey, cKey})
+					if cellHasRefs(cell) {
+						updList = append(updList, depUpd2{sheet.ProjectName, sheet.Name, cell.CellID, cellDepText(cell), rKey, cKey})
 					}
 				}
 			}
@@ -1189,11 +1227,11 @@ func (s *Sheet) adjustScriptTagsOnDeleteRowBlock(blockStart, blockSize int) {
 	pending := make([]depUpd, 0)
 	for rowKey, rowMap := range s.Data {
 		for colKey, cell := range rowMap {
-			if cell.Script == "" {
+			if cell.Script == "" && cell.AIPrompt == "" {
 				continue
 			}
 
-			newScript := sameSheetPattern.ReplaceAllStringFunc(cell.Script, func(match string) string {
+			sameSheetReplacer := func(match string) string {
 				submatches := sameSheetPattern.FindStringSubmatch(match)
 				if len(submatches) < 3 {
 					return match
@@ -1243,15 +1281,18 @@ func (s *Sheet) adjustScriptTagsOnDeleteRowBlock(blockStart, blockSize int) {
 					}
 				}
 				return fmt.Sprintf("{{%s%d:%s%d}}", col1, newRow1, col2, newRow2)
-			})
+			}
+			newScript := sameSheetPattern.ReplaceAllStringFunc(cell.Script, sameSheetReplacer)
 
-			if newScript != cell.Script {
+			newPrompt := sameSheetPattern.ReplaceAllStringFunc(cell.AIPrompt, sameSheetReplacer)
+			if newScript != cell.Script || newPrompt != cell.AIPrompt {
 				cell.Script = newScript
-				if strings.Contains(newScript, "_removed}}") {
+				cell.AIPrompt = newPrompt
+				if strings.Contains(newScript, "_removed}}") || strings.Contains(newPrompt, "_removed}}") {
 					cell.Value = "reference removed"
 				}
 				s.Data[rowKey][colKey] = cell
-				pending = append(pending, depUpd{s.ProjectName, s.Name, cell.CellID, newScript, rowKey, colKey})
+				pending = append(pending, depUpd{s.ProjectName, s.Name, cell.CellID, cellDepText(cell), rowKey, colKey})
 			}
 		}
 	}
@@ -1295,11 +1336,11 @@ func (s *Sheet) adjustScriptTagsOnDeleteRowBlock(blockStart, blockSize int) {
 		modified := false
 		for rowKey, rowMap := range sheet.Data {
 			for colKey, cell := range rowMap {
-				if cell.Script == "" {
+				if cell.Script == "" && cell.AIPrompt == "" {
 					continue
 				}
 
-				newScript := crossSheetPattern.ReplaceAllStringFunc(cell.Script, func(match string) string {
+				crossSheetReplacer := func(match string) string {
 					submatches := crossSheetPattern.FindStringSubmatch(match)
 					if len(submatches) < 5 {
 						return match
@@ -1350,11 +1391,14 @@ func (s *Sheet) adjustScriptTagsOnDeleteRowBlock(blockStart, blockSize int) {
 						}
 					}
 					return fmt.Sprintf("{{%s/%s/%s%d:%s%d}}", refProject, refSheet, col1, newRow1, col2, newRow2)
-				})
+				}
+				newScript := crossSheetPattern.ReplaceAllStringFunc(cell.Script, crossSheetReplacer)
 
-				if newScript != cell.Script {
+				newPrompt := crossSheetPattern.ReplaceAllStringFunc(cell.AIPrompt, crossSheetReplacer)
+				if newScript != cell.Script || newPrompt != cell.AIPrompt {
 					cell.Script = newScript
-					if strings.Contains(newScript, "_removed}}") {
+					cell.AIPrompt = newPrompt
+					if strings.Contains(newScript, "_removed}}") || strings.Contains(newPrompt, "_removed}}") {
 						cell.Value = "reference removed"
 					}
 					sheet.Data[rowKey][colKey] = cell
@@ -1370,8 +1414,8 @@ func (s *Sheet) adjustScriptTagsOnDeleteRowBlock(blockStart, blockSize int) {
 			sheet.mu.RLock()
 			for rKey, rowMap := range sheet.Data {
 				for cKey, cell := range rowMap {
-					if cell.Script != "" {
-						updList = append(updList, depUpd2{sheet.ProjectName, sheet.Name, cell.CellID, cell.Script, rKey, cKey})
+					if cellHasRefs(cell) {
+						updList = append(updList, depUpd2{sheet.ProjectName, sheet.Name, cell.CellID, cellDepText(cell), rKey, cKey})
 					}
 				}
 			}
@@ -1398,11 +1442,11 @@ func (s *Sheet) adjustScriptTagsOnInsertCol(insertIdx int) {
 	pending := make([]depUpd, 0)
 	for rowKey, rowMap := range s.Data {
 		for colKey, cell := range rowMap {
-			if cell.Script == "" {
+			if cell.Script == "" && cell.AIPrompt == "" {
 				continue
 			}
 
-			newScript := sameSheetPattern.ReplaceAllStringFunc(cell.Script, func(match string) string {
+			sameSheetReplacer := func(match string) string {
 				submatches := sameSheetPattern.FindStringSubmatch(match)
 				if len(submatches) < 3 {
 					return match
@@ -1436,12 +1480,15 @@ func (s *Sheet) adjustScriptTagsOnInsertCol(insertIdx int) {
 				}
 
 				return fmt.Sprintf("{{%s%s:%s%s}}", col1, row1, col2, row2)
-			})
+			}
+			newScript := sameSheetPattern.ReplaceAllStringFunc(cell.Script, sameSheetReplacer)
 
-			if newScript != cell.Script {
+			newPrompt := sameSheetPattern.ReplaceAllStringFunc(cell.AIPrompt, sameSheetReplacer)
+			if newScript != cell.Script || newPrompt != cell.AIPrompt {
 				cell.Script = newScript
+				cell.AIPrompt = newPrompt
 				s.Data[rowKey][colKey] = cell
-				pending = append(pending, depUpd{s.ProjectName, s.Name, cell.CellID, newScript, rowKey, colKey})
+				pending = append(pending, depUpd{s.ProjectName, s.Name, cell.CellID, cellDepText(cell), rowKey, colKey})
 			}
 		}
 	}
@@ -1487,11 +1534,11 @@ func (s *Sheet) adjustScriptTagsOnInsertCol(insertIdx int) {
 		modified := false
 		for rowKey, rowMap := range sheet.Data {
 			for colKey, cell := range rowMap {
-				if cell.Script == "" {
+				if cell.Script == "" && cell.AIPrompt == "" {
 					continue
 				}
 
-				newScript := crossSheetPattern.ReplaceAllStringFunc(cell.Script, func(match string) string {
+				crossSheetReplacer := func(match string) string {
 					submatches := crossSheetPattern.FindStringSubmatch(match)
 					if len(submatches) < 5 {
 						return match
@@ -1533,10 +1580,13 @@ func (s *Sheet) adjustScriptTagsOnInsertCol(insertIdx int) {
 					}
 
 					return fmt.Sprintf("{{%s/%s/%s%s:%s%s}}", refProject, refSheet, col1, row1, col2, row2)
-				})
+				}
+				newScript := crossSheetPattern.ReplaceAllStringFunc(cell.Script, crossSheetReplacer)
 
-				if newScript != cell.Script {
+				newPrompt := crossSheetPattern.ReplaceAllStringFunc(cell.AIPrompt, crossSheetReplacer)
+				if newScript != cell.Script || newPrompt != cell.AIPrompt {
 					cell.Script = newScript
+					cell.AIPrompt = newPrompt
 					sheet.Data[rowKey][colKey] = cell
 					modified = true
 				}
@@ -1550,8 +1600,8 @@ func (s *Sheet) adjustScriptTagsOnInsertCol(insertIdx int) {
 			sheet.mu.RLock()
 			for rKey, rowMap := range sheet.Data {
 				for cKey, cell := range rowMap {
-					if cell.Script != "" {
-						updList = append(updList, depUpd2{sheet.ProjectName, sheet.Name, cell.CellID, cell.Script, rKey, cKey})
+					if cellHasRefs(cell) {
+						updList = append(updList, depUpd2{sheet.ProjectName, sheet.Name, cell.CellID, cellDepText(cell), rKey, cKey})
 					}
 				}
 			}
@@ -1579,11 +1629,11 @@ func (s *Sheet) adjustScriptTagsOnDeleteCol(deleteIdx int) {
 	pending := make([]depUpd, 0)
 	for rowKey, rowMap := range s.Data {
 		for colKey, cell := range rowMap {
-			if cell.Script == "" {
+			if cell.Script == "" && cell.AIPrompt == "" {
 				continue
 			}
 
-			newScript := sameSheetPattern.ReplaceAllStringFunc(cell.Script, func(match string) string {
+			sameSheetReplacer := func(match string) string {
 				submatches := sameSheetPattern.FindStringSubmatch(match)
 				if len(submatches) < 3 {
 					return match
@@ -1643,15 +1693,18 @@ func (s *Sheet) adjustScriptTagsOnDeleteCol(deleteIdx int) {
 				}
 
 				return fmt.Sprintf("{{%s%s:%s%s}}", col1, row1, col2, row2)
-			})
+			}
+			newScript := sameSheetPattern.ReplaceAllStringFunc(cell.Script, sameSheetReplacer)
 
-			if newScript != cell.Script {
+			newPrompt := sameSheetPattern.ReplaceAllStringFunc(cell.AIPrompt, sameSheetReplacer)
+			if newScript != cell.Script || newPrompt != cell.AIPrompt {
 				cell.Script = newScript
-				if strings.Contains(newScript, "_removed}}") {
+				cell.AIPrompt = newPrompt
+				if strings.Contains(newScript, "_removed}}") || strings.Contains(newPrompt, "_removed}}") {
 					cell.Value = "reference removed"
 				}
 				s.Data[rowKey][colKey] = cell
-				pending = append(pending, depUpd{s.ProjectName, s.Name, cell.CellID, newScript, rowKey, colKey})
+				pending = append(pending, depUpd{s.ProjectName, s.Name, cell.CellID, cellDepText(cell), rowKey, colKey})
 			}
 		}
 	}
@@ -1697,11 +1750,11 @@ func (s *Sheet) adjustScriptTagsOnDeleteCol(deleteIdx int) {
 		modified := false
 		for rowKey, rowMap := range sheet.Data {
 			for colKey, cell := range rowMap {
-				if cell.Script == "" {
+				if cell.Script == "" && cell.AIPrompt == "" {
 					continue
 				}
 
-				newScript := crossSheetPattern.ReplaceAllStringFunc(cell.Script, func(match string) string {
+				crossSheetReplacer := func(match string) string {
 					submatches := crossSheetPattern.FindStringSubmatch(match)
 					if len(submatches) < 5 {
 						return match
@@ -1769,11 +1822,14 @@ func (s *Sheet) adjustScriptTagsOnDeleteCol(deleteIdx int) {
 					}
 
 					return fmt.Sprintf("{{%s/%s/%s%s:%s%s}}", refProject, refSheet, col1, row1, col2, row2)
-				})
+				}
+				newScript := crossSheetPattern.ReplaceAllStringFunc(cell.Script, crossSheetReplacer)
 
-				if newScript != cell.Script {
+				newPrompt := crossSheetPattern.ReplaceAllStringFunc(cell.AIPrompt, crossSheetReplacer)
+				if newScript != cell.Script || newPrompt != cell.AIPrompt {
 					cell.Script = newScript
-					if strings.Contains(newScript, "_removed}}") {
+					cell.AIPrompt = newPrompt
+					if strings.Contains(newScript, "_removed}}") || strings.Contains(newPrompt, "_removed}}") {
 						cell.Value = "reference removed"
 					}
 					sheet.Data[rowKey][colKey] = cell
@@ -1789,8 +1845,8 @@ func (s *Sheet) adjustScriptTagsOnDeleteCol(deleteIdx int) {
 			sheet.mu.RLock()
 			for rKey, rowMap := range sheet.Data {
 				for cKey, cell := range rowMap {
-					if cell.Script != "" {
-						updList = append(updList, depUpd2{sheet.ProjectName, sheet.Name, cell.CellID, cell.Script, rKey, cKey})
+					if cellHasRefs(cell) {
+						updList = append(updList, depUpd2{sheet.ProjectName, sheet.Name, cell.CellID, cellDepText(cell), rKey, cKey})
 					}
 				}
 			}
@@ -1818,11 +1874,11 @@ func (s *Sheet) adjustScriptTagsOnMoveCol(fromIdx, destIdx int) {
 	pending := make([]depUpd, 0)
 	for rowKey, rowMap := range s.Data {
 		for colKey, cell := range rowMap {
-			if cell.Script == "" {
+			if cell.Script == "" && cell.AIPrompt == "" {
 				continue
 			}
 
-			newScript := sameSheetPattern.ReplaceAllStringFunc(cell.Script, func(match string) string {
+			sameSheetReplacer := func(match string) string {
 				submatches := sameSheetPattern.FindStringSubmatch(match)
 				if len(submatches) < 3 {
 					return match
@@ -1903,12 +1959,15 @@ func (s *Sheet) adjustScriptTagsOnMoveCol(fromIdx, destIdx int) {
 				}
 
 				return fmt.Sprintf("{{%s%s:%s%s}}", col1, row1, col2, row2)
-			})
+			}
+			newScript := sameSheetPattern.ReplaceAllStringFunc(cell.Script, sameSheetReplacer)
 
-			if newScript != cell.Script {
+			newPrompt := sameSheetPattern.ReplaceAllStringFunc(cell.AIPrompt, sameSheetReplacer)
+			if newScript != cell.Script || newPrompt != cell.AIPrompt {
 				cell.Script = newScript
+				cell.AIPrompt = newPrompt
 				s.Data[rowKey][colKey] = cell
-				pending = append(pending, depUpd{s.ProjectName, s.Name, cell.CellID, newScript, rowKey, colKey})
+				pending = append(pending, depUpd{s.ProjectName, s.Name, cell.CellID, cellDepText(cell), rowKey, colKey})
 			}
 		}
 	}
@@ -1954,11 +2013,11 @@ func (s *Sheet) adjustScriptTagsOnMoveCol(fromIdx, destIdx int) {
 		modified := false
 		for rowKey, rowMap := range sheet.Data {
 			for colKey, cell := range rowMap {
-				if cell.Script == "" {
+				if cell.Script == "" && cell.AIPrompt == "" {
 					continue
 				}
 
-				newScript := crossSheetPattern.ReplaceAllStringFunc(cell.Script, func(match string) string {
+				crossSheetReplacer := func(match string) string {
 					submatches := crossSheetPattern.FindStringSubmatch(match)
 					if len(submatches) < 5 {
 						return match
@@ -2047,10 +2106,13 @@ func (s *Sheet) adjustScriptTagsOnMoveCol(fromIdx, destIdx int) {
 					}
 
 					return fmt.Sprintf("{{%s/%s/%s%s:%s%s}}", refProject, refSheet, col1, row1, col2, row2)
-				})
+				}
+				newScript := crossSheetPattern.ReplaceAllStringFunc(cell.Script, crossSheetReplacer)
 
-				if newScript != cell.Script {
+				newPrompt := crossSheetPattern.ReplaceAllStringFunc(cell.AIPrompt, crossSheetReplacer)
+				if newScript != cell.Script || newPrompt != cell.AIPrompt {
 					cell.Script = newScript
+					cell.AIPrompt = newPrompt
 					sheet.Data[rowKey][colKey] = cell
 					modified = true
 				}
@@ -2064,8 +2126,8 @@ func (s *Sheet) adjustScriptTagsOnMoveCol(fromIdx, destIdx int) {
 			sheet.mu.RLock()
 			for rKey, rowMap := range sheet.Data {
 				for cKey, cell := range rowMap {
-					if cell.Script != "" {
-						updList = append(updList, depUpd2{sheet.ProjectName, sheet.Name, cell.CellID, cell.Script, rKey, cKey})
+					if cellHasRefs(cell) {
+						updList = append(updList, depUpd2{sheet.ProjectName, sheet.Name, cell.CellID, cellDepText(cell), rKey, cKey})
 					}
 				}
 			}
@@ -2104,12 +2166,13 @@ func (sm *SheetManager) rebuildScriptDependencies() {
 		// Iterate with keys to capture row and column labels
 		for rowLabel, rowMap := range sheet.Data {
 			for colLabel, cell := range rowMap {
-				if strings.TrimSpace(cell.Script) == "" {
+				depText := cellDepText(cell)
+				if strings.TrimSpace(depText) == "" {
 					continue
 				}
 
-				// Extract dependencies for this script
-				deps := ExtractScriptDependencies(cell.Script, projectName, sheetName)
+				// Extract dependencies for this script or AI prompt
+				deps := ExtractScriptDependencies(depText, projectName, sheetName)
 				if len(deps) == 0 {
 					// No explicit references found; add self cell as dependency
 					deps = append(deps, DependencyInfo{

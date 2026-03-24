@@ -472,19 +472,28 @@ func (sm *SheetManager) RenameProjectInDependencies(oldProject, newProject strin
 		modified := false
 		for rowKey, rowMap := range sheet.Data {
 			for colKey, cell := range rowMap {
-				if strings.TrimSpace(cell.Script) != "" {
-					// Replace {{oldProject/...}} with {{newProject/...}} in scripts
-					oldPattern := "{{" + oldProject + "/"
-					newPattern := "{{" + newProject + "/"
-					updatedScript := strings.ReplaceAll(cell.Script, oldPattern, newPattern)
+				oldPattern := "{{" + oldProject + "/"
+				newPattern := "{{" + newProject + "/"
+				cellCopy := sheet.Data[rowKey][colKey]
+				changed := false
 
+				if strings.TrimSpace(cell.Script) != "" {
+					updatedScript := strings.ReplaceAll(cell.Script, oldPattern, newPattern)
 					if updatedScript != cell.Script {
-						// Must update the cell in the map (cell is a copy, not a reference)
-						cellCopy := sheet.Data[rowKey][colKey]
 						cellCopy.Script = updatedScript
-						sheet.Data[rowKey][colKey] = cellCopy
-						modified = true
+						changed = true
 					}
+				}
+				if strings.TrimSpace(cell.AIPrompt) != "" {
+					updatedPrompt := strings.ReplaceAll(cell.AIPrompt, oldPattern, newPattern)
+					if updatedPrompt != cell.AIPrompt {
+						cellCopy.AIPrompt = updatedPrompt
+						changed = true
+					}
+				}
+				if changed {
+					sheet.Data[rowKey][colKey] = cellCopy
+					modified = true
 				}
 			}
 		}
@@ -557,17 +566,28 @@ func (sm *SheetManager) RenameSheetInDependencies(projectName, oldSheetName, new
 		modified := false
 		for rowKey, rowMap := range sheet.Data {
 			for colKey, cell := range rowMap {
-				if strings.TrimSpace(cell.Script) != "" {
-					oldPattern := "{{" + projectName + "/" + oldSheetName + "/"
-					newPattern := "{{" + projectName + "/" + newSheetName + "/"
-					updatedScript := strings.ReplaceAll(cell.Script, oldPattern, newPattern)
+				oldPattern := "{{" + projectName + "/" + oldSheetName + "/"
+				newPattern := "{{" + projectName + "/" + newSheetName + "/"
+				cellCopy := sheet.Data[rowKey][colKey]
+				changed := false
 
+				if strings.TrimSpace(cell.Script) != "" {
+					updatedScript := strings.ReplaceAll(cell.Script, oldPattern, newPattern)
 					if updatedScript != cell.Script {
-						cellCopy := sheet.Data[rowKey][colKey]
 						cellCopy.Script = updatedScript
-						sheet.Data[rowKey][colKey] = cellCopy
-						modified = true
+						changed = true
 					}
+				}
+				if strings.TrimSpace(cell.AIPrompt) != "" {
+					updatedPrompt := strings.ReplaceAll(cell.AIPrompt, oldPattern, newPattern)
+					if updatedPrompt != cell.AIPrompt {
+						cellCopy.AIPrompt = updatedPrompt
+						changed = true
+					}
+				}
+				if changed {
+					sheet.Data[rowKey][colKey] = cellCopy
+					modified = true
 				}
 			}
 		}
@@ -595,8 +615,9 @@ func ExecuteCellScriptonChange(projectName, sheetName, row, col string) {
 		return
 	}
 
-	// Extract all dependencies from the script
-	deps := ExtractScriptDependencies(cur.Script, projectName, sheetName)
+	// Extract all dependencies from the script or AI prompt
+	depText := cellDepText(cur)
+	deps := ExtractScriptDependencies(depText, projectName, sheetName)
 	if len(deps) == 0 {
 		// No explicit references found; add self cell as dependency
 		deps = append(deps, DependencyInfo{
@@ -1227,7 +1248,7 @@ func WriteScriptOutputToCells(projectName, sheetName, row, col string, triggerne
 				}
 				cLabel := indexToColLabel(baseIdx + dc)
 				cell, ok := s.Data[rKey][cLabel]
-				if ok && (strings.TrimSpace(cell.Value) != "" || strings.TrimSpace(cell.Script) != "") {
+				if ok && (strings.TrimSpace(cell.Value) != "" || strings.TrimSpace(cell.Script) != "" || strings.TrimSpace(cell.AIPrompt) != "") {
 					blocked = true
 					break
 				}
@@ -1558,12 +1579,14 @@ func ExecuteCellScriptWithIdentifier(dep ScriptIdentifier) {
 	// Find the cell by CellID
 	depSheet.mu.RLock()
 	var depRow, depCol string
+	var cellType int
 	found := false
 	for r, rowMap := range depSheet.Data {
 		for c, cell := range rowMap {
 			if cell.CellID == dep.ScriptCellID {
 				depRow = r
 				depCol = c
+				cellType = cell.CellType
 				found = true
 				break
 			}
@@ -1575,8 +1598,13 @@ func ExecuteCellScriptWithIdentifier(dep ScriptIdentifier) {
 	depSheet.mu.RUnlock()
 
 	if found {
-		// Execute the dependent script
-		ExecuteCellScript(dep.ScriptProjectName, dep.ScriptSheetName, depRow, depCol)
+		if cellType == AIGeneratedCell {
+			// Execute the dependent AI cell
+			ExecuteAICell(dep.ScriptProjectName, dep.ScriptSheetName, depRow, depCol)
+		} else {
+			// Execute the dependent script
+			ExecuteCellScript(dep.ScriptProjectName, dep.ScriptSheetName, depRow, depCol)
+		}
 	}
 
 }

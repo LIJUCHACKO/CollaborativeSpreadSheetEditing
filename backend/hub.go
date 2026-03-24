@@ -334,6 +334,56 @@ func (h *Hub) run() {
 				} else {
 					log.Printf("Error unmarshalling UPDATE_CELL_SCRIPT payload: %v", err)
 				}
+			} else if message.Type == "UPDATE_AI_PROMPT" {
+				// Only owner can set AI prompts
+				sheet := globalSheetManager.GetSheetBy(message.SheetName, message.Project)
+				if sheet == nil {
+					continue
+				}
+				if message.User != sheet.Owner {
+					deniedPayload, _ := json.Marshal(map[string]string{
+						"reason": "owner-only",
+						"type":   message.Type,
+					})
+					toSend = &Message{
+						Type:      "EDIT_DENIED",
+						SheetName: message.SheetName,
+						Payload:   deniedPayload,
+						User:      message.User,
+					}
+					if clients, ok := h.rooms[sheetKey(message.Project, message.SheetName)]; ok {
+						for client := range clients {
+							if client.userID != message.User {
+								continue
+							}
+							select {
+							case client.send <- msgToBytes(toSend):
+							default:
+								close(client.send)
+								delete(clients, client)
+							}
+						}
+					}
+					continue
+				}
+				var update struct {
+					Row    string `json:"row"`
+					Col    string `json:"col"`
+					Prompt string `json:"prompt"`
+					User   string `json:"user"`
+				}
+				if err := json.Unmarshal(message.Payload, &update); err == nil {
+					sheet.SetCellAIPrompt(update.Row, update.Col, update.Prompt, message.User)
+					payload, _ := json.Marshal(sheet.SnapshotForClient())
+					toSend = &Message{
+						Type:      "ROW_COL_UPDATED",
+						SheetName: message.SheetName,
+						Payload:   payload,
+						User:      message.User,
+					}
+				} else {
+					log.Printf("Error unmarshalling UPDATE_AI_PROMPT payload: %v", err)
+				}
 			} else if message.Type == "UPDATE_CELL_NAME" {
 				if denyIfNotEditor() {
 					continue

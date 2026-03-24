@@ -31,6 +31,11 @@ export default function Admin() {
   const [integrityReport, setIntegrityReport] = useState(null);
   const [integrityLoading, setIntegrityLoading] = useState(false);
 
+  // LLM settings state
+  const [llmUrl, setLlmUrl] = useState('');
+  const [llmUrlSaved, setLlmUrlSaved] = useState('');
+  const [llmMsg, setLlmMsg] = useState('');
+
   useEffect(() => {
     if (!username || !isSessionValid()) {
       clearAuth();
@@ -43,6 +48,7 @@ export default function Admin() {
     }
     fetchUsers();
     fetchIntegrityReport();
+    fetchLLMSettings();
 
     const interval = setInterval(() => {
       if (!isSessionValid()) {
@@ -103,6 +109,40 @@ export default function Admin() {
       console.error('integrity fetch failed', e);
     } finally {
       setIntegrityLoading(false);
+    }
+  };
+
+  const fetchLLMSettings = async () => {
+    try {
+      const res = await authenticatedFetch(apiUrl('/api/admin/llm'));
+      if (res.ok) {
+        const data = await res.json();
+        setLlmUrl(data.url || '');
+        setLlmUrlSaved(data.url || '');
+      }
+    } catch (e) {
+      console.error('LLM settings fetch failed', e);
+    }
+  };
+
+  const saveLLMSettings = async () => {
+    setLlmMsg('');
+    try {
+      const res = await authenticatedFetch(apiUrl('/api/admin/llm'), {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: llmUrl.trim() }),
+      });
+      if (res.ok) {
+        setLlmUrlSaved(llmUrl.trim());
+        setLlmMsg('LLM URL saved successfully');
+        setTimeout(() => setLlmMsg(''), 3000);
+      } else {
+        const text = await res.text();
+        setLlmMsg(text || 'Failed to save LLM URL');
+      }
+    } catch (e) {
+      setLlmMsg('Network error');
     }
   };
 
@@ -483,6 +523,36 @@ export default function Admin() {
             ) : (
               <div className="text-center text-muted py-3 small">Click Refresh to load integrity report.</div>
             )}
+          </div>
+        </div>
+
+        {/* LLM Settings */}
+        <div className="card mt-4 shadow-sm">
+          <div className="card-header bg-white d-flex align-items-center gap-2 py-2 px-3">
+            <strong className="small">LLM Server Settings</strong>
+          </div>
+          <div className="card-body px-3 py-3">
+            <div className="mb-2 small text-muted">
+              Configure the OpenAI-compatible LLM server URL used by AI Generated cells. Leave empty to disable AI cell execution.
+            </div>
+            <div className="d-flex gap-2 align-items-center">
+              <input
+                type="text"
+                className="form-control form-control-sm"
+                placeholder="e.g. http://localhost:8080"
+                value={llmUrl}
+                onChange={e => setLlmUrl(e.target.value)}
+                style={{ maxWidth: 400 }}
+              />
+              <button
+                className="btn btn-sm btn-primary"
+                onClick={saveLLMSettings}
+                disabled={llmUrl.trim() === llmUrlSaved}
+              >
+                Save
+              </button>
+            </div>
+            {llmMsg && <div className="mt-2 small text-success">{llmMsg}</div>}
           </div>
         </div>
 

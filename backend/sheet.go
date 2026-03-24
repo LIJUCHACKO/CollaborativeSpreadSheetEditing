@@ -36,6 +36,7 @@ const (
 	ScriptCell
 	ComboBoxCell
 	MultipleSelectionCell
+	AIGeneratedCell
 )
 
 type Cell struct {
@@ -50,7 +51,10 @@ type Cell struct {
 	Bold       bool   `json:"bold,omitempty"`
 	Italic     bool   `json:"italic,omitempty"`
 
-	CellType int `json:"cell_type,omitempty"` // 0 = value, 1 = script, 2 = combo box, 3 = multiple selection. If not set, default to value cell
+	CellType int `json:"cell_type,omitempty"` // 0 = value, 1 = script, 2 = combo box, 3 = multiple selection, 4 = AI generated. If not set, default to value cell
+
+	/* AI Generated cell fields */
+	AIPrompt string `json:"ai_prompt,omitempty"` // prompt template with {{A1}} style references, processed by LLM
 
 	/* Script associated elements*/
 	Script       string `json:"script,omitempty"`        //python script

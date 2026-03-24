@@ -19,7 +19,7 @@ import {
     Undo2,
     Redo2
 } from 'lucide-react';
-import { Lock, Code, ChevronDown, ListOrdered, Trash2, Plus, Scissors, ClipboardPaste, MoreVertical, CornerDownRight, AlertTriangle } from 'lucide-react';
+import { Lock, Code, ChevronDown, ListOrdered, Trash2, Plus, Scissors, ClipboardPaste, MoreVertical, CornerDownRight, AlertTriangle, BrainCircuit } from 'lucide-react';
 import { isSessionValid, clearAuth, getUsername, authenticatedFetch, apiUrl } from '../utils/auth';
 import MarkdownEditorPanel from './MarkdownEditorPanel';
 import ScriptEditorPanel from './ScriptEditorPanel';
@@ -664,6 +664,57 @@ export default function Document() {
     const [optionDialogCell, setOptionDialogCell] = useState(null); // { row, col, cellType, options }
     const [selectedOptions, setSelectedOptions] = useState([]); // Array of selected option indices
 
+    // AI Prompt dialog state
+    const [showAIPromptDialog, setShowAIPromptDialog] = useState(false);
+    const [aiPromptDialogCell, setAIPromptDialogCell] = useState(null); // { row, col }
+    const [aiPromptText, setAIPromptText] = useState('');
+    const aiPromptTextareaRef = useRef(null);
+
+    const insertSelectedRangeIntoAIPrompt = () => {
+        let rangeText = '';
+        if (copiedBlock && copiedBlock.rangeText) {
+            rangeText = copiedBlock.rangeText || '';
+            copiedBlock.rangeText = '';
+        } else if (selectedRange && selectedRange.length > 0) {
+            rangeText = getSelectedRange();
+        } else {
+            return;
+        }
+        const textarea = aiPromptTextareaRef.current;
+        if (textarea) {
+            const start = textarea.selectionStart;
+            const end = textarea.selectionEnd;
+            const currentText = aiPromptText;
+            const newText = currentText.substring(0, start) + "{{" + rangeText + "}}" + currentText.substring(end);
+            setAIPromptText(newText);
+            setTimeout(() => {
+                textarea.focus();
+                const newCursorPos = start + rangeText.length + 4;
+                textarea.setSelectionRange(newCursorPos, newCursorPos);
+            }, 0);
+        }
+    };
+
+    const openAIPromptDialog = (row, col) => {
+        const key = `${row}-${col}`;
+        const cell = data[key] || {};
+        setAIPromptDialogCell({ row, col });
+        setAIPromptText(cell.ai_prompt || '');
+        setShowAIPromptDialog(true);
+    };
+
+    const saveAIPrompt = () => {
+        if (!aiPromptDialogCell || !ws.current || ws.current.readyState !== WebSocket.OPEN) return;
+        const { row, col } = aiPromptDialogCell;
+        ws.current.send(JSON.stringify({
+            type: 'UPDATE_AI_PROMPT',
+            sheet_name: id,
+            payload: { row: String(row), col: String(col), prompt: aiPromptText, user: username }
+        }));
+        setShowAIPromptDialog(false);
+        setAIPromptDialogCell(null);
+    };
+
     const handleDownloadXlsx = async () => {
         try {
             const projQS = projectName ? `&project=${encodeURIComponent(projectName)}` : '';
@@ -987,7 +1038,7 @@ export default function Document() {
         const { row, col } = cellTypeDialogCell;
         const payload = {
             //row: String(row), 
-            row: "2", // to use same cell type for all rows below 2
+            row: (selectedCellType == 2 || selectedCellType == 3) ? "2" : String(row), // to use same cell type for all rows below 2
             col: String(col),
             cell_type: selectedCellType,
             options: cellTypeOptions,
@@ -1000,6 +1051,9 @@ export default function Document() {
         setCellTypeDialogCell(null);
         if (selectedCellType === 1) {
             openScriptPopup(row, col);
+        }
+        if (selectedCellType === 4) {
+            openAIPromptDialog(row, col);
         }
     };
 
@@ -3052,6 +3106,7 @@ export default function Document() {
                                     <option value={1}>Script Cell</option>
                                     <option value={2}>ComboBox</option>
                                     <option value={3}>Multiple Selection</option>
+                                    <option value={4}>AI Generated</option>
                                 </select>
                             </div>
 
@@ -3138,6 +3193,60 @@ export default function Document() {
                                     }}
                                 >
                                     Cancel
+                                </button>
+                            </div>
+                        </div>
+                    </>
+                )}
+
+                {/* AI Prompt Dialog */}
+                {showAIPromptDialog && aiPromptDialogCell && (
+                    <>
+                        <div
+                            className="position-fixed top-0 start-0 w-100 h-100 bg-dark bg-opacity-50"
+                            style={{ zIndex: 1050 }}
+                            onClick={() => { setShowAIPromptDialog(false); setAIPromptDialogCell(null); }}
+                        />
+                        <div
+                            className="position-fixed bg-white rounded shadow p-3"
+                            style={{
+                                zIndex: 1051,
+                                top: '50%',
+                                left: '50%',
+                                transform: 'translate(-50%, -50%)',
+                                minWidth: 420,
+                                maxWidth: '90vw',
+                                maxHeight: '80vh',
+                                overflow: 'auto'
+                            }}
+                        >
+                            <h6 className="mb-2">AI Prompt — Cell ({aiPromptDialogCell.col}, {aiPromptDialogCell.row})</h6>
+                            <textarea
+                                ref={aiPromptTextareaRef}
+                                className="form-control mb-2"
+                                rows={8}
+                                value={aiPromptText}
+                                onChange={e => setAIPromptText(e.target.value)}
+                                placeholder="Enter AI prompt. Use {{A1}} or {{A1:B3}} to reference cells..."
+                            />
+                            <div className="d-flex gap-2 justify-content-end">
+                                <button
+                                    className="btn btn-sm btn-outline-secondary"
+                                    onClick={insertSelectedRangeIntoAIPrompt}
+                                >
+                                    Insert Range
+                                </button>
+                                <button
+                                    className="btn btn-sm btn-primary"
+                                    onClick={saveAIPrompt}
+                                >
+                                    Apply
+                                </button>
+                                <button
+                                    className="btn btn-sm btn-secondary"
+                                    onClick={() => { setShowAIPromptDialog(false); setAIPromptDialogCell(null); }}
+                                >
+                                    Close
                                 </button>
                             </div>
                         </div>
@@ -3658,10 +3767,25 @@ export default function Document() {
                                                                 openOptionDialog(rowLabel, colLabel);
                                                                 return;
                                                             }
+                                                            
                                                             // If the cell has a script, open the script editor instead of value editing
-                                                            if ((cell.script ?? '').toString().length > 0) {
+                                                            if (cell.cell_type === 1) {
                                                                 e.preventDefault();
                                                                 openScriptPopup(rowLabel, colLabel);
+                                                                // Open markdown editor panel when clicking on third column (C)
+                                                                if (colLabel === COL_HEADERS[2]) {
+                                                                    setMdPanelCell({ row: rowLabel, col: colLabel });
+                                                                    setMdPanelReadOnly(true);
+                                                                    setMdPanelOpen(true);
+                                                                } else {
+                                                                    setMdPanelOpen(false);
+                                                                }
+                                                                return;
+                                                            }
+                                                            // if the cell has 
+                                                            if (cell.cell_type === 4) {
+                                                                e.preventDefault();
+                                                                openAIPromptDialog(rowLabel, colLabel);
                                                                 // Open markdown editor panel when clicking on third column (C)
                                                                 if (colLabel === COL_HEADERS[2]) {
                                                                     setMdPanelCell({ row: rowLabel, col: colLabel });
@@ -3843,6 +3967,27 @@ export default function Document() {
                                                             <Code size={12} color="#2563eb" />
                                                         </span>
                                                     )}
+                                                    {cell.cell_type === 4 && (
+                                                        <span
+                                                            title="AI Cell"
+                                                            style={{
+                                                                position: 'absolute',
+                                                                top: 2,
+                                                                left: 2,
+                                                                zIndex: 60,
+                                                                background: 'rgba(237, 233, 254, 0.95)',
+                                                                borderRadius: '4px',
+                                                                padding: '0px 0px',
+                                                                display: 'inline-flex',
+                                                                alignItems: 'center',
+                                                                lineHeight: 1,
+                                                                boxShadow: '0 0 0 0px rgba(0,0,0,0.05)',
+                                                                pointerEvents: 'none'
+                                                            }}
+                                                        >
+                                                            <BrainCircuit size={12} color="#7c3aed" />
+                                                        </span>
+                                                    )}
                                                     {(row2Cell.cell_type === 2 || row2Cell.cell_type === 3) && rowLabel>1 && (
                                                         <span
                                                             title={row2Cell.cell_type === 2 ? "ComboBox Cell" : "Multiple Selection Cell"}
@@ -3929,23 +4074,40 @@ export default function Document() {
                                                                                 const key = `${contextMenu.cell?.row}-${contextMenu.cell?.col}`;
                                                                                 const cell = data[key] || {};
                                                                                 const isLockedBySpan = (cell.locked_by || '').startsWith('script-span ');
-                                                                                const isOptionType = cell.cell_type === 2 || cell.cell_type === 3;
-                                                                                return !canEdit || !contextMenu.cell || isLockedBySpan || isOptionType;
+                                                                                const isScriptType = cell.cell_type === 1; 
+                                                                                return !canEdit || !contextMenu.cell || isLockedBySpan || !isScriptType;
                                                                             })()}
                                                                             onClick={() => {
-                                                                                const key = `${contextMenu.cell?.row}-${contextMenu.cell?.col}`;
-                                                                                const cell = data[key] || {};
-                                                                                const isLockedBySpan = (cell.locked_by || '').startsWith('script-span ');
-                                                                                const isOptionType = cell.cell_type === 2 || cell.cell_type === 3;
-                                                                                if (!canEdit || !contextMenu.cell || isLockedBySpan || isOptionType) return;
                                                                                 openScriptPopup(contextMenu.cell.row, contextMenu.cell.col);
                                                                                 closeContextMenu();
                                                                             }}
                                                                         >
                                                                             Edit Script
                                                                         </button>
+                                                                        <button
+                                                                            className="block w-full text-left px-2 py-1 hover:bg-gray-100 rounded"
+                                                                            disabled={(() => {
+                                                                                const key = `${contextMenu.cell?.row}-${contextMenu.cell?.col}`;
+                                                                                const cell = data[key] || {};
+                                                                                const isLockedBySpan = (cell.locked_by || '').startsWith('script-span ');
+                                                                                const isAIGenerateType = cell.cell_type === 4;    
+                                                                                return !canEdit || !contextMenu.cell || isLockedBySpan || !isAIGenerateType;
+                                                                            })()}
+                                                                            onClick={() => {
+                                                                                if (!canEdit || !contextMenu.cell) return;
+                                                                                const key = `${contextMenu.cell.row}-${contextMenu.cell.col}`;
+                                                                                const cell = data[key] || {};
+                                                                                
+                                                                                setAIPromptDialogCell({ row: contextMenu.cell.row, col: contextMenu.cell.col });
+                                                                                setAIPromptText(cell.ai_prompt || '');
+                                                                                setShowAIPromptDialog(true);
+                                                                                closeContextMenu();
+                                                                            }}
+                                                                        >
+                                                                            AI Prompt
+                                                                        </button>
                                                                         
-                                                                        {isOwner && contextMenu.cell && (
+                                                                        {isOwner && contextMenu.cell && contextMenu.cell.row !== 1 && contextMenu.cell.col !== 'A' && (
                                                                             <button
                                                                                 className="block w-full text-left px-2 py-1 hover:bg-gray-100 rounded"
                                                                                 onClick={() => {

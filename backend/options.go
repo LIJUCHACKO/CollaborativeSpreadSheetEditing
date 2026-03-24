@@ -167,6 +167,9 @@ func (s *Sheet) SetCellType(row, col string, cellType int, options []string, opt
 	if cellType != ScriptCell {
 		current.Script = ""
 	}
+	if cellType != AIGeneratedCell {
+		current.AIPrompt = ""
+	}
 	// If options changed, update Value based on previous selection
 	optionsChanged := len(oldOptions) != len(options)
 	if !optionsChanged {
@@ -1706,6 +1709,10 @@ func (sm *SheetManager) CopyPasteProject(sourcePath, destPath, newOwner string) 
 				// Rewrite Script: replace {{sourcePath/...}} with {{destPath/...}}
 				if strings.TrimSpace(cell.Script) != "" {
 					cell.Script = rewriteRef(cell.Script)
+				}
+				// Rewrite AIPrompt: replace {{sourcePath/...}} with {{destPath/...}}
+				if strings.TrimSpace(cell.AIPrompt) != "" {
+					cell.AIPrompt = rewriteRef(cell.AIPrompt)
 				}
 				// Rewrite OptionsRange: replace sourcePath/... with destPath/...
 				if strings.TrimSpace(cell.OptionsRange) != "" {

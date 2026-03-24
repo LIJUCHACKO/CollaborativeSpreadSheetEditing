@@ -47,6 +47,8 @@ func main() {
 	log.Printf("Server starting..5")
 	globalChatManager.Load()
 	log.Printf("Server starting..6")
+	loadLLMSettings()
+	log.Printf("Server starting..6b (LLM settings loaded)")
 	// Start SheetManager async saver & flusher after Hub is ready
 	// Ensures any broadcasts during script processing see a non-nil globalHub
 	globalSheetManager.initAsyncSaver()
@@ -915,6 +917,49 @@ func main() {
 		if walkErr != nil {
 			log.Printf("backup: walk error: %v", walkErr)
 		}
+	})
+
+	// ── Admin: GET/PUT /api/admin/llm  (LLM URL configuration)
+	http.HandleFunc("/api/admin/llm", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, PUT, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		token := r.Header.Get("Authorization")
+		username, err := globalUserManager.ValidateToken(token)
+		if err != nil {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if !globalUserManager.IsAdminUser(username) {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+		if r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{"url": GetLLMURL()})
+			return
+		}
+		if r.Method == http.MethodPut {
+			var body struct {
+				URL string `json:"url"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, "Invalid request body", http.StatusBadRequest)
+				return
+			}
+			if err := SetLLMURL(body.URL); err != nil {
+				http.Error(w, "Failed to save LLM settings: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{"url": GetLLMURL()})
+			return
+		}
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	})
 
 	// Admin: get full integrity report for all loaded JSON files
