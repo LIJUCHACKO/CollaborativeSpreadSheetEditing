@@ -23,6 +23,7 @@ import { Lock, Code, ChevronDown, ListOrdered, Trash2, Plus, Scissors, Clipboard
 import { isSessionValid, clearAuth, getUsername, authenticatedFetch, apiUrl } from '../utils/auth';
 import MarkdownEditorPanel from './MarkdownEditorPanel';
 import ScriptEditorPanel from './ScriptEditorPanel';
+import AIPromptEditorPanel from './AIPromptEditorPanel';
 import 'bootstrap/dist/css/bootstrap.min.css';
 export default function Document() {
     const navigate = useNavigate();
@@ -3201,56 +3202,17 @@ export default function Document() {
 
                 {/* AI Prompt Dialog */}
                 {showAIPromptDialog && aiPromptDialogCell && (
-                    <>
-                        <div
-                            className="position-fixed top-0 start-0 w-100 h-100 bg-dark bg-opacity-50"
-                            style={{ zIndex: 1050 }}
-                            onClick={() => { setShowAIPromptDialog(false); setAIPromptDialogCell(null); }}
-                        />
-                        <div
-                            className="position-fixed bg-white rounded shadow p-3"
-                            style={{
-                                zIndex: 1051,
-                                top: '50%',
-                                left: '50%',
-                                transform: 'translate(-50%, -50%)',
-                                minWidth: 420,
-                                maxWidth: '90vw',
-                                maxHeight: '80vh',
-                                overflow: 'auto'
-                            }}
-                        >
-                            <h6 className="mb-2">AI Prompt — Cell ({aiPromptDialogCell.col}, {aiPromptDialogCell.row})</h6>
-                            <textarea
-                                ref={aiPromptTextareaRef}
-                                className="form-control mb-2"
-                                rows={8}
-                                value={aiPromptText}
-                                onChange={e => setAIPromptText(e.target.value)}
-                                placeholder="Enter AI prompt. Use {{A1}} or {{A1:B3}} to reference cells..."
-                            />
-                            <div className="d-flex gap-2 justify-content-end">
-                                <button
-                                    className="btn btn-sm btn-outline-secondary"
-                                    onClick={insertSelectedRangeIntoAIPrompt}
-                                >
-                                    Insert Range
-                                </button>
-                                <button
-                                    className="btn btn-sm btn-primary"
-                                    onClick={saveAIPrompt}
-                                >
-                                    Apply
-                                </button>
-                                <button
-                                    className="btn btn-sm btn-secondary"
-                                    onClick={() => { setShowAIPromptDialog(false); setAIPromptDialogCell(null); }}
-                                >
-                                    Close
-                                </button>
-                            </div>
-                        </div>
-                    </>
+                    <AIPromptEditorPanel
+                        cellRow={aiPromptDialogCell.row}
+                        cellCol={aiPromptDialogCell.col}
+                        aiPromptText={aiPromptText}
+                        setAIPromptText={setAIPromptText}
+                        canEdit={canEdit}
+                        onApply={() => { saveAIPrompt(); }}
+                        onClose={() => { setShowAIPromptDialog(false); setAIPromptDialogCell(null); }}
+                        onInsertRange={insertSelectedRangeIntoAIPrompt}
+                        textareaRef={aiPromptTextareaRef}
+                    />
                 )}
 
                 {/* Option Selection Dialog for ComboBox and MultipleSelection */}
