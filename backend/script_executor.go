@@ -743,6 +743,233 @@ func CheckIfScriptReferencesSelf(script, projectName, sheetName, cellID string) 
 	return false
 }
 
+// ResolveScriptRefs replaces all {{...}} cell/range reference tags in a script string
+// with their Python-literal values drawn from the spreadsheet data.
+//
+// Resolution order:
+//  1. Pre-pass: named-cell references resolved to coordinates
+//     - Cross-sheet: {{project/.../sheet/CellName}} → {{project/.../sheet/ColRow}}
+//     - Same-sheet:  {{CellName}}                   → {{ColRow}}
+//  2. Cross-sheet coordinate references
+//     - Single cell: {{project/sheet/A2}}   → Python literal
+//     - Range:       {{project/sheet/A2:B3}} → 2-D Python list  [[…],[…]]
+//  3. Same-sheet coordinate references
+//     - Single cell: {{A2}}   → Python literal
+//     - Range:       {{A2:B3}} → 2-D Python list
+//
+// cellID is the CellID of the script cell itself; self-references use Value_FromNonSelfScript
+// so that the previous output is available rather than a stale/empty value.
+func ResolveScriptRefs(script string, s *Sheet, projectName, sheetName, cellID string) string {
+	// --- Pre-pass: resolve cell-name references to coordinate references ---
+
+	// Cross-sheet cell-name: {{project/.../sheet/CellName}} -> {{project/.../sheet/ColRow}}
+	crossSheetNamePrePattern := regexp.MustCompile(`\{\{((?:[^/\{\}]+/)+)([^/\{\}]+)/([A-Za-z_]\w*)\}\}`)
+	script = crossSheetNamePrePattern.ReplaceAllStringFunc(script, func(match string) string {
+		sub := crossSheetNamePrePattern.FindStringSubmatch(match)
+		if len(sub) < 4 {
+			return match
+		}
+		refProject := strings.TrimSuffix(sub[1], "/")
+		refSheetName := sub[2]
+		token := sub[3]
+		// If token already looks like a coordinate (e.g. "A2"), leave it for the coordinate pass
+		coordRe := regexp.MustCompile(`^[A-Z]+\d+$`)
+		if coordRe.MatchString(token) {
+			return match
+		}
+		refSheet := globalSheetManager.GetSheetBy(refSheetName, refProject)
+		if refSheet == nil {
+			return `""`
+		}
+		r, c, found := refSheet.FindCellByName(token)
+		if !found {
+			return `""`
+		}
+		return "{{" + sub[1] + refSheetName + "/" + c + r + "}}"
+	})
+
+	// Same-sheet cell-name: {{CellName}} -> {{ColRow}}
+	sameSheetNamePrePattern := regexp.MustCompile(`\{\{([A-Za-z_]\w*)\}\}`)
+	script = sameSheetNamePrePattern.ReplaceAllStringFunc(script, func(match string) string {
+		sub := sameSheetNamePrePattern.FindStringSubmatch(match)
+		if len(sub) < 2 {
+			return match
+		}
+		token := sub[1]
+		// If token already looks like a coordinate (e.g. "A2"), leave it for the coordinate pass
+		coordRe := regexp.MustCompile(`^[A-Z]+\d+$`)
+		if coordRe.MatchString(token) {
+			return match
+		}
+		r, c, found := s.FindCellByName(token)
+		if !found {
+			return `""`
+		}
+		return "{{" + c + r + "}}"
+	})
+
+	// --- Cross-sheet coordinate references ---
+	// Pattern to match {{project/.../sheetid/A2}} or {{project/.../sheetid/A2:B3}}.
+	// Project path may contain slashes (subfolder support).
+	crossSheetPattern := regexp.MustCompile(`\{\{((?:[^/\{\}]+/)+)([^/\{\}]+)/([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?\}\}`)
+	script = crossSheetPattern.ReplaceAllStringFunc(script, func(match string) string {
+		submatches := crossSheetPattern.FindStringSubmatch(match)
+		if len(submatches) < 5 {
+			return match
+		}
+
+		// submatches[1] is "project/.../" (trailing slash), submatches[2] is sheetid
+		refProjectName := strings.TrimSuffix(submatches[1], "/")
+		refSheetName := submatches[2]
+		startCol := submatches[3]
+		startRow := submatches[4]
+
+		refSheet := globalSheetManager.GetSheetBy(refSheetName, refProjectName)
+		if refSheet == nil {
+			return ""
+		}
+
+		// Single cell reference {{projectname/sheetid/A2}}
+		if submatches[5] == "" || submatches[6] == "" {
+			refSheet.mu.RLock()
+			defer refSheet.mu.RUnlock()
+
+			if rowData, ok := refSheet.Data[startRow]; ok {
+				if cell, ok := rowData[startCol]; ok {
+					val := cell.Value
+					if val == "" {
+						return ""
+					}
+					return val
+
+				}
+			}
+			return ""
+		}
+
+		// Range reference {{projectname/sheetid/A2:B3}}
+		endCol := submatches[5]
+		endRow := submatches[6]
+
+		refSheet.mu.RLock()
+		defer refSheet.mu.RUnlock()
+
+		startColIdx := colLabelToIndex(startCol)
+		endColIdx := colLabelToIndex(endCol)
+		startRowNum := atoiSafe(startRow)
+		endRowNum := atoiSafe(endRow)
+
+		if startRowNum > endRowNum {
+			startRowNum, endRowNum = endRowNum, startRowNum
+		}
+		if startColIdx > endColIdx {
+			startColIdx, endColIdx = endColIdx, startColIdx
+		}
+
+		var rows []string
+		for r := startRowNum; r <= endRowNum; r++ {
+			var cols []string
+			for c := startColIdx; c <= endColIdx; c++ {
+				rowKey := itoa(r)
+				colLabel := indexToColLabel(c)
+				val := ""
+				if rowData, ok := refSheet.Data[rowKey]; ok {
+					if cell, ok := rowData[colLabel]; ok {
+						val = cell.Value
+					}
+				}
+				cols = append(cols, val)
+
+			}
+			rows = append(rows, "["+strings.Join(cols, ",")+"]")
+		}
+		return "[" + strings.Join(rows, ",") + "]"
+	})
+
+	// --- Same-sheet coordinate references ---
+	// Pattern to match {{A2}} or {{A2:B3}}.
+	tagPattern := regexp.MustCompile(`\{\{([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?\}\}`)
+	script = tagPattern.ReplaceAllStringFunc(script, func(match string) string {
+		submatches := tagPattern.FindStringSubmatch(match)
+		if len(submatches) < 3 {
+			return match
+		}
+
+		startCol := submatches[1]
+		startRow := submatches[2]
+
+		// Single cell reference {{A2}}
+		if submatches[3] == "" || submatches[4] == "" {
+			s.mu.RLock()
+			defer s.mu.RUnlock()
+			if rowData, ok := s.Data[startRow]; ok {
+				if cell, ok := rowData[startCol]; ok {
+					refCellID := startCol + startRow
+					var val string
+					if refCellID == cellID {
+						// Self-reference: use Value_FromNonSelfScript
+						val = cell.Value_FromNonSelfScript
+					} else {
+						val = cell.Value
+					}
+					if val == "" {
+						return ""
+					}
+					return val
+				}
+			}
+			return ""
+		}
+
+		// Range reference {{A2:B3}}
+		endCol := submatches[3]
+		endRow := submatches[4]
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		startColIdx := colLabelToIndex(startCol)
+		endColIdx := colLabelToIndex(endCol)
+		startRowNum := atoiSafe(startRow)
+		endRowNum := atoiSafe(endRow)
+
+		if startRowNum > endRowNum {
+			startRowNum, endRowNum = endRowNum, startRowNum
+		}
+		if startColIdx > endColIdx {
+			startColIdx, endColIdx = endColIdx, startColIdx
+		}
+
+		var rows []string
+		for r := startRowNum; r <= endRowNum; r++ {
+			var cols []string
+			for c := startColIdx; c <= endColIdx; c++ {
+				rowKey := itoa(r)
+				colLabel := indexToColLabel(c)
+				val := ""
+				if rowData, ok := s.Data[rowKey]; ok {
+					if cell, ok := rowData[colLabel]; ok {
+						refCellID := colLabel + rowKey
+						if refCellID == cellID {
+							// Self-reference: use Value_FromNonSelfScript
+							val = cell.Value_FromNonSelfScript
+						} else {
+							val = cell.Value
+						}
+					}
+				}
+				if _, err := strconv.ParseFloat(val, 64); err == nil && val != "" {
+					cols = append(cols, val)
+				} else {
+					cols = append(cols, strconv.Quote(val))
+				}
+			}
+			rows = append(rows, "["+strings.Join(cols, ",")+"]")
+		}
+		return "[" + strings.Join(rows, ",") + "]"
+	})
+
+	return script
+}
+
 // ExecuteCellScript executes a Python script in a cell and updates the cell value
 // with the script output. It handles tag replacement (e.g., {{A2}} or {{A2:B3}}),
 // script execution, and populates cell spans if defined.
@@ -807,251 +1034,9 @@ func ExecuteCellScript(projectName, sheetName, row, col string) {
 		WriteScriptOutputToCells(projectName, sheetName, row, col, true, false)
 		return
 	}
-	// Execute the script and update the cell value
-
-	// executing replaces the tags with values of the cells
-	//example
-	//1. if value at A2 is '7' then replace {{A2}} with '7' in the script
-	//2. if tag is like {{A2:B3}} then replace with a 2D array string like [[7,8],[9,10]] from the cell values
-	//3. For cell range from another sheet, e.g., {{projectname/sheetid/A2:B3}} , {{projectname/sheetid/B3}} etc
-	//4. {{CellName}} (same-sheet) and {{projectname/sheetid/CellName}} (cross-sheet) are first resolved to coordinates
-
-	// --- Pre-pass: resolve cell-name references to coordinate references ---
-
-	// Cross-sheet cell-name: {{project/.../sheet/CellName}} -> {{project/.../sheet/ColRow}}
-	crossSheetNamePrePattern := regexp.MustCompile(`\{\{((?:[^/\{\}]+/)+)([^/\{\}]+)/([A-Za-z_]\w*)\}\}`)
-	script = crossSheetNamePrePattern.ReplaceAllStringFunc(script, func(match string) string {
-		sub := crossSheetNamePrePattern.FindStringSubmatch(match)
-		if len(sub) < 4 {
-			return match
-		}
-		refProject := strings.TrimSuffix(sub[1], "/")
-		refSheetName := sub[2]
-		token := sub[3]
-		// If token already looks like a coordinate (e.g. "A2"), leave it for the coordinate pass
-		coordRe := regexp.MustCompile(`^[A-Z]+\d+$`)
-		if coordRe.MatchString(token) {
-			return match
-		}
-		refSheet := globalSheetManager.GetSheetBy(refSheetName, refProject)
-		if refSheet == nil {
-			return `""`
-		}
-		r, c, found := refSheet.FindCellByName(token)
-		if !found {
-			return `""`
-		}
-		return "{{" + sub[1] + refSheetName + "/" + c + r + "}}"
-	})
-
-	// Same-sheet cell-name: {{CellName}} -> {{ColRow}}
-	sameSheetNamePrePattern := regexp.MustCompile(`\{\{([A-Za-z_]\w*)\}\}`)
-	script = sameSheetNamePrePattern.ReplaceAllStringFunc(script, func(match string) string {
-		sub := sameSheetNamePrePattern.FindStringSubmatch(match)
-		if len(sub) < 2 {
-			return match
-		}
-		token := sub[1]
-		// If token already looks like a coordinate (e.g. "A2"), leave it for the coordinate pass
-		coordRe := regexp.MustCompile(`^[A-Z]+\d+$`)
-		if coordRe.MatchString(token) {
-			return match
-		}
-		r, c, found := s.FindCellByName(token)
-		if !found {
-			return `""`
-		}
-		return "{{" + c + r + "}}"
-	})
-
-	// Pattern to match {{project/.../sheetid/A2}} or {{project/.../sheetid/A2:B3}} (cross-sheet references).
-	// Project path may contain slashes (subfolder support).
-	crossSheetPattern := regexp.MustCompile(`\{\{((?:[^/\{\}]+/)+)([^/\{\}]+)/([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?\}\}`)
-
-	// Pattern to match {{A2}} or {{A2:B3}} (same sheet references)
-	tagPattern := regexp.MustCompile(`\{\{([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?\}\}`)
-
-	// First, handle cross-sheet references
-	script = crossSheetPattern.ReplaceAllStringFunc(script, func(match string) string {
-		submatches := crossSheetPattern.FindStringSubmatch(match)
-		if len(submatches) < 5 {
-			return match
-		}
-
-		// submatches[1] is "project/.../" (trailing slash), submatches[2] is sheetid
-		refProjectName := strings.TrimSuffix(submatches[1], "/")
-		refSheetName := submatches[2]
-		startCol := submatches[3]
-		startRow := submatches[4]
-
-		// Get the referenced sheet
-		refSheet := globalSheetManager.GetSheetBy(refSheetName, refProjectName)
-		if refSheet == nil {
-			return `""`
-		}
-
-		// Single cell reference {{projectname/sheetid/A2}}
-		if submatches[5] == "" || submatches[6] == "" {
-			refSheet.mu.RLock()
-			defer refSheet.mu.RUnlock()
-
-			if rowData, ok := refSheet.Data[startRow]; ok {
-				if cell, ok := rowData[startCol]; ok {
-					// Return the cell value - numbers unquoted; strings properly escaped
-					val := cell.Value
-					if val == "" {
-						return `""`
-					}
-					if _, err := strconv.ParseFloat(val, 64); err == nil {
-						// It's a number, return unquoted
-						return val
-					}
-					// Not a number, return quoted with escapes safe for Python
-					return strconv.Quote(val)
-				}
-			}
-			return `""`
-		}
-
-		// Range reference {{projectname/sheetid/A2:B3}}
-		endCol := submatches[5]
-		endRow := submatches[6]
-
-		refSheet.mu.RLock()
-		defer refSheet.mu.RUnlock()
-
-		startColIdx := colLabelToIndex(startCol)
-		endColIdx := colLabelToIndex(endCol)
-		startRowNum := atoiSafe(startRow)
-		endRowNum := atoiSafe(endRow)
-
-		// Ensure proper order
-		if startRowNum > endRowNum {
-			startRowNum, endRowNum = endRowNum, startRowNum
-		}
-		if startColIdx > endColIdx {
-			startColIdx, endColIdx = endColIdx, startColIdx
-		}
-
-		// Build 2D array
-		var rows []string
-		for r := startRowNum; r <= endRowNum; r++ {
-			var cols []string
-			for c := startColIdx; c <= endColIdx; c++ {
-				rowKey := itoa(r)
-				colLabel := indexToColLabel(c)
-
-				val := ""
-				if rowData, ok := refSheet.Data[rowKey]; ok {
-					if cell, ok := rowData[colLabel]; ok {
-						val = cell.Value
-					}
-				}
-				// Numbers unquoted; strings properly escaped, empty as ""
-				if _, err := strconv.ParseFloat(val, 64); err == nil && val != "" {
-					cols = append(cols, val)
-				} else {
-					cols = append(cols, strconv.Quote(val))
-				}
-			}
-			rows = append(rows, "["+strings.Join(cols, ",")+"]")
-		}
-
-		return "[" + strings.Join(rows, ",") + "]"
-	})
-
-	// Then, handle same-sheet references
-	script = tagPattern.ReplaceAllStringFunc(script, func(match string) string {
-		submatches := tagPattern.FindStringSubmatch(match)
-		if len(submatches) < 3 {
-			return match
-		}
-
-		startCol := submatches[1]
-		startRow := submatches[2]
-
-		// Single cell reference {{A2}}
-		if submatches[3] == "" || submatches[4] == "" {
-			s.mu.RLock()
-			defer s.mu.RUnlock()
-			if rowData, ok := s.Data[startRow]; ok {
-				if cell, ok := rowData[startCol]; ok {
-					// Check if this reference is to the same cell as the script location
-					refCellID := startCol + startRow
-					var val string
-					if refCellID == cellID {
-						// Self-reference: use Value_FromNonSelfScript
-						val = cell.Value_FromNonSelfScript
-					} else {
-						// Different cell: use Value
-						val = cell.Value
-					}
-					if val == "" {
-						return `""`
-					}
-					if _, err := strconv.ParseFloat(val, 64); err == nil {
-						// It's a number, return unquoted
-						return val
-					}
-					// Not a number, return quoted with escapes safe for Python
-					return strconv.Quote(val)
-				}
-			}
-			return `""`
-		}
-
-		// Range reference {{A2:B3}}
-		endCol := submatches[3]
-		endRow := submatches[4]
-		s.mu.RLock()
-		defer s.mu.RUnlock()
-		startColIdx := colLabelToIndex(startCol)
-		endColIdx := colLabelToIndex(endCol)
-		startRowNum := atoiSafe(startRow)
-		endRowNum := atoiSafe(endRow)
-
-		// Ensure proper order
-		if startRowNum > endRowNum {
-			startRowNum, endRowNum = endRowNum, startRowNum
-		}
-		if startColIdx > endColIdx {
-			startColIdx, endColIdx = endColIdx, startColIdx
-		}
-
-		// Build 2D array
-		var rows []string
-		for r := startRowNum; r <= endRowNum; r++ {
-			var cols []string
-			for c := startColIdx; c <= endColIdx; c++ {
-				rowKey := itoa(r)
-				colLabel := indexToColLabel(c)
-
-				val := ""
-				if rowData, ok := s.Data[rowKey]; ok {
-					if cell, ok := rowData[colLabel]; ok {
-						// Check if this cell in the range is the same as the script location
-						refCellID := colLabel + rowKey
-						if refCellID == cellID {
-							// Self-reference: use Value_FromNonSelfScript
-							val = cell.Value_FromNonSelfScript
-						} else {
-							// Different cell: use Value
-							val = cell.Value
-						}
-					}
-				}
-				// Numbers unquoted; strings properly escaped, empty as ""
-				if _, err := strconv.ParseFloat(val, 64); err == nil && val != "" {
-					cols = append(cols, val)
-				} else {
-					cols = append(cols, strconv.Quote(val))
-				}
-			}
-			rows = append(rows, "["+strings.Join(cols, ",")+"]")
-		}
-
-		return "[" + strings.Join(rows, ",") + "]"
-	})
+	// Execute the script and update the cell value.
+	// Replace all {{...}} cell/range reference tags with their Python-literal values.
+	script = ResolveScriptRefs(script, s, projectName, sheetName, cellID)
 
 	cmd, err := pythonCmd("-c", script)
 	//fmt.Println("Executing script ", script)

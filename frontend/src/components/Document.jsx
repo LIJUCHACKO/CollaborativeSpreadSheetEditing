@@ -3053,6 +3053,8 @@ export default function Document() {
                         cellName=""
                         scriptText={scriptText}
                         setScriptText={setScriptText}
+                        projectName={projectName}
+                        sheetName={sheetName}
                         scriptRowSpan={scriptRowSpan}
                         setScriptRowSpan={setScriptRowSpan}
                         scriptColSpan={scriptColSpan}
@@ -3207,6 +3209,8 @@ export default function Document() {
                         cellCol={aiPromptDialogCell.col}
                         aiPromptText={aiPromptText}
                         setAIPromptText={setAIPromptText}
+                        projectName={projectName}
+                        sheetName={sheetName}
                         canEdit={canEdit}
                         onApply={() => { saveAIPrompt(); }}
                         onClose={() => { setShowAIPromptDialog(false); setAIPromptDialogCell(null); }}
@@ -3892,7 +3896,7 @@ export default function Document() {
                                                         onChange={(e) => {
                                                             if (showScripts) return;
                                                             // Update local state for textarea value
-                                                            if (cell.locked || (cell.script ?? '').toString().length > 0 || !canEdit) return;
+                                                            if (cell.locked || cell.cell_type > 0 || !canEdit) return;
                                                             if (connected)
                                                             updateCellState(rowLabel, colLabel, e.target.value);
                                                             setIsSelecting(false);
@@ -3908,7 +3912,7 @@ export default function Document() {
                                                         }}
                                                     />
                                                     
-                                                    {cell.script && (
+                                                    {cell.cell_type === 1 && (
                                                         <span
                                                             title="Script Cell"
                                                             style={{

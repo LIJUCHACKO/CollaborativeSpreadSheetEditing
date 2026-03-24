@@ -2889,6 +2889,93 @@ func main() {
 		http.ServeFile(w, r, assetPath)
 	})
 
+	// ── Preview: GET /api/preview/ai-prompt
+	// Resolves all {{...}} cell/range references in an AI prompt and returns the
+	// resolved text.  Query params: project, sheet, row, col.  The raw prompt is
+	// sent as the request body (text/plain).
+	http.HandleFunc("/api/preview/ai-prompt", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		token := r.Header.Get("Authorization")
+		if _, err := globalUserManager.ValidateToken(token); err != nil {
+			http.Error(w, "Unauthorized: "+err.Error(), http.StatusUnauthorized)
+			return
+		}
+		project := r.URL.Query().Get("project")
+		sheet := r.URL.Query().Get("sheet")
+		if project == "" || sheet == "" {
+			http.Error(w, "project and sheet are required", http.StatusBadRequest)
+			return
+		}
+		var body struct {
+			Prompt string `json:"prompt"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid JSON body", http.StatusBadRequest)
+			return
+		}
+		resolved := ResolveAIPrompt(body.Prompt, project, sheet)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"resolved": resolved})
+	})
+
+	// ── Preview: POST /api/preview/script
+	// Resolves all {{...}} cell/range references in a Python script and returns
+	// the resolved script text.  Query params: project, sheet, row, col.
+	// The raw script is sent as JSON body { "script": "..." }.
+	http.HandleFunc("/api/preview/script", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		token := r.Header.Get("Authorization")
+		if _, err := globalUserManager.ValidateToken(token); err != nil {
+			http.Error(w, "Unauthorized: "+err.Error(), http.StatusUnauthorized)
+			return
+		}
+		project := r.URL.Query().Get("project")
+		sheet := r.URL.Query().Get("sheet")
+		row := r.URL.Query().Get("row")
+		col := r.URL.Query().Get("col")
+		if project == "" || sheet == "" {
+			http.Error(w, "project and sheet are required", http.StatusBadRequest)
+			return
+		}
+		var body struct {
+			Script string `json:"script"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid JSON body", http.StatusBadRequest)
+			return
+		}
+		s := globalSheetManager.GetSheetBy(sheet, project)
+		if s == nil {
+			http.Error(w, "sheet not found", http.StatusNotFound)
+			return
+		}
+		// Derive cellID from row+col (same as script executor does at runtime)
+		cellID := col + row
+		resolved := ResolveScriptRefs(body.Script, s, project, sheet, cellID)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"resolved": resolved})
+	})
+
 	// Simple health check
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("OK"))

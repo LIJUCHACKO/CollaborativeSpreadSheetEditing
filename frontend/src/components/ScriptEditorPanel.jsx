@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { X, Maximize2, Minimize2, Code, Play, CornerDownLeft } from 'lucide-react';
+import { X, Maximize2, Minimize2, Code, Play, CornerDownLeft, Eye } from 'lucide-react';
+import { authenticatedFetch, apiUrl } from '../utils/auth';
 
 /**
  * Python keywords that trigger indentation on the next line when a line ends with ':'
@@ -131,6 +132,8 @@ export default function ScriptEditorPanel({
     cellRow,
     cellCol,
     cellName,
+    projectName,
+    sheetName,
     scriptText,
     setScriptText,
     scriptRowSpan,
@@ -154,8 +157,30 @@ export default function ScriptEditorPanel({
     const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
     const [position, setPosition] = useState({ x: null, y: null });
     const [isMaximized, setIsMaximized] = useState(false);
-    const [activeTab, setActiveTab] = useState('edit'); // 'edit' | 'highlight'
+    const [activeTab, setActiveTab] = useState('edit'); // 'edit' | 'highlight' | 'preview'
     const [showLineNumbers, setShowLineNumbers] = useState(true);
+    const [previewText, setPreviewText] = useState('');
+    const [previewLoading, setPreviewLoading] = useState(false);
+    const [previewError, setPreviewError] = useState('');
+
+    // Fetch resolved preview from backend when the Preview tab is activated
+    useEffect(() => {
+        if (activeTab !== 'preview') return;
+        setPreviewLoading(true);
+        setPreviewError('');
+        authenticatedFetch(
+            apiUrl(`/api/preview/script?project=${encodeURIComponent(projectName || '')}&sheet=${encodeURIComponent(sheetName || '')}&row=${encodeURIComponent(String(cellRow))}&col=${encodeURIComponent(String(cellCol))}`),
+            {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ script: scriptText || '' }),
+            }
+        )
+            .then(r => r.ok ? r.json() : r.text().then(t => Promise.reject(t)))
+            .then(data => { setPreviewText(data.resolved ?? ''); })
+            .catch(err => { setPreviewError(String(err)); })
+            .finally(() => setPreviewLoading(false));
+    }, [activeTab, scriptText, projectName, sheetName, cellRow, cellCol]);
 
     // Position panel on mount
     useEffect(() => {
@@ -500,6 +525,18 @@ export default function ScriptEditorPanel({
                 >
                     <Code size={12} className="me-1" /> Highlighted
                 </button>
+                <button
+                    className={`btn btn-sm px-3 py-1 rounded-0 border-0`}
+                    style={{
+                        borderBottom: activeTab === 'preview' ? '2px solid #1a7a4c' : '2px solid transparent',
+                        background: 'transparent',
+                        color: activeTab === 'preview' ? '#4ec9b0' : '#888',
+                        fontWeight: activeTab === 'preview' ? 'bold' : 'normal',
+                    }}
+                    onClick={() => setActiveTab('preview')}
+                >
+                    <Eye size={12} className="me-1" /> Preview
+                </button>
             </div>
 
             {/* Editor body */}
@@ -653,6 +690,54 @@ export default function ScriptEditorPanel({
                                     </span>
                                 </div>
                             ))}
+                        </div>
+                    )}
+
+                    {activeTab === 'preview' && (
+                        <div
+                            style={{
+                                width: '100%',
+                                height: '100%',
+                                overflowY: 'auto',
+                                overflowX: 'auto',
+                                background: '#1e1e1e',
+                                padding: '8px 0',
+                                fontFamily: "'Consolas', 'Courier New', 'Monaco', monospace",
+                                fontSize: '13px',
+                                lineHeight: '20px',
+                            }}
+                        >
+                            {previewLoading && (
+                                <div style={{ padding: '8px 16px', color: '#888', fontStyle: 'italic' }}>Resolving references…</div>
+                            )}
+                            {!previewLoading && previewError && (
+                                <div style={{ padding: '8px 16px', color: '#f48771' }}>Error: {previewError}</div>
+                            )}
+                            {!previewLoading && !previewError && (
+                                previewText
+                                    ? highlightPython(previewText).map(({ lineNum, tokens }) => (
+                                        <div key={lineNum} style={{ display: 'flex', minHeight: 20 }}>
+                                            {showLineNumbers && (
+                                                <span style={{
+                                                    width: 44,
+                                                    flexShrink: 0,
+                                                    textAlign: 'right',
+                                                    paddingRight: 8,
+                                                    color: '#858585',
+                                                    userSelect: 'none',
+                                                    borderRight: '1px solid #333',
+                                                    marginRight: 12,
+                                                }}>
+                                                    {lineNum}
+                                                </span>
+                                            )}
+                                            <span style={{ whiteSpace: 'pre' }}>
+                                                {tokens.length > 0 ? tokens : ' '}
+                                            </span>
+                                        </div>
+                                    ))
+                                    : <div style={{ padding: '8px 16px', color: '#555', fontStyle: 'italic' }}>Nothing to preview.</div>
+                            )}
                         </div>
                     )}
                 </div>

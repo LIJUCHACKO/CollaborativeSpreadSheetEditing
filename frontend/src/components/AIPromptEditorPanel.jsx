@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { X, Maximize2, Minimize2, Sparkles, Play, CornerDownLeft } from 'lucide-react';
+import { X, Maximize2, Minimize2, Sparkles, Play, CornerDownLeft, Eye } from 'lucide-react';
+import { authenticatedFetch, apiUrl } from '../utils/auth';
 
 /**
  * Highlight {{CellRef}} template references and plain text in an AI prompt.
@@ -53,6 +54,8 @@ function highlightPrompt(code) {
 export default function AIPromptEditorPanel({
     cellRow,
     cellCol,
+    projectName,
+    sheetName,
     aiPromptText,
     setAIPromptText,
     canEdit,
@@ -69,8 +72,30 @@ export default function AIPromptEditorPanel({
     const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
     const [position, setPosition] = useState({ x: null, y: null });
     const [isMaximized, setIsMaximized] = useState(false);
-    const [activeTab, setActiveTab] = useState('edit'); // 'edit' | 'highlight'
+    const [activeTab, setActiveTab] = useState('edit'); // 'edit' | 'highlight' | 'preview'
     const [showLineNumbers, setShowLineNumbers] = useState(true);
+    const [previewText, setPreviewText] = useState('');
+    const [previewLoading, setPreviewLoading] = useState(false);
+    const [previewError, setPreviewError] = useState('');
+
+    // Fetch resolved preview from backend when the Preview tab is activated
+    useEffect(() => {
+        if (activeTab !== 'preview') return;
+        setPreviewLoading(true);
+        setPreviewError('');
+        authenticatedFetch(
+            apiUrl(`/api/preview/ai-prompt?project=${encodeURIComponent(projectName || '')}&sheet=${encodeURIComponent(sheetName || '')}`),
+            {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ prompt: aiPromptText || '' }),
+            }
+        )
+            .then(r => r.ok ? r.json() : r.text().then(t => Promise.reject(t)))
+            .then(data => { setPreviewText(data.resolved ?? ''); })
+            .catch(err => { setPreviewError(String(err)); })
+            .finally(() => setPreviewLoading(false));
+    }, [activeTab, aiPromptText, projectName, sheetName]);
 
     // Position panel on mount
     useEffect(() => {
@@ -205,6 +230,18 @@ export default function AIPromptEditorPanel({
                 >
                     <Sparkles size={12} className="me-1" /> Highlighted
                 </button>
+                <button
+                    className="btn btn-sm px-3 py-1 rounded-0 border-0"
+                    style={{
+                        borderBottom: activeTab === 'preview' ? '2px solid #9b4dca' : '2px solid transparent',
+                        background: 'transparent',
+                        color: activeTab === 'preview' ? '#c792ea' : '#888',
+                        fontWeight: activeTab === 'preview' ? 'bold' : 'normal',
+                    }}
+                    onClick={() => setActiveTab('preview')}
+                >
+                    <Eye size={12} className="me-1" /> Preview
+                </button>
             </div>
 
             {/* Editor body */}
@@ -337,6 +374,37 @@ export default function AIPromptEditorPanel({
                                     </span>
                                 </div>
                             ))}
+                        </div>
+                    )}
+
+                    {activeTab === 'preview' && (
+                        <div
+                            style={{
+                                width: '100%',
+                                height: '100%',
+                                overflowY: 'auto',
+                                overflowX: 'hidden',
+                                background: '#1e1e1e',
+                                padding: '12px 16px',
+                                color: '#d4d4d4',
+                                fontFamily: 'system-ui, sans-serif',
+                                fontSize: '13px',
+                                lineHeight: '1.6',
+                                whiteSpace: 'pre-wrap',
+                                wordBreak: 'break-word',
+                            }}
+                        >
+                            {previewLoading && (
+                                <span style={{ color: '#888', fontStyle: 'italic' }}>Resolving references…</span>
+                            )}
+                            {!previewLoading && previewError && (
+                                <span style={{ color: '#f48771' }}>Error: {previewError}</span>
+                            )}
+                            {!previewLoading && !previewError && (
+                                previewText
+                                    ? previewText
+                                    : <span style={{ color: '#555', fontStyle: 'italic' }}>Nothing to preview.</span>
+                            )}
                         </div>
                     )}
                 </div>
