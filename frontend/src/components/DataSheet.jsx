@@ -210,6 +210,7 @@ export default function DataSheet() {
         const optionsArray = [];
         const optionsRangeArray = [];
         const optionSelectedArray = [];
+        const aiPromptsArray = [];
         for (const r of uniqueRows) {
             const rowArr = [];
             const scriptRowArr = [];
@@ -217,6 +218,7 @@ export default function DataSheet() {
             const optionsRowArr = [];
             const optionsRangeRowArr = [];
             const optionSelectedRowArr = [];
+            const aiPromptRowArr = [];
             for (const c of uniqueCols) {
                 const key = `${r}-${c}`;
                 const cell = data[key] || {};
@@ -226,6 +228,7 @@ export default function DataSheet() {
                 optionsRowArr.push(cell.options ?? []);
                 optionsRangeRowArr.push(cell.options_range ?? '');
                 optionSelectedRowArr.push(cell.option_selected ?? []);
+                aiPromptRowArr.push(cell.ai_prompt ?? '');
             }
             values.push(rowArr);
             scripts.push(scriptRowArr);
@@ -233,6 +236,7 @@ export default function DataSheet() {
             optionsArray.push(optionsRowArr);
             optionsRangeArray.push(optionsRangeRowArr);
             optionSelectedArray.push(optionSelectedRowArr);
+            aiPromptsArray.push(aiPromptRowArr);
         }
 
         const noOfRows = uniqueRows.length;
@@ -262,6 +266,7 @@ export default function DataSheet() {
                 optionsArray,
                 optionsRangeArray,
                 optionSelectedArray,
+                aiPromptsArray,
                 rangeText: combinedRangeText,
             };
             ws.current.send(JSON.stringify({ type: 'SELECTION_COPIED', sheet_name: id, payload }));
@@ -426,11 +431,13 @@ export default function DataSheet() {
                 const options = copiedBlock.optionsArray && copiedBlock.optionsArray[rOff] ? (copiedBlock.optionsArray[rOff][cOff] ?? []) : [];
                 const optionsRange = copiedBlock.optionsRangeArray && copiedBlock.optionsRangeArray[rOff] ? (copiedBlock.optionsRangeArray[rOff][cOff] ?? '') : '';
                 const optionSelected = copiedBlock.optionSelectedArray && copiedBlock.optionSelectedArray[rOff] ? (copiedBlock.optionSelectedArray[rOff][cOff] ?? []) : [];
+                const aiPromptVal = copiedBlock.aiPromptsArray && copiedBlock.aiPromptsArray[rOff] ? (copiedBlock.aiPromptsArray[rOff][cOff] ?? '') : '';
                 const oldValue = (data[key]?.value ?? '').toString();
                 const oldCellType = data[key]?.cell_type ?? 0;
                 const oldOptions = data[key]?.options ?? [];
                 const oldOptionsRange = data[key]?.options_range ?? '';
                 const oldOptionSelected = data[key]?.option_selected ?? [];
+                const oldAiPrompt = data[key]?.ai_prompt ?? '';
                 updates[key] = { value, user: username };
                 if (scriptVal && scriptVal.toString().length > 0) {
                     scriptUpdates[key] = { script: scriptVal.toString(), user: username };
@@ -463,6 +470,8 @@ export default function DataSheet() {
                     newOptionsRange: optionsRange,
                     oldOptionSelected,
                     newOptionSelected: optionSelected,
+                    oldAiPrompt,
+                    newAiPrompt: aiPromptVal,
                 });
             }
         }
@@ -484,6 +493,13 @@ export default function DataSheet() {
                     options_range: cell.optionsRange,
                     user: cell.user 
                 };
+            });
+            // Apply ai_prompt for cells that have one in the copied block
+            changes.forEach(ch => {
+                if (ch.newAiPrompt !== undefined) {
+                    const k = `${ch.row}-${ch.col}`;
+                    next[k] = { ...(next[k] || prev[k] || {}), ai_prompt: ch.newAiPrompt, user: username };
+                }
             });
             return next;
         });
@@ -521,6 +537,16 @@ export default function DataSheet() {
                 const [rowStr, colLabel] = key.split('-');
                 const payload = { row: rowStr, col: colLabel, value: cell.value, user: username };
                 ws.current.send(JSON.stringify({ type: 'UPDATE_CELL', sheet_name: id, payload }));
+            });
+            // Send AI prompt updates for cells that have a prompt in the copied block
+            changes.forEach(ch => {
+                if (ch.newAiPrompt !== undefined) {
+                    ws.current.send(JSON.stringify({
+                        type: 'UPDATE_AI_PROMPT',
+                        sheet_name: id,
+                        payload: { row: String(ch.row), col: String(ch.col), prompt: ch.newAiPrompt, user: username }
+                    }));
+                }
             });
         }
 
@@ -677,6 +703,8 @@ export default function DataSheet() {
     const [aiPromptDialogCell, setAIPromptDialogCell] = useState(null); // { row, col }
     const [aiPromptText, setAIPromptText] = useState('');
     const aiPromptTextareaRef = useRef(null);
+    // Stores the prompt value before editing so undo/redo can revert it
+    const aiPromptOriginalRef = useRef('');
 
     const insertSelectedRangeIntoAIPrompt = () => {
         let rangeText = '';
@@ -712,19 +740,37 @@ export default function DataSheet() {
     const openAIPromptDialog = (row, col) => {
         const key = `${row}-${col}`;
         const cell = data[key] || {};
+        const originalPrompt = cell.ai_prompt || '';
+        aiPromptOriginalRef.current = originalPrompt;
         setAIPromptDialogCell({ row, col });
-        setAIPromptText(cell.ai_prompt || '');
+        setAIPromptText(originalPrompt);
         setShowAIPromptDialog(true);
     };
 
     const saveAIPrompt = () => {
         if (!aiPromptDialogCell || !ws.current || ws.current.readyState !== WebSocket.OPEN) return;
         const { row, col } = aiPromptDialogCell;
+        const oldPrompt = aiPromptOriginalRef.current;
+        const newPrompt = aiPromptText;
         ws.current.send(JSON.stringify({
             type: 'UPDATE_AI_PROMPT',
             sheet_name: id,
-            payload: { row: String(row), col: String(col), prompt: aiPromptText, user: username }
+            payload: { row: String(row), col: String(col), prompt: newPrompt, user: username }
         }));
+        // Update local data state so undo/redo can restore without a round-trip
+        setData(prev => ({
+            ...prev,
+            [`${row}-${col}`]: {
+                ...(prev[`${row}-${col}`] || {}),
+                ai_prompt: newPrompt,
+                user: username,
+            }
+        }));
+        // Push to undo stack (only when the prompt actually changed)
+        if (oldPrompt !== newPrompt) {
+            setUndoStack(prev => [...prev, { type: 'ai_prompt', row, col, oldValue: oldPrompt, newValue: newPrompt }]);
+            setRedoStack([]);
+        }
         setShowAIPromptDialog(false);
         setAIPromptDialogCell(null);
     };
@@ -1105,7 +1151,7 @@ export default function DataSheet() {
                             ));
                         }
                     } else if (msg.type === 'SELECTION_SHARED') {
-                        const { Rows, Cols, sheet_name, values, scripts, cellTypes, optionsArray, optionsRangeArray, optionSelectedArray, rangeText } = msg.payload || {};
+                        const { Rows, Cols, sheet_name, values, scripts, cellTypes, optionsArray, optionsRangeArray, optionSelectedArray, aiPromptsArray, rangeText } = msg.payload || {};
                         if (Rows && Cols && Array.isArray(values)) {
                             setCopiedBlock({ 
                                 Rows, 
@@ -1116,6 +1162,7 @@ export default function DataSheet() {
                                 optionsArray: Array.isArray(optionsArray) ? optionsArray : undefined,
                                 optionsRangeArray: Array.isArray(optionsRangeArray) ? optionsRangeArray : undefined,
                                 optionSelectedArray: Array.isArray(optionSelectedArray) ? optionSelectedArray : undefined,
+                                aiPromptsArray: Array.isArray(aiPromptsArray) ? aiPromptsArray : undefined,
                                 rangeText,
                             }); 
                         }
@@ -1322,6 +1369,106 @@ export default function DataSheet() {
         editingOriginalScriptRef.current = null;
     };
 
+    // Autofill: fill selected 1-D range by incrementing/decrementing from the first two values
+    const handleAutofill = () => {
+        if (!selectedRange || selectedRange.length < 3) {
+            alert('Select at least 3 cells in a single row or column to autofill.');
+            return;
+        }
+        if (!canEdit) return;
+
+        // Determine if selection is a single row or single column
+        const rows = selectedRange.map(c => c.row);
+        const cols = selectedRange.map(c => c.col);
+        const uniqueRows = [...new Set(rows)];
+        const uniqueCols = [...new Set(cols)];
+        const isRowFill = uniqueRows.length === 1;
+        const isColFill = uniqueCols.length === 1;
+
+        if (!isRowFill && !isColFill) {
+            alert('Autofill only works on a single row or a single column selection.');
+            return;
+        }
+
+        // Sort cells in order
+        let sortedCells;
+        if (isColFill) {
+            // Sort by row number ascending
+            sortedCells = [...selectedRange].sort((a, b) => a.row - b.row);
+        } else {
+            // Sort by column index ascending
+            sortedCells = [...selectedRange].sort((a, b) => (colIndexMap[a.col] ?? 0) - (colIndexMap[b.col] ?? 0));
+        }
+
+        // Check for locked cells or special cell types
+        for (const cell of sortedCells) {
+            const key = `${cell.row}-${cell.col}`;
+            const c = data[key] || {};
+            if (c.locked) {
+                alert(`Cannot autofill: cell ${cell.col}${cell.row} is locked.`);
+                return;
+            }
+            if ((c.cell_type ?? 0) > 0) {
+                alert(`Cannot autofill: cell ${cell.col}${cell.row} has a special cell type.`);
+                return;
+            }
+        }
+
+        // Read first two values to determine the step
+        const key0 = `${sortedCells[0].row}-${sortedCells[0].col}`;
+        const key1 = `${sortedCells[1].row}-${sortedCells[1].col}`;
+        const v0 = parseFloat((data[key0]?.value ?? '').toString());
+        const v1 = parseFloat((data[key1]?.value ?? '').toString());
+
+        if (isNaN(v0) || isNaN(v1)) {
+            alert('Autofill requires the first two cells to contain numeric values.');
+            return;
+        }
+
+        const step = v1 - v0;
+
+        // Build changes for cells from index 2 onwards
+        const changes = [];
+        const updates = {};
+
+        for (let i = 2; i < sortedCells.length; i++) {
+            const cell = sortedCells[i];
+            const key = `${cell.row}-${cell.col}`;
+            const oldValue = (data[key]?.value ?? '').toString();
+            const newValue = (v0 + step * i).toString();
+            changes.push({ row: String(cell.row), col: String(cell.col), oldValue, newValue });
+            updates[key] = newValue;
+        }
+
+        if (changes.length === 0) return;
+
+        // Apply local state
+        setData(prev => {
+            const next = { ...prev };
+            for (const [key, val] of Object.entries(updates)) {
+                next[key] = { ...(prev[key] || {}), value: val, user: username };
+            }
+            return next;
+        });
+
+        // Push to undo stack
+        setUndoStack(prev => [...prev, { type: 'autofill', changes }]);
+        setRedoStack([]);
+
+        // Broadcast to server
+        if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+            for (const ch of changes) {
+                ws.current.send(JSON.stringify({
+                    type: 'UPDATE_CELL',
+                    sheet_name: id,
+                    payload: { row: ch.row, col: ch.col, value: ch.newValue, user: username }
+                }));
+            }
+        }
+
+        closeContextMenu();
+    };
+
     // Returns a human-readable label for a stack entry (used in button tooltips/labels)
     const stackEntryLabel = (entry) => {
         if (!entry) return '';
@@ -1329,7 +1476,9 @@ export default function DataSheet() {
             case 'cell_edit': return `Edit ${entry.col}${entry.row}`;
             case 'cell_script': return `Script ${entry.col}${entry.row}`;
             case 'paste': return 'Paste';
+            case 'autofill': return 'Autofill';
             case 'option_selection': return `Option ${entry.col}${entry.row}`;
+            case 'ai_prompt': return `AI Prompt ${entry.col}${entry.row}`;
             default: return entry.type;
         }
     };
@@ -1363,6 +1512,7 @@ export default function DataSheet() {
                         options: ch.oldOptions ?? [],
                         options_range: ch.oldOptionsRange ?? '',
                         option_selected: ch.oldOptionSelected ?? [],
+                        ai_prompt: ch.oldAiPrompt ?? '',
                         user: username 
                     };
                 }
@@ -1391,6 +1541,14 @@ export default function DataSheet() {
                     }
                     // Send value update
                     ws.current.send(JSON.stringify({ type: 'UPDATE_CELL', sheet_name: id, payload: { row: String(ch.row), col: String(ch.col), value: ch.oldValue, user: username } }));
+                    // Restore AI prompt
+                    if (ch.oldAiPrompt !== undefined) {
+                        ws.current.send(JSON.stringify({
+                            type: 'UPDATE_AI_PROMPT',
+                            sheet_name: id,
+                            payload: { row: String(ch.row), col: String(ch.col), prompt: ch.oldAiPrompt, user: username }
+                        }));
+                    }
                 }
             }
             setRedoStack(prev => [...prev, last]);
@@ -1428,6 +1586,44 @@ export default function DataSheet() {
             }
             setRedoStack(prev => [...prev, last]);
             setUndoStack(prev => prev.slice(0, -1));
+        } else if (last.type === 'autofill') {
+            const { changes } = last;
+            setData(prev => {
+                const next = { ...prev };
+                for (const ch of changes) {
+                    const key = `${ch.row}-${ch.col}`;
+                    next[key] = { ...(next[key] || {}), value: ch.oldValue, user: username };
+                }
+                return next;
+            });
+            if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+                for (const ch of changes) {
+                    ws.current.send(JSON.stringify({ type: 'UPDATE_CELL', sheet_name: id, payload: { row: ch.row, col: ch.col, value: ch.oldValue, user: username } }));
+                }
+            }
+            setRedoStack(prev => [...prev, last]);
+            setUndoStack(prev => prev.slice(0, -1));
+        } else if (last.type === 'ai_prompt') {
+            const { row, col, oldValue } = last;
+            // Restore old prompt in local data state
+            setData(prev => ({
+                ...prev,
+                [`${row}-${col}`]: {
+                    ...(prev[`${row}-${col}`] || {}),
+                    ai_prompt: oldValue,
+                    user: username,
+                }
+            }));
+            // Send to server
+            if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+                ws.current.send(JSON.stringify({
+                    type: 'UPDATE_AI_PROMPT',
+                    sheet_name: id,
+                    payload: { row: String(row), col: String(col), prompt: oldValue, user: username }
+                }));
+            }
+            setRedoStack(prev => [...prev, last]);
+            setUndoStack(prev => prev.slice(0, -1));
         }
     };
 
@@ -1457,6 +1653,7 @@ export default function DataSheet() {
                         options: ch.newOptions ?? [],
                         options_range: ch.newOptionsRange ?? '',
                         option_selected: ch.newOptionSelected ?? [],
+                        ai_prompt: ch.newAiPrompt ?? '',
                         user: username 
                     };
                 }
@@ -1485,6 +1682,14 @@ export default function DataSheet() {
                     }
                     // Send value update
                     ws.current.send(JSON.stringify({ type: 'UPDATE_CELL', sheet_name: id, payload: { row: String(ch.row), col: String(ch.col), value: ch.newValue, user: username } }));
+                    // Reapply AI prompt
+                    if (ch.newAiPrompt !== undefined) {
+                        ws.current.send(JSON.stringify({
+                            type: 'UPDATE_AI_PROMPT',
+                            sheet_name: id,
+                            payload: { row: String(ch.row), col: String(ch.col), prompt: ch.newAiPrompt, user: username }
+                        }));
+                    }
                 }
             }
             setUndoStack(prev => [...prev, last]);
@@ -1516,6 +1721,44 @@ export default function DataSheet() {
                     type: 'UPDATE_CELL_OPTIONS',
                     sheet_name: id,
                     payload: { row, col, value: newValue, option_selected: newSelected, user: username }
+                }));
+            }
+            setUndoStack(prev => [...prev, last]);
+            setRedoStack(prev => prev.slice(0, -1));
+        } else if (last.type === 'autofill') {
+            const { changes } = last;
+            setData(prev => {
+                const next = { ...prev };
+                for (const ch of changes) {
+                    const key = `${ch.row}-${ch.col}`;
+                    next[key] = { ...(next[key] || {}), value: ch.newValue, user: username };
+                }
+                return next;
+            });
+            if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+                for (const ch of changes) {
+                    ws.current.send(JSON.stringify({ type: 'UPDATE_CELL', sheet_name: id, payload: { row: ch.row, col: ch.col, value: ch.newValue, user: username } }));
+                }
+            }
+            setUndoStack(prev => [...prev, last]);
+            setRedoStack(prev => prev.slice(0, -1));
+        } else if (last.type === 'ai_prompt') {
+            const { row, col, newValue } = last;
+            // Reapply new prompt in local data state
+            setData(prev => ({
+                ...prev,
+                [`${row}-${col}`]: {
+                    ...(prev[`${row}-${col}`] || {}),
+                    ai_prompt: newValue,
+                    user: username,
+                }
+            }));
+            // Send to server
+            if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+                ws.current.send(JSON.stringify({
+                    type: 'UPDATE_AI_PROMPT',
+                    sheet_name: id,
+                    payload: { row: String(row), col: String(col), prompt: newValue, user: username }
                 }));
             }
             setUndoStack(prev => [...prev, last]);
@@ -3648,6 +3891,24 @@ export default function DataSheet() {
                                                                                 Change Cell Type
                                                                             </button>
                                                                         )}
+                                                                        {(() => {
+                                                                            // Show Autofill only for 1-D selections of ≥3 cells
+                                                                            if (!canEdit || !selectedRange || selectedRange.length < 3) return null;
+                                                                            const selRows = selectedRange.map(c => c.row);
+                                                                            const selCols = selectedRange.map(c => c.col);
+                                                                            const uRows = [...new Set(selRows)];
+                                                                            const uCols = [...new Set(selCols)];
+                                                                            const is1D = uRows.length === 1 || uCols.length === 1;
+                                                                            if (!is1D) return null;
+                                                                            return (
+                                                                                <button
+                                                                                    className="block w-full text-left px-2 py-1 hover:bg-gray-100 rounded"
+                                                                                    onClick={handleAutofill}
+                                                                                >
+                                                                                    Autofill
+                                                                                </button>
+                                                                            );
+                                                                        })()}
                                                                 
                                                                 {isOwner && contextMenu.cell && (
                                                                     <>

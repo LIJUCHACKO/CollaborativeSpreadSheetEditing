@@ -21,6 +21,7 @@ import {
 } from 'lucide-react';
 import { Lock, Code, ChevronDown, ListOrdered, Trash2, Plus, Scissors, ClipboardPaste, MoreVertical, CornerDownRight, AlertTriangle, BrainCircuit } from 'lucide-react';
 import { isSessionValid, clearAuth, getUsername, authenticatedFetch, apiUrl } from '../utils/auth';
+import JSZip from 'jszip';
 import MarkdownEditorPanel from './MarkdownEditorPanel';
 import ScriptEditorPanel from './ScriptEditorPanel';
 import AIPromptEditorPanel from './AIPromptEditorPanel';
@@ -219,6 +220,7 @@ export default function Document() {
         const optionsArray = [];
         const optionsRangeArray = [];
         const optionSelectedArray = [];
+        const aiPromptsArray = [];
         for (const r of uniqueRows) {
             const rowArr = [];
             const scriptRowArr = [];
@@ -226,6 +228,7 @@ export default function Document() {
             const optionsRowArr = [];
             const optionsRangeRowArr = [];
             const optionSelectedRowArr = [];
+            const aiPromptRowArr = [];
             for (const c of uniqueCols) {
                 const key = `${r}-${c}`;
                 const cell = data[key] || {};
@@ -235,6 +238,7 @@ export default function Document() {
                 optionsRowArr.push(cell.options ?? []);
                 optionsRangeRowArr.push(cell.options_range ?? '');
                 optionSelectedRowArr.push(cell.option_selected ?? []);
+                aiPromptRowArr.push(cell.ai_prompt ?? '');
             }
             values.push(rowArr);
             scripts.push(scriptRowArr);
@@ -242,6 +246,7 @@ export default function Document() {
             optionsArray.push(optionsRowArr);
             optionsRangeArray.push(optionsRangeRowArr);
             optionSelectedArray.push(optionSelectedRowArr);
+            aiPromptsArray.push(aiPromptRowArr);
         }
 
         const noOfRows = uniqueRows.length;
@@ -262,6 +267,7 @@ export default function Document() {
                 optionsArray,
                 optionsRangeArray,
                 optionSelectedArray,
+                aiPromptsArray,
                 rangeText: combinedRangeText,
             };
             ws.current.send(JSON.stringify({ type: 'SELECTION_COPIED', sheet_name: id, payload }));
@@ -426,11 +432,13 @@ export default function Document() {
                 const options = copiedBlock.optionsArray && copiedBlock.optionsArray[rOff] ? (copiedBlock.optionsArray[rOff][cOff] ?? []) : [];
                 const optionsRange = copiedBlock.optionsRangeArray && copiedBlock.optionsRangeArray[rOff] ? (copiedBlock.optionsRangeArray[rOff][cOff] ?? '') : '';
                 const optionSelected = copiedBlock.optionSelectedArray && copiedBlock.optionSelectedArray[rOff] ? (copiedBlock.optionSelectedArray[rOff][cOff] ?? []) : [];
+                const aiPromptVal = copiedBlock.aiPromptsArray && copiedBlock.aiPromptsArray[rOff] ? (copiedBlock.aiPromptsArray[rOff][cOff] ?? '') : '';
                 const oldValue = (data[key]?.value ?? '').toString();
                 const oldCellType = data[key]?.cell_type ?? 0;
                 const oldOptions = data[key]?.options ?? [];
                 const oldOptionsRange = data[key]?.options_range ?? '';
                 const oldOptionSelected = data[key]?.option_selected ?? [];
+                const oldAiPrompt = data[key]?.ai_prompt ?? '';
                 updates[key] = { value, user: username };
                 if (scriptVal && scriptVal.toString().length > 0) {
                     scriptUpdates[key] = { script: scriptVal.toString(), user: username };
@@ -463,6 +471,8 @@ export default function Document() {
                     newOptionsRange: optionsRange,
                     oldOptionSelected,
                     newOptionSelected: optionSelected,
+                    oldAiPrompt,
+                    newAiPrompt: aiPromptVal,
                 });
             }
         }
@@ -484,6 +494,13 @@ export default function Document() {
                     options_range: cell.optionsRange,
                     user: cell.user 
                 };
+            });
+            // Apply ai_prompt for cells that have one in the copied block
+            changes.forEach(ch => {
+                if (ch.newAiPrompt !== undefined) {
+                    const k = `${ch.row}-${ch.col}`;
+                    next[k] = { ...(next[k] || prev[k] || {}), ai_prompt: ch.newAiPrompt, user: username };
+                }
             });
             return next;
         });
@@ -521,6 +538,16 @@ export default function Document() {
                 const [rowStr, colLabel] = key.split('-');
                 const payload = { row: rowStr, col: colLabel, value: cell.value, user: username };
                 ws.current.send(JSON.stringify({ type: 'UPDATE_CELL', sheet_name: id, payload }));
+            });
+            // Send AI prompt updates for cells that have a prompt in the copied block
+            changes.forEach(ch => {
+                if (ch.newAiPrompt !== undefined) {
+                    ws.current.send(JSON.stringify({
+                        type: 'UPDATE_AI_PROMPT',
+                        sheet_name: id,
+                        payload: { row: String(ch.row), col: String(ch.col), prompt: ch.newAiPrompt, user: username }
+                    }));
+                }
             });
         }
 
@@ -670,6 +697,8 @@ export default function Document() {
     const [aiPromptDialogCell, setAIPromptDialogCell] = useState(null); // { row, col }
     const [aiPromptText, setAIPromptText] = useState('');
     const aiPromptTextareaRef = useRef(null);
+    // Stores the prompt value before editing so undo/redo can revert it
+    const aiPromptOriginalRef = useRef('');
 
     const insertSelectedRangeIntoAIPrompt = () => {
         let rangeText = '';
@@ -699,19 +728,37 @@ export default function Document() {
     const openAIPromptDialog = (row, col) => {
         const key = `${row}-${col}`;
         const cell = data[key] || {};
+        const originalPrompt = cell.ai_prompt || '';
+        aiPromptOriginalRef.current = originalPrompt;
         setAIPromptDialogCell({ row, col });
-        setAIPromptText(cell.ai_prompt || '');
+        setAIPromptText(originalPrompt);
         setShowAIPromptDialog(true);
     };
 
     const saveAIPrompt = () => {
         if (!aiPromptDialogCell || !ws.current || ws.current.readyState !== WebSocket.OPEN) return;
         const { row, col } = aiPromptDialogCell;
+        const oldPrompt = aiPromptOriginalRef.current;
+        const newPrompt = aiPromptText;
         ws.current.send(JSON.stringify({
             type: 'UPDATE_AI_PROMPT',
             sheet_name: id,
-            payload: { row: String(row), col: String(col), prompt: aiPromptText, user: username }
+            payload: { row: String(row), col: String(col), prompt: newPrompt, user: username }
         }));
+        // Update local data state so undo/redo can restore without a round-trip
+        setData(prev => ({
+            ...prev,
+            [`${row}-${col}`]: {
+                ...(prev[`${row}-${col}`] || {}),
+                ai_prompt: newPrompt,
+                user: username,
+            }
+        }));
+        // Push to undo stack (only when the prompt actually changed)
+        if (oldPrompt !== newPrompt) {
+            setUndoStack(prev => [...prev, { type: 'ai_prompt', row, col, oldValue: oldPrompt, newValue: newPrompt }]);
+            setRedoStack([]);
+        }
         setShowAIPromptDialog(false);
         setAIPromptDialogCell(null);
     };
@@ -750,7 +797,7 @@ export default function Document() {
     };
 
     // ── Markdown export ──────────────────────────────────────────────────────
-    const handleExportMarkdown = () => {
+    const handleExportMarkdown = async () => {
         // Collect non-header data rows (skip frozen row 1)
         // Build ordered list of rows from filteredRowHeaders (skip row 1 header)
         const dataRows = ROW_HEADERS.filter(r => r > 1);
@@ -790,12 +837,75 @@ export default function Document() {
             }
         }
 
-        const mdText = lines.join('\n').replace(/\n{3,}/g, '\n\n').trim() + '\n';
-        const blob = new Blob([mdText], { type: 'text/markdown' });
-        const url = URL.createObjectURL(blob);
+        let mdText = lines.join('\n').replace(/\n{3,}/g, '\n\n').trim() + '\n';
+
+        // ── Collect image references and rewrite URLs ────────────────────────
+        // Matches:
+        //   /api/python-files/serve?name=FILENAME
+        //   /api/assets/serve?project=PROJECT&name=FILENAME
+        //   /api/assets/serve?name=FILENAME&project=PROJECT  (any param order)
+        const imgRegex = /!\[([^\]]*)\]\((\/api\/(?:python-files|assets)\/serve\?[^)]+)\)/g;
+
+        /**
+         * Extract just the filename from either API URL form.
+         * Returns { filename, fetchUrl } or null if not a recognised pattern.
+         */
+        const parseImageUrl = (rawUrl) => {
+            try {
+                // Build a full URL so URLSearchParams can parse query string
+                const full = rawUrl.startsWith('http') ? rawUrl : `http://x${rawUrl}`;
+                const u = new URL(full);
+                const name = u.searchParams.get('name');
+                if (!name) return null;
+                return { filename: decodeURIComponent(name), fetchUrl: rawUrl };
+            } catch (_e) {
+                return null;
+            }
+        };
+
+        const imageFiles = new Map(); // filename -> blob
+        const imageUrlMap = new Map(); // rawUrl -> filename  (for rewrite step)
+
+        const allMatches = [...mdText.matchAll(imgRegex)];
+        // Deduplicate by raw URL so each unique URL is fetched only once
+        const uniqueUrls = [...new Set(allMatches.map(m => m[2]))];
+
+        // Fetch all referenced images in parallel
+        await Promise.all(uniqueUrls.map(async (rawUrl) => {
+            const parsed = parseImageUrl(rawUrl);
+            if (!parsed) return;
+            const { filename, fetchUrl } = parsed;
+            imageUrlMap.set(rawUrl, filename);
+            if (imageFiles.has(filename)) return; // already fetched under this name
+            try {
+                const res = await authenticatedFetch(apiUrl(fetchUrl));
+                if (res.ok) {
+                    imageFiles.set(filename, await res.blob());
+                }
+            } catch (err) {
+                console.warn(`Could not fetch image: ${filename}`, err);
+            }
+        }));
+
+        // Rewrite URLs: /api/…/serve?…  →  FILENAME
+        mdText = mdText.replace(imgRegex, (_, alt, rawUrl) => {
+            const filename = imageUrlMap.get(rawUrl) ?? rawUrl;
+            return `![${alt}](${filename})`;
+        });
+
+        // ── Build ZIP ────────────────────────────────────────────────────────
+        const zip = new JSZip();
+        const baseName = sheetName || 'document';
+        zip.file(`${baseName}.md`, mdText);
+        imageFiles.forEach((blob, filename) => {
+            zip.file(filename, blob);
+        });
+
+        const zipBlob = await zip.generateAsync({ type: 'blob' });
+        const url = URL.createObjectURL(zipBlob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = (sheetName || 'document') + '.md';
+        a.download = `${baseName}.zip`;
         document.body.appendChild(a);
         a.click();
         a.remove();
@@ -1363,7 +1473,7 @@ export default function Document() {
                             ));
                         }
                     } else if (msg.type === 'SELECTION_SHARED') {
-                        const { Rows, Cols, sheet_name, values, scripts, cellTypes, optionsArray, optionsRangeArray, optionSelectedArray, rangeText } = msg.payload || {};
+                        const { Rows, Cols, sheet_name, values, scripts, cellTypes, optionsArray, optionsRangeArray, optionSelectedArray, aiPromptsArray, rangeText } = msg.payload || {};
                         if (Rows && Cols && Array.isArray(values)) {
                             setCopiedBlock({ 
                                 Rows, 
@@ -1374,6 +1484,7 @@ export default function Document() {
                                 optionsArray: Array.isArray(optionsArray) ? optionsArray : undefined,
                                 optionsRangeArray: Array.isArray(optionsRangeArray) ? optionsRangeArray : undefined,
                                 optionSelectedArray: Array.isArray(optionSelectedArray) ? optionSelectedArray : undefined,
+                                aiPromptsArray: Array.isArray(aiPromptsArray) ? aiPromptsArray : undefined,
                                 rangeText,
                             }); 
                         }
@@ -1580,6 +1691,7 @@ export default function Document() {
             case 'cell_script': return `Script ${entry.col}${entry.row}`;
             case 'paste': return 'Paste';
             case 'option_selection': return `Option ${entry.col}${entry.row}`;
+            case 'ai_prompt': return `AI Prompt ${entry.col}${entry.row}`;
             default: return entry.type;
         }
     };
@@ -1613,6 +1725,7 @@ export default function Document() {
                         options: ch.oldOptions ?? [],
                         options_range: ch.oldOptionsRange ?? '',
                         option_selected: ch.oldOptionSelected ?? [],
+                        ai_prompt: ch.oldAiPrompt ?? '',
                         user: username 
                     };
                 }
@@ -1641,6 +1754,14 @@ export default function Document() {
                     }
                     // Send value update
                     ws.current.send(JSON.stringify({ type: 'UPDATE_CELL', sheet_name: id, payload: { row: String(ch.row), col: String(ch.col), value: ch.oldValue, user: username } }));
+                    // Restore AI prompt
+                    if (ch.oldAiPrompt !== undefined) {
+                        ws.current.send(JSON.stringify({
+                            type: 'UPDATE_AI_PROMPT',
+                            sheet_name: id,
+                            payload: { row: String(ch.row), col: String(ch.col), prompt: ch.oldAiPrompt, user: username }
+                        }));
+                    }
                 }
             }
             setRedoStack(prev => [...prev, last]);
@@ -1678,6 +1799,27 @@ export default function Document() {
             }
             setRedoStack(prev => [...prev, last]);
             setUndoStack(prev => prev.slice(0, -1));
+        } else if (last.type === 'ai_prompt') {
+            const { row, col, oldValue } = last;
+            // Restore old prompt in local data state
+            setData(prev => ({
+                ...prev,
+                [`${row}-${col}`]: {
+                    ...(prev[`${row}-${col}`] || {}),
+                    ai_prompt: oldValue,
+                    user: username,
+                }
+            }));
+            // Send to server
+            if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+                ws.current.send(JSON.stringify({
+                    type: 'UPDATE_AI_PROMPT',
+                    sheet_name: id,
+                    payload: { row: String(row), col: String(col), prompt: oldValue, user: username }
+                }));
+            }
+            setRedoStack(prev => [...prev, last]);
+            setUndoStack(prev => prev.slice(0, -1));
         }
     };
 
@@ -1707,6 +1849,7 @@ export default function Document() {
                         options: ch.newOptions ?? [],
                         options_range: ch.newOptionsRange ?? '',
                         option_selected: ch.newOptionSelected ?? [],
+                        ai_prompt: ch.newAiPrompt ?? '',
                         user: username 
                     };
                 }
@@ -1735,6 +1878,14 @@ export default function Document() {
                     }
                     // Send value update
                     ws.current.send(JSON.stringify({ type: 'UPDATE_CELL', sheet_name: id, payload: { row: String(ch.row), col: String(ch.col), value: ch.newValue, user: username } }));
+                    // Reapply AI prompt
+                    if (ch.newAiPrompt !== undefined) {
+                        ws.current.send(JSON.stringify({
+                            type: 'UPDATE_AI_PROMPT',
+                            sheet_name: id,
+                            payload: { row: String(ch.row), col: String(ch.col), prompt: ch.newAiPrompt, user: username }
+                        }));
+                    }
                 }
             }
             setUndoStack(prev => [...prev, last]);
@@ -1766,6 +1917,27 @@ export default function Document() {
                     type: 'UPDATE_CELL_OPTIONS',
                     sheet_name: id,
                     payload: { row, col, value: newValue, option_selected: newSelected, user: username }
+                }));
+            }
+            setUndoStack(prev => [...prev, last]);
+            setRedoStack(prev => prev.slice(0, -1));
+        } else if (last.type === 'ai_prompt') {
+            const { row, col, newValue } = last;
+            // Reapply new prompt in local data state
+            setData(prev => ({
+                ...prev,
+                [`${row}-${col}`]: {
+                    ...(prev[`${row}-${col}`] || {}),
+                    ai_prompt: newValue,
+                    user: username,
+                }
+            }));
+            // Send to server
+            if (ws.current && ws.current.readyState === WebSocket.OPEN) {
+                ws.current.send(JSON.stringify({
+                    type: 'UPDATE_AI_PROMPT',
+                    sheet_name: id,
+                    payload: { row: String(row), col: String(col), prompt: newValue, user: username }
                 }));
             }
             setUndoStack(prev => [...prev, last]);

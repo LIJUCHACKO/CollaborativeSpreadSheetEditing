@@ -2,6 +2,7 @@ package main
 
 import (
 	"archive/zip"
+	"encoding/csv"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -2974,6 +2975,209 @@ func main() {
 		resolved := ResolveScriptRefs(body.Script, s, project, sheet, cellID)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"resolved": resolved})
+	})
+
+	// ── Public API: download activity log (audit log) of a sheet as CSV ─────
+	// No authentication required – usable with plain wget/curl.
+	//
+	// GET /api/public/sheet/audit?project=<project>&sheet_name=<name>
+	//
+	// If the project has a timeline, only entries AFTER the last timeline event
+	// are returned (i.e. changes since the last milestone). When there is no
+	// timeline, all audit entries are returned.
+	//
+	// CSV columns:
+	//   timestamp, user, action, details, row, col, row2, col2, old_value, new_value, change_reversed
+	http.HandleFunc("/api/public/sheet/audit", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		project := r.URL.Query().Get("project")
+		sheetName := r.URL.Query().Get("sheet_name")
+		if sheetName == "" {
+			http.Error(w, "sheet_name is required", http.StatusBadRequest)
+			return
+		}
+
+		sheet := globalSheetManager.GetSheetBy(sheetName, project)
+		if sheet == nil {
+			http.Error(w, "Sheet not found", http.StatusNotFound)
+			return
+		}
+
+		// ── Find the last timeline event timestamp for this project ──────────
+		// Timeline is stored at <dataDir>/<topProject>/timeline.json.
+		// We only need the timestamp field, so use a minimal struct.
+		var cutoff time.Time // zero → no cutoff (return all entries)
+		topProject := strings.SplitN(project, "/", 2)[0]
+		if topProject != "" {
+			type tlEntry struct {
+				Timestamp time.Time `json:"timestamp"`
+			}
+			tlPath := filepath.Join(dataDir, topProject, "timeline.json")
+			if tlData, err := os.ReadFile(tlPath); err == nil {
+				var tlEntries []tlEntry
+				if json.Unmarshal(tlData, &tlEntries) == nil && len(tlEntries) > 0 {
+					// Find the latest timestamp among all timeline entries
+					for _, te := range tlEntries {
+						if te.Timestamp.After(cutoff) {
+							cutoff = te.Timestamp
+						}
+					}
+				}
+			}
+			// If the file doesn't exist or can't be parsed, cutoff stays zero → all entries.
+		}
+
+		// ── Collect audit entries (optionally filtered) ──────────────────────
+		sheet.mu.RLock()
+		all := sheet.AuditLog
+		entries := make([]AuditEntry, 0, len(all))
+		for _, e := range all {
+			if cutoff.IsZero() || e.Timestamp.After(cutoff) {
+				entries = append(entries, e)
+			}
+		}
+		sheet.mu.RUnlock()
+
+		// ── Build response ───────────────────────────────────────────────────
+		projectPart := project
+		if projectPart == "" {
+			projectPart = "default"
+		}
+		filename := projectPart + "_" + sheetName + "_audit_" + time.Now().Format("20060102150405") + ".csv"
+
+		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+		w.Header().Set("Content-Disposition", "attachment; filename=\""+filename+"\"")
+
+		cw := csv.NewWriter(w)
+
+		// Header row
+		_ = cw.Write([]string{
+			"timestamp", "user", "action", "details",
+			"row", "col", "row2", "col2",
+			"old_value", "new_value", "change_reversed",
+		})
+
+		for _, e := range entries {
+			_ = cw.Write([]string{
+				e.Timestamp.Format(time.RFC3339),
+				e.User,
+				e.Action,
+				e.Details,
+				strconv.Itoa(e.Row1),
+				e.Col1,
+				strconv.Itoa(e.Row2),
+				e.Col2,
+				e.OldValue,
+				e.NewValue,
+				strconv.FormatBool(e.ChangeReversed),
+			})
+		}
+		cw.Flush()
+
+		if cutoff.IsZero() {
+			log.Printf("Public audit CSV: project=%s sheet=%s all entries=%d (no timeline)", project, sheetName, len(entries))
+		} else {
+			log.Printf("Public audit CSV: project=%s sheet=%s entries after %s = %d", project, sheetName, cutoff.Format(time.RFC3339), len(entries))
+		}
+	})
+
+	// ── Public API: download sheet data as CSV ────────────────────────────────
+	// No authentication required – usable with plain wget/curl.
+	//
+	// GET /api/public/sheet/csv?project=<project>&sheet_name=<name>
+	//
+	// The first row of the CSV contains the column labels (A, B, C, …).
+	// Subsequent rows correspond to sheet rows in order.
+	http.HandleFunc("/api/public/sheet/csv", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		project := r.URL.Query().Get("project")
+		sheetName := r.URL.Query().Get("sheet_name")
+		if sheetName == "" {
+			http.Error(w, "sheet_name is required", http.StatusBadRequest)
+			return
+		}
+
+		sheet := globalSheetManager.GetSheetBy(sheetName, project)
+		if sheet == nil {
+			http.Error(w, "Sheet not found", http.StatusNotFound)
+			return
+		}
+
+		projectPart := project
+		if projectPart == "" {
+			projectPart = "default"
+		}
+		filename := projectPart + "_" + sheetName + "_" + time.Now().Format("20060102150405") + ".csv"
+
+		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+		w.Header().Set("Content-Disposition", "attachment; filename=\""+filename+"\"")
+
+		cw := csv.NewWriter(w)
+
+		sheet.mu.RLock()
+
+		// Collect distinct column labels and find max row number.
+		colSet := make(map[string]struct{})
+		maxRow := 0
+		for rowKey, cols := range sheet.Data {
+			rowNum, _ := strconv.Atoi(rowKey)
+			if rowNum > maxRow {
+				maxRow = rowNum
+			}
+			for colKey := range cols {
+				colSet[colKey] = struct{}{}
+			}
+		}
+
+		// Sort column labels the same way the XLSX export does (lexicographic).
+		colLabels := make([]string, 0, len(colSet))
+		for c := range colSet {
+			colLabels = append(colLabels, c)
+		}
+		for i := 0; i < len(colLabels); i++ {
+			for j := i + 1; j < len(colLabels); j++ {
+				if colLabels[j] < colLabels[i] {
+					colLabels[i], colLabels[j] = colLabels[j], colLabels[i]
+				}
+			}
+		}
+
+		// Header row
+		//_ = cw.Write(colLabels)
+
+		// Data rows
+		for row := 1; row <= maxRow; row++ {
+			rowKey := strconv.Itoa(row)
+			cols := sheet.Data[rowKey] // nil if row is empty
+			record := make([]string, len(colLabels))
+			for i, colLabel := range colLabels {
+				if cols != nil {
+					record[i] = cols[colLabel].Value
+				}
+			}
+			_ = cw.Write(record)
+		}
+
+		sheet.mu.RUnlock()
+		cw.Flush()
+
+		log.Printf("Public CSV download: project=%s sheet=%s rows=%d cols=%d", project, sheetName, maxRow, len(colLabels))
 	})
 
 	// Simple health check
