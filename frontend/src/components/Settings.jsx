@@ -2,7 +2,6 @@ import React, { useEffect, useState } from 'react';
 import { useNavigate, useParams, useLocation } from 'react-router-dom';
 import { isSessionValid, clearAuth, getUsername, authenticatedFetch, apiUrl, isAdmin } from '../utils/auth';
 import { ArrowLeft, Settings as SettingsIcon, User, Save, Lock } from 'lucide-react';
-import 'bootstrap/dist/css/bootstrap.min.css';
 
 
 export default function Settings() {

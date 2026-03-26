@@ -57,8 +57,9 @@ type Cell struct {
 	AIPrompt string `json:"ai_prompt,omitempty"` // prompt template with {{A1}} style references, processed by LLM
 
 	/* Script associated elements*/
-	Script       string `json:"script,omitempty"`        //python script
-	ScriptOutput string `json:"script_output,omitempty"` //raw output of the script is stored
+	Script             string `json:"script,omitempty"`                //python script
+	ScriptOutput       string `json:"script_output,omitempty"`         //raw output of the script is stored
+	ShowScriptAsOutput bool   `json:"show_script_as_output,omitempty"` //when script will not be executed, instead script is self will be copied to value (after replacing references)
 
 	/*if output is a matrix and if the dimension matches the Spans. element[0]0] will be written in Value field of current cell. And remaining elements result will be written over Value field of adjacent cells depending on row and column offset*/
 	ScriptOutput_RowSpan int `json:"script_output_row_span,omitempty"`

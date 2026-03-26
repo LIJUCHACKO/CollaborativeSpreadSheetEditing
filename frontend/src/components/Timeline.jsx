@@ -1,7 +1,6 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { ArrowLeft, Plus, Save, X, Edit2, Trash2, Clock, User, LogOut, Calendar } from 'lucide-react';
-import 'bootstrap/dist/css/bootstrap.min.css';
 import { isSessionValid, clearAuth, authenticatedFetch, getUsername, apiUrl } from '../utils/auth';
 
 export default function Timeline() {

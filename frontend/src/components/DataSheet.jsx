@@ -23,7 +23,6 @@ import { Lock, Code, ChevronDown, Trash2, Plus, Scissors, ClipboardPaste, MoreVe
 import { isSessionValid, clearAuth, getUsername, authenticatedFetch, apiUrl } from '../utils/auth';
 import ScriptEditorPanel from './ScriptEditorPanel';
 import AIPromptEditorPanel from './AIPromptEditorPanel';
-import 'bootstrap/dist/css/bootstrap.min.css';
 export default function DataSheet() {
     const navigate = useNavigate();
     const location = useLocation();
@@ -587,10 +586,13 @@ export default function DataSheet() {
     const [scriptPopup, setScriptPopup] = useState({ visible: false, row: null, col: null });
     const [scriptRowSpan, setScriptRowSpan] = useState(1);
     const [scriptColSpan, setScriptColSpan] = useState(1);
+    const [scriptShowAsOutput, setScriptShowAsOutput] = useState(false);
     const openScriptPopup = (row, col) => {
         if (!row || !col) return;
         // Close other popups first
         setShowCellTypeDialog(false);
+        setShowAIPromptDialog(false);
+        setAIPromptDialogCell(null);
         setContextMenu({ visible: false, x: 0, y: 0, cell: null });
         const key = `${row}-${col}`;
         const existingScript = (data[key]?.script ?? '').toString();
@@ -600,6 +602,7 @@ export default function DataSheet() {
         const existingColSpan = parseInt(data[key]?.script_output_col_span ?? 1, 10) || 1;
         setScriptRowSpan(existingRowSpan);
         setScriptColSpan(existingColSpan);
+        setScriptShowAsOutput(!!data[key]?.show_script_as_output);
         setScriptPopup({ visible: true, row, col });
     };
     const closeScriptPopup = () => setScriptPopup({ visible: false, row: null, col: null });
@@ -745,6 +748,8 @@ export default function DataSheet() {
         setAIPromptDialogCell({ row, col });
         setAIPromptText(originalPrompt);
         setShowAIPromptDialog(true);
+        closeScriptPopup();
+        closeOptionDialog();
     };
 
     const saveAIPrompt = () => {
@@ -871,7 +876,9 @@ export default function DataSheet() {
         const key = `${row}-${col}`;
         const cell = data[key] || {};
         if (cell.cell_type !== 2 && cell.cell_type !== 3) return; // Only for ComboBox(2) and MultipleSelection(3)
-        
+        setShowAIPromptDialog(false);
+        setAIPromptDialogCell(null);
+        closeScriptPopup();
         const options = cell.options || [];
         const currentSelected = cell.option_selected || [];
         
@@ -982,6 +989,7 @@ export default function DataSheet() {
     const closeAllPopups = () => {
         setContextMenu({ visible: false, x: 0, y: 0, cell: null });
         setShowCellTypeDialog(false);
+        setShowAIPromptDialog(false);
         closeScriptPopup();
         closeOptionDialog();
     }
@@ -1346,7 +1354,7 @@ export default function DataSheet() {
         editingOriginalValueRef.current = null;
     };
 
-    const handleScriptChange = (r, c, script, rowSpan = 1, colSpan = 1) => {
+    const handleScriptChange = (r, c, script, rowSpan = 1, colSpan = 1, showAsOutput = false) => {
         //if (scriptModified === 0) { return; } //non-blocking for scripts
         const key = `${r}-${c}`;
         const oldScript = (editingOriginalScriptRef.current ?? (data[key]?.script ?? '')).toString();
@@ -1361,7 +1369,7 @@ export default function DataSheet() {
             const msg = {
                 type: 'UPDATE_CELL_SCRIPT',
                 sheet_name: id,
-                payload: { row: String(r), col: String(c), script, user: username, row_span: Number(rowSpan) || 1, col_span: Number(colSpan) || 1 }
+                payload: { row: String(r), col: String(c), script, user: username, row_span: Number(rowSpan) || 1, col_span: Number(colSpan) || 1, show_script_as_output: !!showAsOutput }
             };
             ws.current.send(JSON.stringify(msg));
         }
@@ -2876,6 +2884,8 @@ export default function DataSheet() {
                         setScriptRowSpan={setScriptRowSpan}
                         scriptColSpan={scriptColSpan}
                         setScriptColSpan={setScriptColSpan}
+                        scriptShowAsOutput={scriptShowAsOutput}
+                        setScriptShowAsOutput={setScriptShowAsOutput}
                         canEdit={canEdit}
                         isOwner={owner === username}
                         isLocked={scriptPopup.row && scriptPopup.col ? (data[`${scriptPopup.row}-${scriptPopup.col}`]?.locked === true) : false}
@@ -2886,7 +2896,7 @@ export default function DataSheet() {
                             if (!canEdit || isLocked || owner !== username) { closeScriptPopup(); return; }
                             if (!row || !col) { closeScriptPopup(); return; }
                             updateCellScriptState(row, col, scriptText, username, scriptRowSpan, scriptColSpan);
-                            handleScriptChange(row, col, scriptText, scriptRowSpan, scriptColSpan);
+                            handleScriptChange(row, col, scriptText, scriptRowSpan, scriptColSpan, scriptShowAsOutput);
                             closeScriptPopup();
                         }}
                         onClose={() => { closeScriptPopup(); }}

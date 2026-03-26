@@ -2,7 +2,6 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { authenticatedFetch, isSessionValid, clearAuth, getUsername, apiUrl, isAdmin, canCreateProject } from '../utils/auth';
 import { Copy, ClipboardPaste, Edit2, Trash2, Search, User, LogOut, Folder, Lock, X, ShieldCheck, AlertTriangle, CheckCircle } from 'lucide-react';
-import 'bootstrap/dist/css/bootstrap.min.css';
 
 // Shared clipboard helpers using localStorage
 function getClipboard() {

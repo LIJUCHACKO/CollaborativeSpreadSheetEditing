@@ -2,7 +2,6 @@ import React, { useEffect, useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { authenticatedFetch, isSessionValid, clearAuth, getUsername, isAdmin, apiUrl } from '../utils/auth';
 import { ShieldCheck, KeyRound, ToggleLeft, ToggleRight, LogOut, ArrowLeft, RefreshCw, Download, AlertTriangle, CheckCircle } from 'lucide-react';
-import 'bootstrap/dist/css/bootstrap.min.css';
 
 export default function Admin() {
   const navigate = useNavigate();

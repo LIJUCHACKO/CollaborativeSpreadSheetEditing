@@ -992,6 +992,7 @@ func ExecuteCellScript(projectName, sheetName, row, col string) {
 		return
 	}
 	script := cur.Script
+	skipExecution := cur.ShowScriptAsOutput
 	rSpan := cur.ScriptOutput_RowSpan
 	cSpan := cur.ScriptOutput_ColSpan
 	cellID := cur.CellID
@@ -1022,6 +1023,7 @@ func ExecuteCellScript(projectName, sheetName, row, col string) {
 	globalSheetManager.ScriptsExecuted = append(globalSheetManager.ScriptsExecuted, ident)
 	globalSheetManager.ScriptsExecutedMu.Unlock()
 	//fmt.Println("executing cell script:", ident)
+
 	if strings.TrimSpace(script) == "" {
 		s.mu.Lock()
 		cur := s.Data[row][col]
@@ -1037,13 +1039,26 @@ func ExecuteCellScript(projectName, sheetName, row, col string) {
 	// Execute the script and update the cell value.
 	// Replace all {{...}} cell/range reference tags with their Python-literal values.
 	script = ResolveScriptRefs(script, s, projectName, sheetName, cellID)
-
+	if skipExecution {
+		s.mu.Lock()
+		cur := s.Data[row][col]
+		cur.ScriptOutput_RowSpan = 1
+		cur.ScriptOutput_ColSpan = 1
+		cur.ScriptOutput = script
+		cur.Value = script
+		cur.Value_FromNonSelfScript = script
+		s.Data[row][col] = cur
+		s.mu.Unlock()
+		globalSheetManager.SaveSheet(s)
+		WriteScriptOutputToCells(projectName, sheetName, row, col, true, false)
+		return
+	}
 	cmd, err := pythonCmd("-c", script)
 	//fmt.Println("Executing script ", script)
 	if err != nil {
 		s.mu.Lock()
 		cur := s.Data[row][col]
-		cur.Value = "Error: " + err.Error()
+		cur.ScriptOutput = "Error: " + err.Error()
 		cur.ScriptOutput_RowSpan = 1
 		cur.ScriptOutput_ColSpan = 1
 		s.Data[row][col] = cur

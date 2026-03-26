@@ -10,11 +10,11 @@ marked.setOptions({
     gfm: true,
 });
 
-// Load MathJax from CDN once per page lifetime
+// Load MathJax from npm once per page lifetime
 function ensureMathJax() {
     if (typeof window === 'undefined') return;
-    if (window.MathJax) return; // already loaded or loading
-    // Configure MathJax before the script loads
+    if (window.MathJax && window.MathJax.typesetPromise) return; // already loaded
+    // Configure MathJax before loading
     window.MathJax = {
         tex: {
             inlineMath: [['$', '$'], ['\\(', '\\)']],
@@ -27,11 +27,7 @@ function ensureMathJax() {
         },
         startup: { typeset: false },
     };
-    const script = document.createElement('script');
-    script.src = 'https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js';
-    script.async = true;
-    script.id = 'mathjax-cdn-script';
-    document.head.appendChild(script);
+    import('mathjax/es5/tex-chtml').catch(() => {});
 }
 
 export default function MarkdownEditorPanel({ cellRow, cellCol, value, onSave, onClose, readOnly, project }) {

@@ -306,19 +306,20 @@ func (h *Hub) run() {
 					continue
 				}
 				var update struct {
-					Row     string `json:"row"`
-					Col     string `json:"col"`
-					Script  string `json:"script"`
-					User    string `json:"user"`
-					Revert  bool   `json:"revert,omitempty"`
-					RowSpan int    `json:"row_span,omitempty"`
-					ColSpan int    `json:"col_span,omitempty"`
+					Row              string `json:"row"`
+					Col              string `json:"col"`
+					Script           string `json:"script"`
+					User             string `json:"user"`
+					Revert           bool   `json:"revert,omitempty"`
+					RowSpan          int    `json:"row_span,omitempty"`
+					ColSpan          int    `json:"col_span,omitempty"`
+					ShowScriptAsOutput bool `json:"show_script_as_output,omitempty"`
 				}
 				//println("Received UPDATE_CELL_SCRIPT message")
 				if err := json.Unmarshal(message.Payload, &update); err == nil {
 					sheet := globalSheetManager.GetSheetBy(message.SheetName, message.Project)
 					if sheet != nil {
-						sheet.SetCellScript(update.Row, update.Col, update.Script, message.User, update.Revert, update.RowSpan, update.ColSpan)
+						sheet.SetCellScript(update.Row, update.Col, update.Script, message.User, update.Revert, update.RowSpan, update.ColSpan, update.ShowScriptAsOutput)
 						//println("Updated cell script to:")
 						//println(string(update.Script))
 						//println("for cell", update.Row, update.Col)

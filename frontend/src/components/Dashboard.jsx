@@ -18,7 +18,6 @@ import {
     AlertTriangle,
     CheckCircle
 } from 'lucide-react';
-import 'bootstrap/dist/css/bootstrap.min.css';
 import { isSessionValid, clearAuth, authenticatedFetch, getUsername } from '../utils/auth';
 
 // Shared clipboard helpers using localStorage

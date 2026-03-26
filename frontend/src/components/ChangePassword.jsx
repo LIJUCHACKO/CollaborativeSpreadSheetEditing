@@ -2,7 +2,6 @@ import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { authenticatedFetch, isSessionValid, clearAuth, getUsername, apiUrl } from '../utils/auth';
 import { ArrowLeft, Lock, Save, User } from 'lucide-react';
-import 'bootstrap/dist/css/bootstrap.min.css';
 
 export default function ChangePassword() {
   const navigate = useNavigate();

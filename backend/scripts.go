@@ -262,7 +262,7 @@ func (sm *SheetManager) QueueRowColUpdate(projectName, sheetName string) {
 	})
 }
 
-func (s *Sheet) SetCellScript(row, col, script, user string, reverted bool, rowSpan int, colSpan int) {
+func (s *Sheet) SetCellScript(row, col, script, user string, reverted bool, rowSpan int, colSpan int, showAsOutput bool) {
 	s.mu.Lock()
 	// Only sheet owner may modify scripts
 	if user != s.Owner {
@@ -336,6 +336,7 @@ func (s *Sheet) SetCellScript(row, col, script, user string, reverted bool, rowS
 
 	updated.ScriptOutput_RowSpan = rowSpan
 	updated.ScriptOutput_ColSpan = colSpan
+	updated.ShowScriptAsOutput = showAsOutput
 	s.Data[row][col] = updated
 
 	// Update script dependencies

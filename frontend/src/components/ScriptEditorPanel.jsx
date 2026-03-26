@@ -140,6 +140,8 @@ export default function ScriptEditorPanel({
     setScriptRowSpan,
     scriptColSpan,
     setScriptColSpan,
+    scriptShowAsOutput,
+    setScriptShowAsOutput,
     canEdit,
     isOwner,
     isLocked,
@@ -577,6 +579,20 @@ export default function ScriptEditorPanel({
                             style={{ accentColor: '#1a7a4c' }}
                         />
                         Line #
+                    </label>
+                    <label
+                        className="d-flex align-items-center gap-1 small"
+                        style={{ color: scriptShowAsOutput ? '#f0a04b' : '#aaa', cursor: canEdit ? 'pointer' : 'not-allowed', fontSize: '0.75rem' }}
+                        title="When checked, the script is NOT executed. Instead the script text (with {{refs}} resolved) is copied directly to the cell value."
+                    >
+                        <input
+                            type="checkbox"
+                            checked={!!scriptShowAsOutput}
+                            onChange={(e) => setScriptShowAsOutput && setScriptShowAsOutput(e.target.checked)}
+                            disabled={!canEdit}
+                            style={{ accentColor: '#f0a04b' }}
+                        />
+                        Skip Execution
                     </label>
                     <div className="d-flex align-items-center gap-1 ms-auto" style={{ fontSize: '0.7rem', color: '#666' }}>
                         <span title="Tab inserts 4 spaces. Shift+Tab dedents. Ctrl+/ toggles comment.">
