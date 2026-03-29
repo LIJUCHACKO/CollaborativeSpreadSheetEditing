@@ -10,11 +10,11 @@ marked.setOptions({
     gfm: true,
 });
 
-// Load MathJax from npm once per page lifetime
+// Load MathJax from mathjax-full npm package once per page lifetime
 function ensureMathJax() {
     if (typeof window === 'undefined') return;
     if (window.MathJax && window.MathJax.typesetPromise) return; // already loaded
-    // Configure MathJax before loading
+    // Configure MathJax before loading — point font URLs to mathjax-full npm package
     window.MathJax = {
         tex: {
             inlineMath: [['$', '$'], ['\\(', '\\)']],
@@ -22,12 +22,23 @@ function ensureMathJax() {
             processEscapes: true,
             packages: { '[+]': ['ams', 'boldsymbol'] },
         },
+        chtml: {
+            // Resolve font woff files from the mathjax-full npm package.
+            // Vite will resolve node_modules paths in CSS @font-face; here we
+            // tell MathJax's CHTML output to use the same directory so it
+            // loads MathJax_Math-Italic.woff, MathJax_Main-Regular.woff, etc.
+            fontURL: new URL(
+                'mathjax-full/es5/output/chtml/fonts/woff-v2',
+                import.meta.url,
+            ).href,
+        },
         options: {
             skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre'],
         },
         startup: { typeset: false },
     };
-    import('mathjax/es5/tex-chtml').catch(() => {});
+    // Import the tex-chtml bundle from mathjax-full (includes all fonts & CHTML output)
+    import('mathjax-full/es5/tex-chtml').catch(() => {});
 }
 
 export default function MarkdownEditorPanel({ cellRow, cellCol, value, onSave, onClose, readOnly, project }) {

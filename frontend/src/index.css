@@ -2,6 +2,74 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ── MathJax fonts (from mathjax-full npm package) ─────────────────────────── */
+@font-face {
+    font-family: 'MathJax_Math';
+    font-style: italic;
+    font-weight: normal;
+    src: url('mathjax-full/es5/output/chtml/fonts/woff-v2/MathJax_Math-Italic.woff') format('woff');
+}
+@font-face {
+    font-family: 'MathJax_Math';
+    font-style: normal;
+    font-weight: normal;
+    src: url('mathjax-full/es5/output/chtml/fonts/woff-v2/MathJax_Math-Regular.woff') format('woff');
+}
+@font-face {
+    font-family: 'MathJax_Main';
+    font-style: normal;
+    font-weight: normal;
+    src: url('mathjax-full/es5/output/chtml/fonts/woff-v2/MathJax_Main-Regular.woff') format('woff');
+}
+@font-face {
+    font-family: 'MathJax_Main';
+    font-style: normal;
+    font-weight: bold;
+    src: url('mathjax-full/es5/output/chtml/fonts/woff-v2/MathJax_Main-Bold.woff') format('woff');
+}
+@font-face {
+    font-family: 'MathJax_Main';
+    font-style: italic;
+    font-weight: normal;
+    src: url('mathjax-full/es5/output/chtml/fonts/woff-v2/MathJax_Main-Italic.woff') format('woff');
+}
+@font-face {
+    font-family: 'MathJax_AMS';
+    font-style: normal;
+    font-weight: normal;
+    src: url('mathjax-full/es5/output/chtml/fonts/woff-v2/MathJax_AMS-Regular.woff') format('woff');
+}
+@font-face {
+    font-family: 'MathJax_Script';
+    font-style: normal;
+    font-weight: normal;
+    src: url('mathjax-full/es5/output/chtml/fonts/woff-v2/MathJax_Script-Regular.woff') format('woff');
+}
+@font-face {
+    font-family: 'MathJax_Fraktur';
+    font-style: normal;
+    font-weight: normal;
+    src: url('mathjax-full/es5/output/chtml/fonts/woff-v2/MathJax_Fraktur-Regular.woff') format('woff');
+}
+@font-face {
+    font-family: 'MathJax_Fraktur';
+    font-style: normal;
+    font-weight: bold;
+    src: url('mathjax-full/es5/output/chtml/fonts/woff-v2/MathJax_Fraktur-Bold.woff') format('woff');
+}
+@font-face {
+    font-family: 'MathJax_SansSerif';
+    font-style: normal;
+    font-weight: normal;
+    src: url('mathjax-full/es5/output/chtml/fonts/woff-v2/MathJax_SansSerif-Regular.woff') format('woff');
+}
+@font-face {
+    font-family: 'MathJax_Typewriter';
+    font-style: normal;
+    font-weight: normal;
+    src: url('mathjax-full/es5/output/chtml/fonts/woff-v2/MathJax_Typewriter-Regular.woff') format('woff');
+}
+
 /* Markdown Preview Styles */
 .markdown-preview {
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, sans-serif;

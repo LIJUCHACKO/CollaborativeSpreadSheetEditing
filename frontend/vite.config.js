@@ -10,6 +10,8 @@ const backendWs  = backendHttp.replace(/^http/, 'ws');
 
 export default defineConfig({
   plugins: [react()],
+  // Treat .woff font files from node_modules as static assets
+  assetsInclude: ['**/*.woff', '**/*.woff2'],
   server: {
     host: '0.0.0.0',  // accept connections from LAN, not just localhost
     port: 5175,
