@@ -10,6 +10,7 @@ import Settings from './components/Settings';
 import ChangePassword from './components/ChangePassword';
 import Admin from './components/Admin';
 import Timeline from './components/Timeline';
+import Help from './components/Help';
 
 function App() {
   return (
@@ -24,6 +25,7 @@ function App() {
         <Route path="/change-password" element={<ChangePassword />} />
         <Route path="/admin" element={<Admin />} />
         <Route path="/timeline/:project" element={<Timeline />} />
+        <Route path="/help" element={<Help />} />
       </Routes>
     </Router>
   );

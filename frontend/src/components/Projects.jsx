@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { authenticatedFetch, isSessionValid, clearAuth, getUsername, apiUrl, isAdmin, canCreateProject } from '../utils/auth';
-import { Copy, ClipboardPaste, Edit2, Trash2, Search, User, LogOut, Folder, Lock, X, ShieldCheck, AlertTriangle, CheckCircle } from 'lucide-react';
+import { Copy, ClipboardPaste, Edit2, Trash2, Search, User, LogOut, Folder, Lock, X, ShieldCheck, AlertTriangle, CheckCircle, HelpCircle } from 'lucide-react';
 
 // Shared clipboard helpers using localStorage
 function getClipboard() {
@@ -313,6 +313,9 @@ export default function Projects() {
             )}
             <button onClick={() => navigate('/change-password')} className="btn btn-outline-primary btn-sm d-flex align-items-center me-2" title="Change Password">
               <Lock className="me-1" /> Change Password
+            </button>
+            <button onClick={() => navigate('/help')} className="btn btn-outline-secondary btn-sm d-flex align-items-center me-2" title="Help & Documentation">
+              <HelpCircle size={14} className="me-1" /> Help
             </button>
             <button onClick={handleLogout} className="btn btn-outline-danger btn-sm d-flex align-items-center" title="Logout">
               <LogOut className="me-1" /> Logout

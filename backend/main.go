@@ -1887,112 +1887,6 @@ func main() {
 		json.NewEncoder(w).Encode(sheet.SnapshotForClient())
 	})
 
-	// Get the value of a specific cell in a sheet
-	//usage
-	//curl -s -H "Authorization: <token>" \
-	// "http://localhost:8082/api/sheet/cell?sheet_name=20260122223748&project=project32/new2&row=1&col=A"
-	//curl -s -H "Authorization: <token>" \
-	// "http://localhost:8082/api/sheet/cell?sheet_name=20260122223748&project=project32/new2&cell=A1"
-	//# With jq (recommended)
-	//TOKEN=$(curl -s -X POST http://localhost:8082/api/login \
-	// -H "Content-Type: application/json" \
-	//  -d '{"username":"alice","password":"secret"}' | jq -r '.token')
-	// # Without jq (basic grep/sed fallback)
-	//TOKEN=$(curl -s -X POST http://localhost:8082/api/login \
-	// -H "Content-Type: application/json" \
-	//  -d '{"username":"alice","password":"secret"}' | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
-	//this function is not tested
-	http.HandleFunc("/api/sheet/cell", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-		if r.Method != http.MethodGet {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		token := r.Header.Get("Authorization")
-		_, err := globalUserManager.ValidateToken(token)
-		if err != nil {
-			http.Error(w, "Unauthorized: "+err.Error(), http.StatusUnauthorized)
-			return
-		}
-
-		sheetName := r.URL.Query().Get("sheet_name")
-		project := r.URL.Query().Get("project")
-		row := r.URL.Query().Get("row")
-		col := r.URL.Query().Get("col")
-		cell := strings.TrimSpace(r.URL.Query().Get("cell"))
-
-		if sheetName == "" {
-			http.Error(w, "sheet_name is required", http.StatusBadRequest)
-			return
-		}
-
-		// Allow either row+col or a combined cell like A5
-		if cell != "" {
-			// Parse leading letters as column and trailing digits as row
-			i := 0
-			for i < len(cell) {
-				ch := cell[i]
-				if (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') {
-					i++
-					continue
-				}
-				break
-			}
-			colPart := cell[:i]
-			rowPart := cell[i:]
-			if colPart == "" || rowPart == "" {
-				http.Error(w, "invalid cell format; expected like A5", http.StatusBadRequest)
-				return
-			}
-			// Validate row is numeric
-			if _, err := strconv.Atoi(rowPart); err != nil {
-				http.Error(w, "invalid row number in cell", http.StatusBadRequest)
-				return
-			}
-			col = strings.ToUpper(colPart)
-			row = rowPart
-		}
-
-		if row == "" || col == "" {
-			http.Error(w, "row and col (or cell) required", http.StatusBadRequest)
-			return
-		}
-		sheet := globalSheetManager.GetSheetBy(sheetName, project)
-		if sheet == nil {
-			http.Error(w, "Sheet not found", http.StatusNotFound)
-			return
-		}
-
-		var value string
-		exists := false
-		sheet.mu.RLock()
-		if rowMap, ok := sheet.Data[row]; ok {
-			if cell, ok := rowMap[col]; ok {
-				value = cell.Value
-				exists = true
-			}
-		}
-		sheet.mu.RUnlock()
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"sheet_name": sheetName,
-			"project":    project,
-			"row":        row,
-			"col":        col,
-			"value":      value,
-			"exists":     exists,
-		})
-	})
-
 	// List all usernames (for selection)
 	http.HandleFunc("/api/users", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -3178,6 +3072,263 @@ func main() {
 		cw.Flush()
 
 		log.Printf("Public CSV download: project=%s sheet=%s rows=%d cols=%d", project, sheetName, maxRow, len(colLabels))
+	})
+
+	// ── Public API: export a Document sheet as Markdown ─────────────────────
+	// No authentication required – usable with plain wget/curl.
+	//
+	// GET /api/public/sheet/markdown?project=<project>&sheet_name=<name>
+	//
+	// Only works for sheets whose SheetType starts with "document".
+	// The document tree hierarchy is preserved: each row becomes a Markdown
+	// heading whose level is derived from its depth in the parent tree.
+	// Column A  = section number  (prepended to the heading if non-empty)
+	// Column B  = title           (the heading text)
+	// Column C  = content         (rendered as Markdown body beneath the heading)
+	// All other columns are appended as a pipe-table row after column C.
+	http.HandleFunc("/api/public/sheet/markdown", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		project := r.URL.Query().Get("project")
+		sheetName := r.URL.Query().Get("sheet_name")
+		if sheetName == "" {
+			http.Error(w, "sheet_name is required", http.StatusBadRequest)
+			return
+		}
+
+		sheet := globalSheetManager.GetSheetBy(sheetName, project)
+		if sheet == nil {
+			http.Error(w, "Sheet not found", http.StatusNotFound)
+			return
+		}
+
+		sheet.mu.RLock()
+		sheetType := sheet.SheetType
+		sheetData := sheet.Data
+		rowParents := sheet.RowParents
+		sheet.mu.RUnlock()
+
+		if !strings.HasPrefix(sheetType, "document") {
+			http.Error(w, "Sheet is not a document type", http.StatusBadRequest)
+			return
+		}
+
+		// ── Collect non-empty rows and find max row ──────────────────────────
+		maxRow := 0
+		for rowKey := range sheetData {
+			n, err := strconv.Atoi(rowKey)
+			if err == nil && n > maxRow {
+				maxRow = n
+			}
+		}
+
+		// ── Build ordered list of rows (skip row 1 which is the header) ──────
+		// We honour the parent tree: root rows first, then children in row order.
+		type rowNode struct {
+			row      int
+			children []int
+		}
+		nodeMap := map[int]*rowNode{}
+		for i := 2; i <= maxRow; i++ {
+			nodeMap[i] = &rowNode{row: i}
+		}
+		rootRows := []int{}
+		for i := 2; i <= maxRow; i++ {
+			parent := 0
+			if rowParents != nil {
+				parent = rowParents[strconv.Itoa(i)]
+			}
+			if parent == 0 || nodeMap[parent] == nil {
+				rootRows = append(rootRows, i)
+			} else {
+				nodeMap[parent].children = append(nodeMap[parent].children, i)
+			}
+		}
+
+		// ── Helper: get cell value ────────────────────────────────────────────
+		cellVal := func(row int, col string) string {
+			cols, ok := sheetData[strconv.Itoa(row)]
+			if !ok {
+				return ""
+			}
+			return cols[col].Value
+		}
+
+		// ── Collect all extra column labels (beyond A, B, C) ─────────────────
+		extraColSet := map[string]struct{}{}
+		for _, cols := range sheetData {
+			for col := range cols {
+				if col != "A" && col != "B" && col != "C" {
+					extraColSet[col] = struct{}{}
+				}
+			}
+		}
+		extraCols := make([]string, 0, len(extraColSet))
+		for c := range extraColSet {
+			extraCols = append(extraCols, c)
+		}
+		// Sort extra columns lexicographically
+		for i := 0; i < len(extraCols); i++ {
+			for j := i + 1; j < len(extraCols); j++ {
+				if extraCols[j] < extraCols[i] {
+					extraCols[i], extraCols[j] = extraCols[j], extraCols[i]
+				}
+			}
+		}
+
+		// ── Recursive markdown builder ────────────────────────────────────────
+		var sb strings.Builder
+
+		// Document title: use the sheet name
+		sb.WriteString("# ")
+		sb.WriteString(sheetName)
+		sb.WriteString("\n\n")
+
+		var writeRow func(rowNum int, depth int)
+		writeRow = func(rowNum int, depth int) {
+			sectionNo := cellVal(rowNum, "A")
+			title := cellVal(rowNum, "B")
+			content := cellVal(rowNum, "C")
+
+			// Skip completely empty rows
+			if sectionNo == "" && title == "" && content == "" {
+				// Check extra cols too
+				hasExtra := false
+				for _, ec := range extraCols {
+					if cellVal(rowNum, ec) != "" {
+						hasExtra = true
+						break
+					}
+				}
+				if !hasExtra {
+					// still recurse into children
+					node := nodeMap[rowNum]
+					if node != nil {
+						for _, child := range node.children {
+							writeRow(child, depth)
+						}
+					}
+					return
+				}
+			}
+
+			// Heading: level 2 at depth 0, deeper rows get deeper headings (capped at 6)
+			headingLevel := depth + 2
+			if headingLevel > 6 {
+				headingLevel = 6
+			}
+			headingPrefix := strings.Repeat("#", headingLevel)
+
+			// Build heading text
+			headingText := ""
+			if sectionNo != "" && title != "" {
+				headingText = title
+			} else if title != "" {
+				headingText = title
+			} else if sectionNo != "" {
+				headingText = sectionNo
+			}
+
+			if headingText != "" {
+				sb.WriteString(headingPrefix)
+				sb.WriteString(" ")
+				sb.WriteString(headingText)
+				sb.WriteString("\n\n")
+			}
+
+			// Content (column C) — output verbatim as markdown body
+			if content != "" {
+				sb.WriteString(content)
+				sb.WriteString("\n\n")
+			}
+			/*
+				// Extra columns — output as a simple two-column table (Column | Value)
+				if len(extraCols) > 0 {
+					hasAnyExtra := false
+					for _, ec := range extraCols {
+						if cellVal(rowNum, ec) != "" {
+							hasAnyExtra = true
+							break
+						}
+					}
+					if hasAnyExtra {
+						sb.WriteString("| Column | Value |\n|---|---|\n")
+						for _, ec := range extraCols {
+							v := cellVal(rowNum, ec)
+							if v != "" {
+								sb.WriteString("| ")
+								sb.WriteString(ec)
+								sb.WriteString(" | ")
+								// Escape pipe characters inside values
+								sb.WriteString(strings.ReplaceAll(v, "|", "\\|"))
+								sb.WriteString(" |\n")
+							}
+						}
+						sb.WriteString("\n")
+					}
+				}
+			*/
+			// Recurse into children
+			node := nodeMap[rowNum]
+			if node != nil {
+				for _, child := range node.children {
+					writeRow(child, depth+1)
+				}
+			}
+		}
+
+		for _, r := range rootRows {
+			writeRow(r, 0)
+		}
+
+		// ── Send response ─────────────────────────────────────────────────────
+		projectPart := project
+		if projectPart == "" {
+			projectPart = "default"
+		}
+		filename := projectPart + "_" + sheetName + "_" + time.Now().Format("20060102150405") + ".md"
+
+		w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+		w.Header().Set("Content-Disposition", "attachment; filename=\""+filename+"\"")
+		w.Write([]byte(sb.String()))
+
+		log.Printf("Public Markdown export: project=%s sheet=%s maxRow=%d", project, sheetName, maxRow)
+	})
+
+	// ── Public API: serve README.md as plain text ─────────────────────────────
+	// No authentication required. Used by the frontend Help/About page.
+	//
+	// GET /api/public/readme
+	http.HandleFunc("/api/public/readme", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		// README.md lives two levels above the backend binary (project root).
+		readmePath := filepath.Join("..", "README.md")
+		data, err := os.ReadFile(readmePath)
+		if err != nil {
+			// Try the directory where the binary was invoked from
+			readmePath = "README.md"
+			data, err = os.ReadFile(readmePath)
+		}
+		if err != nil {
+			http.Error(w, "README not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+		w.Write(data)
 	})
 
 	// Simple health check
